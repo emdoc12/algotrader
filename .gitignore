@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+engine/__pycache__/
+engine/**/__pycache__/
+engine/.venv/
+
+# Build output
+dist/
+
+# Database (local state — not shared)
+data.db
+*.db-journal
+
+# Environment / secrets
+.env
+engine/.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
