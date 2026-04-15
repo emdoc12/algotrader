@@ -1,0 +1,18 @@
+# Never bake credentials into the image
+engine/.env
+engine/data.db
+data.db
+data/
+
+# Build artifacts (rebuilt inside Docker)
+dist/
+node_modules/
+engine/.venv/
+engine/__pycache__/
+engine/**/__pycache__/
+**/*.pyc
+
+# Dev files
+.git/
+.gitignore
+*.log
