@@ -3,14 +3,18 @@ Engine — the main orchestrator.
 Polls the AlgoTrader API for enabled strategies, maps them to strategy
 classes, and schedules each on its configured scan interval.
 Also resets daily trade counts at midnight and handles graceful shutdown.
+
+Supports two platforms:
+  - tastytrade / tasty_crypto : uses Tastytrade SDK (Session + Account)
+  - kraken                    : uses KrakenSessionManager (24/7 spot crypto)
 """
 import asyncio
 import logging
 import signal
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 
 import api_client
-from config import LOG_LEVEL
+from config import LOG_LEVEL, TASTYTRADE_ENABLED, KRAKEN_ENABLED
 from session_manager import SessionManager
 from strategies import STRATEGY_MAP
 from strategies.base import BaseStrategy
@@ -22,24 +26,43 @@ logging.basicConfig(
 )
 logger = logging.getLogger("engine")
 
+# Platforms that use Kraken instead of Tastytrade
+KRAKEN_PLATFORMS = {"kraken"}
+TASTYTRADE_PLATFORMS = {"tastytrade", "tasty_crypto"}
+
 
 class AlgoEngine:
     def __init__(self):
-        self.session_mgr = SessionManager()
+        self.session_mgr = SessionManager() if TASTYTRADE_ENABLED else None
+        self._kraken = None
         self._tasks: list[asyncio.Task] = []
         self._instances: dict[int, BaseStrategy] = {}
         self._running = False
 
     async def start(self):
         self._running = True
-        await self.session_mgr.connect()
 
-        logger.info("AlgoTrader engine started. DRY_RUN=%s", __import__("config").DRY_RUN)
-        await api_client.post_log("info", "AlgoTrader Python engine started.")
+        # Connect Tastytrade
+        if TASTYTRADE_ENABLED and self.session_mgr:
+            await self.session_mgr.connect()
+            logger.info("Tastytrade session ready.")
+        else:
+            logger.warning("TT_USERNAME/TT_PASSWORD not set — Tastytrade disabled.")
 
-        # Start the strategy loader (polls API for enabled strategies)
+        # Connect Kraken
+        if KRAKEN_ENABLED:
+            from kraken_session_manager import KrakenSessionManager
+            self._kraken = KrakenSessionManager()
+            await self._kraken.connect()
+            logger.info("Kraken session ready.")
+        else:
+            logger.warning("KRAKEN_API_KEY/KRAKEN_API_SECRET not set — Kraken disabled.")
+
+        import config
+        logger.info("AlgoTrader engine started. DRY_RUN=%s", config.DRY_RUN)
+        await api_client.post_log("info", f"AlgoTrader engine started (DRY_RUN={config.DRY_RUN}).")
+
         loader = asyncio.create_task(self._strategy_loader())
-        # Start the midnight reset task
         resetter = asyncio.create_task(self._midnight_resetter())
         self._tasks = [loader, resetter]
 
@@ -52,7 +75,10 @@ class AlgoEngine:
         self._running = False
         for t in self._tasks:
             t.cancel()
-        await self.session_mgr.disconnect()
+        if self.session_mgr:
+            await self.session_mgr.disconnect()
+        if self._kraken:
+            await self._kraken.disconnect()
         logger.info("Engine stopped.")
         await api_client.post_log("info", "AlgoTrader Python engine stopped.")
 
@@ -85,32 +111,54 @@ class AlgoEngine:
                         continue  # already running
 
                     strategy_type = s.get("type", "")
+                    platform = s.get("platform", "tastytrade")
                     cls = STRATEGY_MAP.get(strategy_type)
                     if not cls:
                         logger.warning("Unknown strategy type '%s' — skipping.", strategy_type)
                         continue
 
-                    account_data = accounts_by_id.get(s["accountId"])
-                    if not account_data:
-                        logger.warning("Account %d not found for strategy %d.", s["accountId"], sid)
-                        continue
+                    # Route to correct broker
+                    if platform in KRAKEN_PLATFORMS:
+                        if not self._kraken:
+                            logger.warning(
+                                "Strategy '%s' requires Kraken but KRAKEN_API_KEY is not configured.", s["name"]
+                            )
+                            await api_client.post_log(
+                                "error",
+                                f"Strategy '{s['name']}' requires Kraken — add KRAKEN_API_KEY to .env",
+                                strategy_id=sid,
+                            )
+                            continue
+                        instance = cls(s, session=None, account=None, kraken=self._kraken)
 
-                    account_number = account_data.get("accountNumber")
-                    account = self.session_mgr.get_account(account_number)
-                    if not account:
-                        logger.warning(
-                            "Account %s not found in Tastytrade session — "
-                            "check account number in Accounts page.",
-                            account_number,
-                        )
-                        await api_client.post_log(
-                            "error",
-                            f"Account {account_number} not found in Tastytrade session.",
-                            strategy_id=sid,
-                        )
-                        continue
+                    else:
+                        # Tastytrade / Tasty Crypto
+                        if not self.session_mgr:
+                            logger.warning(
+                                "Strategy '%s' requires Tastytrade but TT_USERNAME is not configured.", s["name"]
+                            )
+                            continue
 
-                    instance = cls(s, self.session_mgr.session, account)
+                        account_data = accounts_by_id.get(s["accountId"])
+                        if not account_data:
+                            logger.warning("Account %d not found for strategy %d.", s["accountId"], sid)
+                            continue
+
+                        account_number = account_data.get("accountNumber")
+                        account = self.session_mgr.get_account(account_number)
+                        if not account:
+                            logger.warning(
+                                "Account %s not found in Tastytrade session — check Accounts page.",
+                                account_number,
+                            )
+                            await api_client.post_log(
+                                "error",
+                                f"Account {account_number} not found in Tastytrade session.",
+                                strategy_id=sid,
+                            )
+                            continue
+                        instance = cls(s, session=self.session_mgr.session, account=account)
+
                     self._instances[sid] = instance
                     scan_interval = s.get("scanInterval", 300)
 
@@ -119,20 +167,23 @@ class AlgoEngine:
                         name=f"strategy-{sid}",
                     )
                     strategy_tasks[sid] = task
+
+                    import config
                     logger.info(
-                        "Started strategy '%s' (id=%d, type=%s, interval=%ds)",
-                        s["name"], sid, strategy_type, scan_interval,
+                        "Started strategy '%s' (id=%d, type=%s, platform=%s, interval=%ds)",
+                        s["name"], sid, strategy_type, platform, scan_interval,
                     )
                     await api_client.post_log(
                         "info",
-                        f"Strategy '{s['name']}' started (interval {scan_interval}s, dry_run={__import__('config').DRY_RUN})",
+                        f"Strategy '{s['name']}' started on {platform} "
+                        f"(interval {scan_interval}s, dry_run={config.DRY_RUN})",
                         strategy_id=sid,
                     )
 
             except Exception as e:
                 logger.exception("Strategy loader error: %s", e)
 
-            await asyncio.sleep(60)  # re-check every minute
+            await asyncio.sleep(60)
 
     async def _run_strategy_loop(self, strategy: BaseStrategy, interval: int):
         """Runs a strategy's scan() on a fixed interval until cancelled."""
@@ -145,10 +196,7 @@ class AlgoEngine:
         """Resets all strategy daily trade counters at midnight."""
         while self._running:
             now = datetime.now()
-            # Seconds until next midnight
-            tomorrow = datetime.combine(now.date(), time.min)
-            from datetime import timedelta
-            tomorrow += timedelta(days=1)
+            tomorrow = datetime.combine(now.date(), time.min) + timedelta(days=1)
             wait = (tomorrow - now).total_seconds()
             await asyncio.sleep(wait)
             for instance in self._instances.values():
@@ -159,7 +207,6 @@ class AlgoEngine:
 
 async def main():
     engine = AlgoEngine()
-
     loop = asyncio.get_running_loop()
 
     def _shutdown():

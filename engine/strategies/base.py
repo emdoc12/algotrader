@@ -14,12 +14,17 @@ class BaseStrategy(ABC):
     Each strategy receives its config dict from the API and is responsible
     for one scan() call. The engine scheduler calls scan() on the interval
     defined in strategy.scanInterval.
+
+    For Kraken-based strategies, the engine injects `kraken` (KrakenSessionManager)
+    in addition to session/account. Tastytrade session/account may be None for
+    pure-Kraken strategies.
     """
 
-    def __init__(self, config: dict, session: Session, account: Account):
+    def __init__(self, config: dict, session: Session | None, account: Account | None, kraken=None):
         self.config = config
         self.session = session
         self.account = account
+        self.kraken = kraken        # KrakenSessionManager, injected for kraken platform strategies
         self.strategy_id: int = config["id"]
         self.account_id: int = config["accountId"]
         self.name: str = config["name"]

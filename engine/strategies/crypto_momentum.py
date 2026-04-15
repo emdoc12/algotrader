@@ -1,27 +1,22 @@
 """
 Crypto Momentum Strategy
 -------------------------
-Buys when the price breaks above the N-day moving average by X%,
-sells (closes) when price drops back below the MA by X%.
+Buys when the price breaks above the N-day EMA by X%,
+sells (closes) when price drops to stop-loss or take-profit.
 
-Requires a price history source. Uses the Tastytrade quote streamer
-for current price and relies on the quote history endpoint for MA calc.
-Falls back to a simple EMA approximation if history isn't available.
+Works on both Tastytrade (Tasty Crypto) and Kraken (24/7 spot).
+When platform='kraken', uses KrakenSessionManager for pricing and orders.
+When platform='tasty_crypto', uses DXLinkStreamer + Tastytrade order executor.
 
 Parameters:
-  maPeriod:          20     (MA period in days)
-  breakoutPercent:   2.0    (% above MA to trigger a buy)
+  maPeriod:          20     (EMA period)
+  breakoutPercent:   2.0    (% above EMA to trigger a buy)
   stopLossPercent:   3.0    (% below entry to exit)
   takeProfitPercent: 6.0    (% above entry to take profits)
-  quantity:          0.1    (from maxPositionSize — crypto units to buy)
   symbols:           ['BTC/USD', 'ETH/USD']  (from watchlist)
 """
 import logging
 from decimal import Decimal
-
-from tastytrade.instruments import Cryptocurrency
-from tastytrade.dxfeed import Quote
-from tastytrade import DXLinkStreamer
 
 import api_client
 import order_executor
@@ -34,7 +29,6 @@ class CryptoMomentumStrategy(BaseStrategy):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Track running EMA per symbol
         self._ema: dict[str, float] = {}
         self._entry_price: dict[str, float] = {}
 
@@ -49,12 +43,47 @@ class CryptoMomentumStrategy(BaseStrategy):
         stop_loss_pct: float = self.params.get("stopLossPercent", 3.0) / 100
         take_profit_pct: float = self.params.get("takeProfitPercent", 6.0) / 100
         quantity: float = self.max_position_size
-
-        # EMA smoothing factor
         k = 2 / (ma_period + 1)
 
+        use_kraken = self.platform == "kraken"
+
+        if use_kraken:
+            await self._scan_kraken(symbols, k, ma_period, breakout_pct, stop_loss_pct, take_profit_pct, quantity)
+        else:
+            await self._scan_tastytrade(symbols, k, ma_period, breakout_pct, stop_loss_pct, take_profit_pct, quantity)
+
+    # ── Kraken path ─────────────────────────────────────────
+
+    async def _scan_kraken(self, symbols, k, ma_period, breakout_pct, stop_loss_pct, take_profit_pct, quantity):
+        import kraken_order_executor
+        kraken = self.kraken  # injected by engine
+
+        for symbol in symbols:
+            try:
+                ticker = await kraken.get_ticker(symbol)
+                mid = ticker["mid"]
+            except Exception as e:
+                logger.warning("[%s] Failed to get Kraken ticker for %s: %s", self.name, symbol, e)
+                continue
+
+            await self._process_signal(
+                symbol=symbol, mid=mid, k=k, ma_period=ma_period,
+                breakout_pct=breakout_pct, stop_loss_pct=stop_loss_pct,
+                take_profit_pct=take_profit_pct, quantity=quantity,
+                executor=lambda sym, action, qty, price: kraken_order_executor.place_kraken_order(
+                    kraken=kraken, symbol=sym, action=action,
+                    quantity=Decimal(str(qty)), limit_price=Decimal(str(round(price, 4))),
+                    strategy_id=self.strategy_id, account_id=self.account_id,
+                ),
+            )
+
+    # ── Tastytrade path ─────────────────────────────────────
+
+    async def _scan_tastytrade(self, symbols, k, ma_period, breakout_pct, stop_loss_pct, take_profit_pct, quantity):
+        from tastytrade.dxfeed import Quote
+        from tastytrade import DXLinkStreamer
+
         async with DXLinkStreamer(self.session) as streamer:
-            # Get current mid prices for all symbols
             await streamer.subscribe(Quote, symbols)
             quotes: dict[str, Quote] = {}
             async for q in streamer.listen(Quote):
@@ -62,82 +91,62 @@ class CryptoMomentumStrategy(BaseStrategy):
                 if len(quotes) >= len(symbols):
                     break
 
-            for symbol in symbols:
-                q = quotes.get(symbol)
-                if not q:
-                    continue
+        for symbol in symbols:
+            q = quotes.get(symbol)
+            if not q:
+                continue
+            mid = (q.bid_price + q.ask_price) / 2
+            await self._process_signal(
+                symbol=symbol, mid=mid, k=k, ma_period=ma_period,
+                breakout_pct=breakout_pct, stop_loss_pct=stop_loss_pct,
+                take_profit_pct=take_profit_pct, quantity=quantity,
+                executor=lambda sym, action, qty, price: order_executor.place_crypto_order(
+                    session=self.session, account=self.account,
+                    symbol=sym, action=action,
+                    quantity=Decimal(str(qty)), limit_price=Decimal(str(round(price, 2))),
+                    strategy_id=self.strategy_id, account_id=self.account_id,
+                ),
+            )
 
-                mid = (q.bid_price + q.ask_price) / 2
+    # ── Shared signal logic ─────────────────────────────────
 
-                # Update EMA
-                if symbol not in self._ema:
-                    self._ema[symbol] = mid
-                else:
-                    self._ema[symbol] = mid * k + self._ema[symbol] * (1 - k)
+    async def _process_signal(self, symbol, mid, k, ma_period, breakout_pct,
+                               stop_loss_pct, take_profit_pct, quantity, executor):
+        if symbol not in self._ema:
+            self._ema[symbol] = mid
+        else:
+            self._ema[symbol] = mid * k + self._ema[symbol] * (1 - k)
 
-                ema = self._ema[symbol]
-                entry = self._entry_price.get(symbol)
-                breakout_threshold = ema * (1 + breakout_pct)
+        ema = self._ema[symbol]
+        entry = self._entry_price.get(symbol)
+        breakout_threshold = ema * (1 + breakout_pct)
 
-                await api_client.post_log(
-                    "info",
-                    f"[{self.name}] {symbol}: price=${mid:.2f}, EMA({ma_period})=${ema:.2f}, breakout threshold=${breakout_threshold:.2f}",
-                    strategy_id=self.strategy_id,
-                )
+        await api_client.post_log(
+            "info",
+            f"[{self.name}] {symbol}: price=${mid:.4f}, EMA({ma_period})=${ema:.4f}, threshold=${breakout_threshold:.4f}",
+            strategy_id=self.strategy_id,
+        )
 
-                # --- Exit logic (if in position) ---
-                if entry:
-                    stop = entry * (1 - stop_loss_pct)
-                    target = entry * (1 + take_profit_pct)
-                    if mid <= stop:
-                        await api_client.post_log(
-                            "trade",
-                            f"[{self.name}] {symbol}: STOP LOSS triggered @ ${mid:.2f} (entry ${entry:.2f})",
-                            strategy_id=self.strategy_id,
-                        )
-                        await order_executor.place_crypto_order(
-                            session=self.session, account=self.account,
-                            symbol=symbol, action="SELL_TO_CLOSE",
-                            quantity=Decimal(str(quantity)),
-                            limit_price=Decimal(str(round(mid, 2))),
-                            strategy_id=self.strategy_id,
-                            account_id=self.account_id,
-                        )
-                        self._entry_price.pop(symbol, None)
-                        self._increment_trades()
-                        continue
-                    elif mid >= target:
-                        await api_client.post_log(
-                            "trade",
-                            f"[{self.name}] {symbol}: TAKE PROFIT @ ${mid:.2f} (entry ${entry:.2f})",
-                            strategy_id=self.strategy_id,
-                        )
-                        await order_executor.place_crypto_order(
-                            session=self.session, account=self.account,
-                            symbol=symbol, action="SELL_TO_CLOSE",
-                            quantity=Decimal(str(quantity)),
-                            limit_price=Decimal(str(round(mid, 2))),
-                            strategy_id=self.strategy_id,
-                            account_id=self.account_id,
-                        )
-                        self._entry_price.pop(symbol, None)
-                        self._increment_trades()
-                        continue
+        # Exit logic
+        if entry:
+            stop = entry * (1 - stop_loss_pct)
+            target = entry * (1 + take_profit_pct)
+            if mid <= stop:
+                await api_client.post_log("trade", f"[{self.name}] {symbol}: STOP LOSS @ ${mid:.4f}", strategy_id=self.strategy_id)
+                await executor(symbol, "SELL_TO_CLOSE", quantity, mid)
+                self._entry_price.pop(symbol, None)
+                self._increment_trades()
+                return
+            elif mid >= target:
+                await api_client.post_log("trade", f"[{self.name}] {symbol}: TAKE PROFIT @ ${mid:.4f}", strategy_id=self.strategy_id)
+                await executor(symbol, "SELL_TO_CLOSE", quantity, mid)
+                self._entry_price.pop(symbol, None)
+                self._increment_trades()
+                return
 
-                # --- Entry logic (if not in position) ---
-                if not entry and mid >= breakout_threshold:
-                    await api_client.post_log(
-                        "info",
-                        f"[{self.name}] {symbol}: BREAKOUT detected — ${mid:.2f} > EMA threshold ${breakout_threshold:.2f}",
-                        strategy_id=self.strategy_id,
-                    )
-                    await order_executor.place_crypto_order(
-                        session=self.session, account=self.account,
-                        symbol=symbol, action="BUY_TO_OPEN",
-                        quantity=Decimal(str(quantity)),
-                        limit_price=Decimal(str(round(mid, 2))),
-                        strategy_id=self.strategy_id,
-                        account_id=self.account_id,
-                    )
-                    self._entry_price[symbol] = mid
-                    self._increment_trades()
+        # Entry logic
+        if not entry and mid >= breakout_threshold:
+            await api_client.post_log("info", f"[{self.name}] {symbol}: BREAKOUT — ${mid:.4f} > ${breakout_threshold:.4f}", strategy_id=self.strategy_id)
+            await executor(symbol, "BUY_TO_OPEN", quantity, mid)
+            self._entry_price[symbol] = mid
+            self._increment_trades()

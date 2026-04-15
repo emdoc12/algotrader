@@ -24,6 +24,8 @@ export default function Accounts() {
     isSandbox: false,
   });
 
+  const isKraken = newAccount.platform === "kraken";
+
   const { data: accounts = [], isLoading } = useQuery<Account[]>({
     queryKey: ["/api/accounts"],
     queryFn: () => apiRequest("GET", "/api/accounts").then((r) => r.json()),
@@ -59,7 +61,7 @@ export default function Accounts() {
         <div>
           <h1 className="text-xl font-semibold">Accounts</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Manage your Tastytrade and Tasty Crypto connections
+            Manage your Tastytrade, Tasty Crypto, and Kraken connections
           </p>
         </div>
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
@@ -92,50 +94,87 @@ export default function Accounts() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="tastytrade">Tastytrade</SelectItem>
+                    <SelectItem value="tastytrade">Tastytrade (options)</SelectItem>
                     <SelectItem value="tasty_crypto">Tasty Crypto</SelectItem>
+                    <SelectItem value="kraken">Kraken (24/7 spot crypto)</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
-              <div>
-                <Label>Username / Email</Label>
-                <Input
-                  data-testid="input-account-username"
-                  placeholder="your-email@example.com"
-                  value={newAccount.username}
-                  onChange={(e) => setNewAccount({ ...newAccount, username: e.target.value })}
-                />
-              </div>
-              <div>
-                <Label>Account Number</Label>
-                <Input
-                  data-testid="input-account-number"
-                  placeholder="5WX01234"
-                  value={newAccount.accountNumber}
-                  onChange={(e) => setNewAccount({ ...newAccount, accountNumber: e.target.value })}
-                />
-              </div>
-              <div className="flex items-center justify-between">
-                <div>
-                  <Label>Sandbox Mode</Label>
-                  <p className="text-xs text-muted-foreground">Use certification/test environment</p>
-                </div>
-                <Switch
-                  data-testid="switch-sandbox"
-                  checked={newAccount.isSandbox}
-                  onCheckedChange={(v) => setNewAccount({ ...newAccount, isSandbox: v })}
-                />
-              </div>
-              <div className="bg-muted/50 rounded-md p-3">
-                <div className="flex items-start gap-2">
-                  <Shield className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
-                  <p className="text-xs text-muted-foreground">
-                    Your credentials are stored locally in the SQLite database.
-                    Authentication tokens are managed via the Tastytrade SDK session.
-                    For production use, connect via OAuth for secure token management.
-                  </p>
-                </div>
-              </div>
+              {isKraken ? (
+                <>
+                  <div>
+                    <Label>API Key</Label>
+                    <Input
+                      data-testid="input-account-username"
+                      placeholder="Kraken API key"
+                      value={newAccount.username}
+                      onChange={(e) => setNewAccount({ ...newAccount, username: e.target.value })}
+                    />
+                  </div>
+                  <div>
+                    <Label>API Secret</Label>
+                    <Input
+                      data-testid="input-account-number"
+                      type="password"
+                      placeholder="Kraken API secret"
+                      value={newAccount.accountNumber}
+                      onChange={(e) => setNewAccount({ ...newAccount, accountNumber: e.target.value })}
+                    />
+                  </div>
+                  <div className="bg-muted/50 rounded-md p-3">
+                    <div className="flex items-start gap-2">
+                      <Shield className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
+                      <p className="text-xs text-muted-foreground">
+                        Generate API keys at kraken.com/u/security/api. Required permissions:
+                        Query Funds, Create &amp; Modify Orders, Cancel/Close Orders.
+                        Add the same key/secret to your engine .env file as KRAKEN_API_KEY / KRAKEN_API_SECRET.
+                      </p>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div>
+                    <Label>Username / Email</Label>
+                    <Input
+                      data-testid="input-account-username"
+                      placeholder="your-email@example.com"
+                      value={newAccount.username}
+                      onChange={(e) => setNewAccount({ ...newAccount, username: e.target.value })}
+                    />
+                  </div>
+                  <div>
+                    <Label>Account Number</Label>
+                    <Input
+                      data-testid="input-account-number"
+                      placeholder="5WX01234"
+                      value={newAccount.accountNumber}
+                      onChange={(e) => setNewAccount({ ...newAccount, accountNumber: e.target.value })}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <Label>Sandbox Mode</Label>
+                      <p className="text-xs text-muted-foreground">Use certification/test environment</p>
+                    </div>
+                    <Switch
+                      data-testid="switch-sandbox"
+                      checked={newAccount.isSandbox}
+                      onCheckedChange={(v) => setNewAccount({ ...newAccount, isSandbox: v })}
+                    />
+                  </div>
+                  <div className="bg-muted/50 rounded-md p-3">
+                    <div className="flex items-start gap-2">
+                      <Shield className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
+                      <p className="text-xs text-muted-foreground">
+                        Your credentials are stored locally in the SQLite database.
+                        Authentication tokens are managed via the Tastytrade SDK session.
+                        For production use, connect via OAuth for secure token management.
+                      </p>
+                    </div>
+                  </div>
+                </>
+              )}
               <Button
                 data-testid="button-create-account"
                 className="w-full"
