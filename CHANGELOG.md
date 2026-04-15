@@ -62,3 +62,9 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 - `BULLFLOW_API_KEY` added to `config.py` and `.env.example`
 - Scanner strategy type visible in Strategies page with default params pre-filled
 - Account field optional for scanner type (only needed for live execution)
+
+## [1.2.2] - 2026-04-15
+
+### Fixed
+- GitHub Actions: add `setup-buildx-action` so GHA cache backend works correctly
+- Repo visibility set to public so `ghcr.io/emdoc12/algotrader:latest` is pullable without auth
