@@ -16,6 +16,9 @@ TT_IS_SANDBOX = os.getenv("TT_IS_SANDBOX", "false").lower() == "true"
 KRAKEN_API_KEY = os.getenv("KRAKEN_API_KEY", "")
 KRAKEN_API_SECRET = os.getenv("KRAKEN_API_SECRET", "")
 
+# Bullflow options flow scanner
+BULLFLOW_API_KEY = os.getenv("BULLFLOW_API_KEY", "")
+
 # The AlgoTrader web app's local API base URL
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:5000")
 

@@ -46,3 +46,19 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 - REST API sync — strategies, trades, positions, logs all flow through Node.js API
 - `DRY_RUN=true` default — no live orders without explicit opt-in
 - `run.sh` launch script with auto-dependency install and mode banner
+
+## [1.2.0] - 2026-04-15
+
+### Added
+- **Bullflow Options Flow Scanner** (`options_flow_scanner` strategy type)
+  - Real-time SSE stream from `api.bullflow.io/v1/streaming/alerts`
+  - OCC symbol parser (extracts ticker, expiry, strike, option type, DTE)
+  - Composite scoring model (premium size + Repeater pattern weight)
+  - Configurable filters: minPremium, minScore, callsOnly, excludeEtfs, minDTE, maxDTE
+  - Auto-executes calls or stock via Tastytrade on score threshold
+  - All params tunable in the web UI
+  - Auto-reconnects on stream drop
+  - Daily trade limit + midnight reset
+- `BULLFLOW_API_KEY` added to `config.py` and `.env.example`
+- Scanner strategy type visible in Strategies page with default params pre-filled
+- Account field optional for scanner type (only needed for live execution)

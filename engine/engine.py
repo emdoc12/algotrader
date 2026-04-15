@@ -16,7 +16,7 @@ from datetime import datetime, time, timedelta
 import api_client
 from config import LOG_LEVEL, TASTYTRADE_ENABLED, KRAKEN_ENABLED
 from session_manager import SessionManager
-from strategies import STRATEGY_MAP
+from strategies import STRATEGY_MAP, STREAMING_STRATEGY_TYPES
 from strategies.base import BaseStrategy
 
 logging.basicConfig(
@@ -37,6 +37,7 @@ class AlgoEngine:
         self._kraken = None
         self._tasks: list[asyncio.Task] = []
         self._instances: dict[int, BaseStrategy] = {}
+        self._scanner_instances: dict[int, object] = {}   # BullflowScanner instances
         self._running = False
 
     async def start(self):
@@ -75,6 +76,8 @@ class AlgoEngine:
         self._running = False
         for t in self._tasks:
             t.cancel()
+        for scanner in self._scanner_instances.values():
+            await scanner.stop()
         if self.session_mgr:
             await self.session_mgr.disconnect()
         if self._kraken:
@@ -112,6 +115,12 @@ class AlgoEngine:
 
                     strategy_type = s.get("type", "")
                     platform = s.get("platform", "tastytrade")
+
+                    # ── Streaming strategies (Bullflow scanner) ───────────────
+                    if strategy_type in STREAMING_STRATEGY_TYPES:
+                        await self._start_scanner(s, strategy_tasks)
+                        continue
+
                     cls = STRATEGY_MAP.get(strategy_type)
                     if not cls:
                         logger.warning("Unknown strategy type '%s' — skipping.", strategy_type)
@@ -185,6 +194,49 @@ class AlgoEngine:
 
             await asyncio.sleep(60)
 
+    async def _start_scanner(self, s: dict, strategy_tasks: dict):
+        """Instantiate and launch a BullflowScanner as a persistent asyncio task."""
+        from bullflow_scanner import BullflowScanner
+        from config import BULLFLOW_API_KEY
+
+        sid = s["id"]
+
+        if not BULLFLOW_API_KEY:
+            logger.warning("Strategy '%s' requires BULLFLOW_API_KEY — not set in .env.", s["name"])
+            await api_client.post_log(
+                "error",
+                f"Strategy '{s['name']}' requires BULLFLOW_API_KEY — add it to .env",
+                strategy_id=sid,
+            )
+            return
+
+        # Inject Tastytrade session if available (for live execution)
+        session = self.session_mgr.session if self.session_mgr else None
+        account = None
+        if self.session_mgr and s.get("accountId"):
+            accounts_data = await api_client.get_accounts()
+            accounts_by_id = {a["id"]: a for a in accounts_data}
+            account_data = accounts_by_id.get(s["accountId"])
+            if account_data:
+                account = self.session_mgr.get_account(account_data.get("accountNumber"))
+
+        scanner = BullflowScanner(s, session=session, account=account)
+        self._scanner_instances[sid] = scanner
+
+        task = asyncio.create_task(scanner.run(), name=f"scanner-{sid}")
+        strategy_tasks[sid] = task
+
+        import config
+        logger.info(
+            "Started Bullflow scanner '%s' (id=%d, dry_run=%s)",
+            s["name"], sid, config.DRY_RUN,
+        )
+        await api_client.post_log(
+            "info",
+            f"Bullflow scanner '{s['name']}' launched (dry_run={config.DRY_RUN})",
+            strategy_id=sid,
+        )
+
     async def _run_strategy_loop(self, strategy: BaseStrategy, interval: int):
         """Runs a strategy's scan() on a fixed interval until cancelled."""
         logger.debug("Strategy loop started for '%s' (every %ds)", strategy.name, interval)
@@ -201,6 +253,8 @@ class AlgoEngine:
             await asyncio.sleep(wait)
             for instance in self._instances.values():
                 instance.reset_daily_count()
+            for scanner in self._scanner_instances.values():
+                scanner.reset_daily_count()
             logger.info("Daily trade counts reset.")
             await api_client.post_log("info", "Daily trade limits reset at midnight.")
 

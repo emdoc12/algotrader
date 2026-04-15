@@ -21,6 +21,7 @@ const STRATEGY_TYPES = [
   { value: "iron_condor", label: "Iron Condor", description: "Sell put + call spreads on the same underlying" },
   { value: "crypto_momentum", label: "Crypto Momentum", description: "Buy breakouts, sell breakdowns on crypto" },
   { value: "crypto_mean_reversion", label: "Crypto Mean Reversion", description: "Buy dips, sell rips based on moving averages" },
+  { value: "options_flow_scanner", label: "Options Flow Scanner", description: "Stream Bullflow alerts and auto-buy calls on high-score signals" },
   { value: "custom", label: "Custom Rules", description: "Define your own entry/exit rules" },
 ];
 
@@ -31,6 +32,7 @@ const DEFAULT_PARAMS: Record<string, object> = {
   iron_condor: { minDTE: 30, maxDTE: 55, shortDelta: 0.16, width: 5, minCredit: 1.50 },
   crypto_momentum: { maPeriod: 20, breakoutPercent: 2, stopLossPercent: 3, takeProfitPercent: 6 },
   crypto_mean_reversion: { maPeriod: 50, deviationPercent: 5, stopLossPercent: 3, takeProfitPercent: 4 },
+  options_flow_scanner: { minPremium: 25000, minScore: 5, callsOnly: true, excludeEtfs: true, minDTE: 7, maxDTE: 60, maxContracts: 1, execution: "calls" },
   custom: {},
 };
 
@@ -152,11 +154,12 @@ export default function Strategies() {
                   <SelectContent>
                     <SelectItem value="tastytrade">Tastytrade</SelectItem>
                     <SelectItem value="tasty_crypto">Tasty Crypto</SelectItem>
+                    <SelectItem value="kraken">Kraken</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
               <div>
-                <Label>Account</Label>
+                <Label>Account{newStrategy.type === "options_flow_scanner" ? " (optional — for live execution)" : ""}</Label>
                 <Select
                   value={String(newStrategy.accountId || "")}
                   onValueChange={(v) => setNewStrategy({ ...newStrategy, accountId: Number(v) })}
@@ -213,7 +216,7 @@ export default function Strategies() {
                 data-testid="button-create-strategy"
                 className="w-full"
                 onClick={() => createMutation.mutate(newStrategy)}
-                disabled={!newStrategy.name || !newStrategy.accountId || createMutation.isPending}
+                disabled={!newStrategy.name || (newStrategy.type !== "options_flow_scanner" && !newStrategy.accountId) || createMutation.isPending}
               >
                 {createMutation.isPending ? "Creating..." : "Create Strategy"}
               </Button>
