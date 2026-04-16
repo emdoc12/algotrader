@@ -38,10 +38,17 @@ class AlgoEngine:
         self._tasks: list[asyncio.Task] = []
         self._instances: dict[int, BaseStrategy] = {}
         self._scanner_instances: dict[int, object] = {}   # BullflowScanner instances
+        self._backtest_engine = None
         self._running = False
 
     async def start(self):
         self._running = True
+
+        # Start backtest engine (runs in background, polls for pending jobs)
+        from backtest_engine import BacktestEngine
+        self._backtest_engine = BacktestEngine()
+        backtest_task = asyncio.create_task(self._backtest_engine.start(), name="backtest-engine")
+        self._tasks.append(backtest_task)
 
         # Connect Tastytrade
         if TASTYTRADE_ENABLED and self.session_mgr:
@@ -78,6 +85,8 @@ class AlgoEngine:
             t.cancel()
         for scanner in self._scanner_instances.values():
             await scanner.stop()
+        if self._backtest_engine:
+            self._backtest_engine.stop()
         if self.session_mgr:
             await self.session_mgr.disconnect()
         if self._kraken:

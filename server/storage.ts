@@ -1,5 +1,5 @@
-import { accounts, strategies, trades, positions, botLogs, watchlistItems } from "@shared/schema";
-import type { Account, InsertAccount, Strategy, InsertStrategy, Trade, InsertTrade, Position, BotLog, InsertBotLog, WatchlistItem, InsertWatchlistItem } from "@shared/schema";
+import { accounts, strategies, trades, positions, botLogs, watchlistItems, backtests } from "@shared/schema";
+import type { Account, InsertAccount, Strategy, InsertStrategy, Trade, InsertTrade, Position, BotLog, InsertBotLog, WatchlistItem, InsertWatchlistItem, Backtest, InsertBacktest } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc } from "drizzle-orm";
 
@@ -37,6 +37,14 @@ export interface IStorage {
   getWatchlistItems(strategyId: number): WatchlistItem[];
   createWatchlistItem(data: InsertWatchlistItem): WatchlistItem;
   deleteWatchlistItem(id: number): void;
+
+  // Backtests
+  getBacktests(): Backtest[];
+  getBacktest(id: number): Backtest | undefined;
+  getBacktestsByStrategy(strategyId: number): Backtest[];
+  createBacktest(data: InsertBacktest): Backtest;
+  updateBacktest(id: number, data: Partial<Backtest>): Backtest | undefined;
+  deleteBacktest(id: number): void;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -122,6 +130,26 @@ export class DatabaseStorage implements IStorage {
   }
   deleteWatchlistItem(id: number): void {
     db.delete(watchlistItems).where(eq(watchlistItems.id, id)).run();
+  }
+
+  // Backtests
+  getBacktests(): Backtest[] {
+    return db.select().from(backtests).orderBy(desc(backtests.id)).all();
+  }
+  getBacktest(id: number): Backtest | undefined {
+    return db.select().from(backtests).where(eq(backtests.id, id)).get();
+  }
+  getBacktestsByStrategy(strategyId: number): Backtest[] {
+    return db.select().from(backtests).where(eq(backtests.strategyId, strategyId)).orderBy(desc(backtests.id)).all();
+  }
+  createBacktest(data: InsertBacktest): Backtest {
+    return db.insert(backtests).values({ ...data, createdAt: new Date().toISOString() }).returning().get();
+  }
+  updateBacktest(id: number, data: Partial<Backtest>): Backtest | undefined {
+    return db.update(backtests).set(data).where(eq(backtests.id, id)).returning().get();
+  }
+  deleteBacktest(id: number): void {
+    db.delete(backtests).where(eq(backtests.id, id)).run();
   }
 }
 

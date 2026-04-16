@@ -11,7 +11,8 @@ import { Switch } from "@/components/ui/switch";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Slider } from "@/components/ui/slider";
 import { useToast } from "@/hooks/use-toast";
-import { Plus, Trash2, Settings2, Zap, ZapOff } from "lucide-react";
+import { Plus, Trash2, Settings2, Zap, ZapOff, FlaskConical, Radio } from "lucide-react";
+import { useLocation } from "wouter";
 import type { Strategy, Account } from "@shared/schema";
 
 const STRATEGY_TYPES = [
@@ -38,12 +39,14 @@ const DEFAULT_PARAMS: Record<string, object> = {
 
 export default function Strategies() {
   const { toast } = useToast();
+  const [, setLocation] = useLocation();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [newStrategy, setNewStrategy] = useState({
     name: "",
     type: "short_put",
     platform: "tastytrade",
     accountId: 0,
+    tradingMode: "paper" as "paper" | "live",
     maxPositionSize: 1,
     maxDailyTrades: 5,
     maxBuyingPowerUsage: 50,
@@ -79,6 +82,15 @@ export default function Strategies() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/strategies"] });
       queryClient.invalidateQueries({ queryKey: ["/api/dashboard"] });
+    },
+  });
+
+  const modeMutation = useMutation({
+    mutationFn: ({ id, mode }: { id: number; mode: string }) =>
+      apiRequest("PATCH", `/api/strategies/${id}`, { tradingMode: mode }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/strategies"] });
+      toast({ title: "Trading mode updated" });
     },
   });
 
@@ -177,6 +189,24 @@ export default function Strategies() {
                 </Select>
               </div>
               <div>
+                <Label>Trading Mode</Label>
+                <Select
+                  value={newStrategy.tradingMode}
+                  onValueChange={(v) => setNewStrategy({ ...newStrategy, tradingMode: v as "paper" | "live" })}
+                >
+                  <SelectTrigger data-testid="select-trading-mode">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="paper">Paper Trading (simulated)</SelectItem>
+                    <SelectItem value="live">Live Trading (real orders)</SelectItem>
+                  </SelectContent>
+                </Select>
+                {newStrategy.tradingMode === "live" && (
+                  <p className="text-xs text-amber-400 mt-1">⚠ Live mode places real orders. Make sure DRY_RUN=false in your container.</p>
+                )}
+              </div>
+              <div>
                 <Label>Max Buying Power Usage: {newStrategy.maxBuyingPowerUsage}%</Label>
                 <Slider
                   data-testid="slider-buying-power"
@@ -270,7 +300,7 @@ export default function Strategies() {
                 </div>
               </CardHeader>
               <CardContent className="space-y-3">
-                <div className="flex gap-2 flex-wrap">
+                <div className="flex gap-2 flex-wrap items-center">
                   <Badge variant="outline">{typeInfo?.label ?? s.type}</Badge>
                   <Badge variant="outline">{s.platform}</Badge>
                   <Badge variant={s.isEnabled ? "default" : "secondary"} className={s.isEnabled ? "bg-emerald-600" : ""}>
@@ -280,6 +310,22 @@ export default function Strategies() {
                       <><ZapOff className="h-3 w-3 mr-1" /> Paused</>
                     )}
                   </Badge>
+                  {/* Paper / Live mode toggle */}
+                  <button
+                    data-testid={`button-mode-${s.id}`}
+                    onClick={() => modeMutation.mutate({ id: s.id, mode: s.tradingMode === "live" ? "paper" : "live" })}
+                    className={`flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium transition-colors ${
+                      s.tradingMode === "live"
+                        ? "border-amber-500/60 text-amber-400 bg-amber-500/10 hover:bg-amber-500/20"
+                        : "border-border text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {s.tradingMode === "live" ? (
+                      <><Radio className="h-3 w-3" /> Live</>
+                    ) : (
+                      <><FlaskConical className="h-3 w-3" /> Paper</>
+                    )}
+                  </button>
                 </div>
                 <div className="text-sm text-muted-foreground">
                   Account: {getAccountName(s.accountId)}
@@ -310,6 +356,17 @@ export default function Strategies() {
                       ))}
                     </div>
                   </div>
+                )}
+                {["crypto_momentum", "crypto_mean_reversion"].includes(s.type) && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="w-full text-xs"
+                    data-testid={`button-backtest-${s.id}`}
+                    onClick={() => setLocation("/backtests")}
+                  >
+                    <FlaskConical className="h-3.5 w-3.5 mr-1.5" /> Run Backtest
+                  </Button>
                 )}
               </CardContent>
             </Card>

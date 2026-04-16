@@ -65,3 +65,17 @@ async def sync_positions(account_id: int, positions: list[dict]):
     # gracefully ignore if endpoint doesn't exist yet
     if r.status_code not in (200, 201, 404):
         r.raise_for_status()
+
+
+async def get_backtests() -> list[dict]:
+    """Fetch all backtest records."""
+    r = await _client.get("/api/backtests")
+    r.raise_for_status()
+    return r.json()
+
+
+async def patch_backtest(backtest_id: int, data: dict) -> dict:
+    """Update a backtest record (status, results, etc.)"""
+    r = await _client.patch(f"/api/backtests/{backtest_id}", json=data)
+    r.raise_for_status()
+    return r.json()

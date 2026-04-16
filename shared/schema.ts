@@ -23,6 +23,7 @@ export const strategies = sqliteTable("strategies", {
   type: text("type").notNull(), // 'short_put' | 'credit_spread' | 'covered_call' | 'iron_condor' | 'crypto_momentum' | 'crypto_mean_reversion' | 'custom'
   platform: text("platform").notNull(), // 'tastytrade' | 'tasty_crypto'
   isEnabled: integer("is_enabled", { mode: "boolean" }).notNull().default(false),
+  tradingMode: text("trading_mode").notNull().default("paper"), // 'paper' | 'live'
   accountId: integer("account_id").notNull(),
   // Strategy parameters as JSON
   parameters: text("parameters").notNull().default("{}"),
@@ -34,6 +35,35 @@ export const strategies = sqliteTable("strategies", {
   maxDailyTrades: integer("max_daily_trades").notNull().default(5),
   maxBuyingPowerUsage: real("max_buying_power_usage").notNull().default(50), // percentage
   createdAt: text("created_at").notNull().default("now"),
+});
+
+// Backtests
+export const backtests = sqliteTable("backtests", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  strategyId: integer("strategy_id").notNull(),
+  strategyName: text("strategy_name").notNull(),
+  strategyType: text("strategy_type").notNull(),
+  platform: text("platform").notNull(),
+  parameters: text("parameters").notNull().default("{}"),
+  // Date range
+  startDate: text("start_date").notNull(),
+  endDate: text("end_date").notNull(),
+  // Results summary
+  status: text("status").notNull().default("pending"), // 'pending' | 'running' | 'completed' | 'failed'
+  totalTrades: integer("total_trades").default(0),
+  winningTrades: integer("winning_trades").default(0),
+  losingTrades: integer("losing_trades").default(0),
+  totalPnl: real("total_pnl").default(0),
+  maxDrawdown: real("max_drawdown").default(0),
+  winRate: real("win_rate").default(0),
+  sharpeRatio: real("sharpe_ratio").default(0),
+  // Full trade log as JSON array
+  trades: text("trades").notNull().default("[]"),
+  // Equity curve as JSON array of {date, equity} points
+  equityCurve: text("equity_curve").notNull().default("[]"),
+  errorMessage: text("error_message"),
+  createdAt: text("created_at").notNull().default("now"),
+  completedAt: text("completed_at"),
 });
 
 // Trade log
@@ -92,6 +122,7 @@ export const watchlistItems = sqliteTable("watchlist_items", {
 // Insert schemas
 export const insertAccountSchema = createInsertSchema(accounts).omit({ id: true, createdAt: true, sessionToken: true, rememberToken: true });
 export const insertStrategySchema = createInsertSchema(strategies).omit({ id: true, createdAt: true, lastScanAt: true });
+export const insertBacktestSchema = createInsertSchema(backtests).omit({ id: true, createdAt: true, completedAt: true });
 export const insertTradeSchema = createInsertSchema(trades).omit({ id: true, createdAt: true });
 export const insertBotLogSchema = createInsertSchema(botLogs).omit({ id: true, createdAt: true });
 export const insertWatchlistItemSchema = createInsertSchema(watchlistItems).omit({ id: true });
@@ -108,3 +139,5 @@ export type BotLog = typeof botLogs.$inferSelect;
 export type InsertBotLog = z.infer<typeof insertBotLogSchema>;
 export type WatchlistItem = typeof watchlistItems.$inferSelect;
 export type InsertWatchlistItem = z.infer<typeof insertWatchlistItemSchema>;
+export type Backtest = typeof backtests.$inferSelect;
+export type InsertBacktest = z.infer<typeof insertBacktestSchema>;

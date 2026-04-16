@@ -10,6 +10,7 @@ import Accounts from "@/pages/accounts";
 import Trades from "@/pages/trades";
 import Positions from "@/pages/positions";
 import Logs from "@/pages/logs";
+import Backtests from "@/pages/backtests";
 import NotFound from "@/pages/not-found";
 import {
   LayoutDashboard,
@@ -21,12 +22,14 @@ import {
   Sun,
   Moon,
   Bot,
+  FlaskConical,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 const NAV_ITEMS = [
   { path: "/", label: "Dashboard", icon: LayoutDashboard },
   { path: "/strategies", label: "Strategies", icon: Settings2 },
+  { path: "/backtests", label: "Backtests", icon: FlaskConical },
   { path: "/accounts", label: "Accounts", icon: Wallet },
   { path: "/trades", label: "Trades", icon: ArrowUpDown },
   { path: "/positions", label: "Positions", icon: Briefcase },
@@ -103,6 +106,7 @@ function AppContent() {
           <Route path="/trades" component={Trades} />
           <Route path="/positions" component={Positions} />
           <Route path="/logs" component={Logs} />
+          <Route path="/backtests" component={Backtests} />
           <Route component={NotFound} />
         </Switch>
       </main>

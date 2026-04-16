@@ -160,6 +160,63 @@ export function registerRoutes(server: Server, app: Express) {
     res.status(204).send();
   });
 
+  // ============ BACKTESTS ============
+  app.get("/api/backtests", (_req, res) => {
+    res.json(storage.getBacktests());
+  });
+
+  app.get("/api/backtests/:id", (req, res) => {
+    const bt = storage.getBacktest(Number(req.params.id));
+    if (!bt) return res.status(404).json({ error: "Backtest not found" });
+    res.json(bt);
+  });
+
+  app.get("/api/backtests/strategy/:strategyId", (req, res) => {
+    res.json(storage.getBacktestsByStrategy(Number(req.params.strategyId)));
+  });
+
+  // Create a new backtest job (status=pending, Python engine picks it up)
+  app.post("/api/backtests", (req, res) => {
+    const { strategyId, startDate, endDate } = req.body;
+    if (!strategyId || !startDate || !endDate) {
+      return res.status(400).json({ error: "strategyId, startDate, endDate required" });
+    }
+    const strategy = storage.getStrategy(Number(strategyId));
+    if (!strategy) return res.status(404).json({ error: "Strategy not found" });
+    const bt = storage.createBacktest({
+      strategyId: strategy.id,
+      strategyName: strategy.name,
+      strategyType: strategy.type,
+      platform: strategy.platform,
+      parameters: strategy.parameters,
+      startDate,
+      endDate,
+      status: "pending",
+      totalTrades: 0,
+      winningTrades: 0,
+      losingTrades: 0,
+      totalPnl: 0,
+      maxDrawdown: 0,
+      winRate: 0,
+      sharpeRatio: 0,
+      trades: "[]",
+      equityCurve: "[]",
+    });
+    res.status(201).json(bt);
+  });
+
+  // Python engine calls this to update backtest progress/results
+  app.patch("/api/backtests/:id", (req, res) => {
+    const bt = storage.updateBacktest(Number(req.params.id), req.body);
+    if (!bt) return res.status(404).json({ error: "Backtest not found" });
+    res.json(bt);
+  });
+
+  app.delete("/api/backtests/:id", (req, res) => {
+    storage.deleteBacktest(Number(req.params.id));
+    res.status(204).send();
+  });
+
   // ============ DASHBOARD SUMMARY ============
   app.get("/api/dashboard", (_req, res) => {
     const allAccounts = storage.getAccounts();

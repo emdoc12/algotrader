@@ -30,6 +30,7 @@ sqlite.exec(`
     type TEXT NOT NULL,
     platform TEXT NOT NULL,
     is_enabled INTEGER NOT NULL DEFAULT 0,
+    trading_mode TEXT NOT NULL DEFAULT 'paper',
     account_id INTEGER NOT NULL,
     parameters TEXT NOT NULL DEFAULT '{}',
     scan_interval INTEGER NOT NULL DEFAULT 300,
@@ -38,6 +39,30 @@ sqlite.exec(`
     max_daily_trades INTEGER NOT NULL DEFAULT 5,
     max_buying_power_usage REAL NOT NULL DEFAULT 50,
     created_at TEXT NOT NULL DEFAULT 'now'
+  );
+
+  CREATE TABLE IF NOT EXISTS backtests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy_id INTEGER NOT NULL,
+    strategy_name TEXT NOT NULL,
+    strategy_type TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    parameters TEXT NOT NULL DEFAULT '{}',
+    start_date TEXT NOT NULL,
+    end_date TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    total_trades INTEGER DEFAULT 0,
+    winning_trades INTEGER DEFAULT 0,
+    losing_trades INTEGER DEFAULT 0,
+    total_pnl REAL DEFAULT 0,
+    max_drawdown REAL DEFAULT 0,
+    win_rate REAL DEFAULT 0,
+    sharpe_ratio REAL DEFAULT 0,
+    trades TEXT NOT NULL DEFAULT '[]',
+    equity_curve TEXT NOT NULL DEFAULT '[]',
+    error_message TEXT,
+    created_at TEXT NOT NULL DEFAULT 'now',
+    completed_at TEXT
   );
 
   CREATE TABLE IF NOT EXISTS trades (
@@ -89,5 +114,8 @@ sqlite.exec(`
     notes TEXT
   );
 `);
+
+// Migrations for existing databases (idempotent — errors are silently ignored)
+try { sqlite.exec(`ALTER TABLE strategies ADD COLUMN trading_mode TEXT NOT NULL DEFAULT 'paper'`); } catch (_) {}
 
 export const db = drizzle(sqlite, { schema });
