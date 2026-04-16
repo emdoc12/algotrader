@@ -251,9 +251,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <div class="card" style="padding:0;overflow:hidden">
   <div style="padding:16px 16px 0 16px">
     <div class="tab-bar">
-      <button class="tab-btn active" onclick="switchTab('trades')">Trades</button>
-      <button class="tab-btn" onclick="switchTab('chat')">Chat with Claude</button>
-      <button class="tab-btn" onclick="switchTab('goals')">Goals</button>
+      <button class="tab-btn active" onclick="switchTab('trades', this)">Trades</button>
+      <button class="tab-btn" onclick="switchTab('chat', this)">Chat with Claude</button>
+      <button class="tab-btn" onclick="switchTab('goals', this)">Goals</button>
     </div>
   </div>
 
@@ -503,11 +503,11 @@ async function confirmModeSwitch(mode) {
 }
 
 // --- Tabs ---
-function switchTab(tab) {
+function switchTab(tab, btn) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
   document.getElementById('tab-' + tab).classList.add('active');
-  event.target.classList.add('active');
+  btn.classList.add('active');
   if (tab === 'chat') loadChatHistory();
   if (tab === 'goals') loadGoals();
 }
