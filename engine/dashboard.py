@@ -48,6 +48,27 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .mode-paper { background: var(--yellow); color: #000; }
   .mode-live { background: var(--red); color: #fff; }
   .badge-ai { background: var(--purple); color: #fff; }
+  .toggle-wrap { display: flex; align-items: center; gap: 8px; }
+  .toggle-label { font-size: 12px; font-weight: 600; text-transform: uppercase; }
+  .toggle-label-paper { color: var(--yellow); }
+  .toggle-label-live { color: var(--red); }
+  .toggle { position: relative; width: 44px; height: 24px; cursor: pointer; }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .toggle-track { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: var(--yellow); border-radius: 12px; transition: background 0.3s; }
+  .toggle input:checked + .toggle-track { background: var(--red); }
+  .toggle-thumb { position: absolute; top: 2px; left: 2px; width: 20px; height: 20px; background: white; border-radius: 50%; transition: transform 0.3s; }
+  .toggle input:checked ~ .toggle-thumb { transform: translateX(20px); }
+  .modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); z-index: 100; align-items: center; justify-content: center; }
+  .modal-overlay.active { display: flex; }
+  .modal { background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 24px; max-width: 400px; width: 90%; }
+  .modal h3 { font-size: 18px; margin-bottom: 12px; }
+  .modal p { font-size: 14px; color: var(--muted); margin-bottom: 16px; line-height: 1.5; }
+  .modal .warning { color: var(--red); font-weight: 600; }
+  .modal-buttons { display: flex; gap: 8px; justify-content: flex-end; }
+  .btn { padding: 8px 20px; border-radius: 8px; border: none; font-size: 14px; font-weight: 600; cursor: pointer; }
+  .btn-cancel { background: var(--border); color: var(--text); }
+  .btn-danger { background: var(--red); color: white; }
+  .btn-safe { background: var(--yellow); color: #000; }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 16px; }
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
   .card-wide { grid-column: span 2; }
@@ -82,7 +103,39 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <h1>AlgoTrader v2.0.0</h1>
   <div class="badges">
     <span class="badge badge-ai" id="aiLabel">AI</span>
-    <span class="badge" id="modeLabel">--</span>
+    <div class="toggle-wrap">
+      <span class="toggle-label toggle-label-paper">Paper</span>
+      <label class="toggle">
+        <input type="checkbox" id="modeToggle" onchange="handleModeToggle(this)">
+        <div class="toggle-track"></div>
+        <div class="toggle-thumb"></div>
+      </label>
+      <span class="toggle-label toggle-label-live">Live</span>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="liveModal">
+  <div class="modal">
+    <h3 class="warning">Switch to Live Trading?</h3>
+    <p>This will use <strong>real money</strong> from your Kraken account. Claude AI will place actual buy/sell orders on your behalf.</p>
+    <p>Make sure you have reviewed the bot's paper trading performance before going live.</p>
+    <div class="modal-buttons">
+      <button class="btn btn-cancel" onclick="cancelModeSwitch()">Cancel</button>
+      <button class="btn btn-danger" onclick="confirmModeSwitch('live')">Go Live</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="paperModal">
+  <div class="modal">
+    <h3>Switch to Paper Trading?</h3>
+    <p>This will stop placing real orders. The bot will continue scanning but only simulate trades.</p>
+    <p>Any open live positions will <strong>not</strong> be automatically closed.</p>
+    <div class="modal-buttons">
+      <button class="btn btn-cancel" onclick="cancelModeSwitch()">Cancel</button>
+      <button class="btn btn-safe" onclick="confirmModeSwitch('paper')">Switch to Paper</button>
+    </div>
   </div>
 </div>
 
@@ -167,10 +220,8 @@ async function fetchData() {
     const d = await resp.json();
     const sig = d.signals || {};
 
-    // Mode
-    const ml = document.getElementById('modeLabel');
-    ml.textContent = d.mode;
-    ml.className = 'badge mode-' + d.mode;
+    // Mode — sync toggle
+    document.getElementById('modeToggle').checked = (d.mode === 'live');
 
     // Price
     document.getElementById('price').textContent = d.price ? '$' + Number(d.price).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) : '--';
@@ -293,6 +344,53 @@ async function fetchData() {
 
 fetchData();
 setInterval(fetchData, 10000);
+
+// --- Mode toggle ---
+let pendingMode = null;
+
+function handleModeToggle(el) {
+  el.checked = !el.checked; // revert — we'll set it after confirmation
+  const targetMode = el.checked ? 'paper' : 'live'; // inverted because we reverted
+  pendingMode = targetMode === 'paper' ? 'live' : 'paper';
+  // Actually: if currently unchecked (paper) and user clicked, they want live
+  const currentMode = document.getElementById('modeToggle').checked ? 'live' : 'paper';
+  const wantMode = currentMode === 'paper' ? 'live' : 'paper';
+  pendingMode = wantMode;
+
+  if (wantMode === 'live') {
+    document.getElementById('liveModal').classList.add('active');
+  } else {
+    document.getElementById('paperModal').classList.add('active');
+  }
+}
+
+function cancelModeSwitch() {
+  document.getElementById('liveModal').classList.remove('active');
+  document.getElementById('paperModal').classList.remove('active');
+  pendingMode = null;
+}
+
+async function confirmModeSwitch(mode) {
+  document.getElementById('liveModal').classList.remove('active');
+  document.getElementById('paperModal').classList.remove('active');
+  try {
+    const resp = await fetch('/api/mode', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({mode: mode})
+    });
+    const data = await resp.json();
+    if (data.error) {
+      alert('Failed to switch mode: ' + data.error);
+    } else {
+      document.getElementById('modeToggle').checked = (mode === 'live');
+      fetchData();
+    }
+  } catch(e) {
+    alert('Failed to switch mode: ' + e);
+  }
+  pendingMode = null;
+}
 </script>
 </body>
 </html>"""
@@ -301,15 +399,17 @@ setInterval(fetchData, 10000);
 class Dashboard:
     """Async web dashboard served alongside the trading bot."""
 
-    def __init__(self, db, paper_trader=None, config=None):
+    def __init__(self, db, paper_trader=None, config=None, bot=None):
         self.db = db
         self.paper_trader = paper_trader
         self.config = config
+        self.bot = bot  # reference to AlgoTraderBot for mode switching
         self._last_signals = {}
         self._last_price = 0
         self.app = web.Application()
         self.app.router.add_get('/', self._index)
         self.app.router.add_get('/api/status', self._api_status)
+        self.app.router.add_post('/api/mode', self._api_set_mode)
 
     def update_signals(self, price: float, signals_dict: dict):
         """Called by the bot after each scan to update displayed signals."""
@@ -372,9 +472,44 @@ class Dashboard:
             "position": position,
             "trades": trades_data,
             "equity_history": equity_history,
+            "has_kraken_keys": bool(self.config and self.config.kraken.api_key),
         }
 
         return web.json_response(data)
+
+    async def _api_set_mode(self, request):
+        """Switch between paper and live mode."""
+        try:
+            body = await request.json()
+            new_mode = body.get("mode", "").lower()
+
+            if new_mode not in ("paper", "live"):
+                return web.json_response({"error": "Mode must be 'paper' or 'live'"}, status=400)
+
+            if new_mode == "live" and self.config and not self.config.kraken.api_key:
+                return web.json_response(
+                    {"error": "Cannot switch to live mode: KRAKEN_API_KEY not configured"},
+                    status=400,
+                )
+
+            if self.config:
+                old_mode = self.config.mode
+                self.config.mode = new_mode
+
+                # Update strategy's paper flag
+                if self.bot and hasattr(self.bot, 'strategy'):
+                    self.bot.strategy.is_paper = (new_mode == "paper")
+
+                self.db.log("INFO", f"Mode switched from {old_mode} to {new_mode} via dashboard")
+                logger.info(f"Mode switched: {old_mode} -> {new_mode}")
+
+                return web.json_response({"mode": new_mode, "previous": old_mode})
+
+            return web.json_response({"error": "Config not available"}, status=500)
+
+        except Exception as e:
+            logger.error(f"Mode switch failed: {e}")
+            return web.json_response({"error": str(e)}, status=500)
 
     async def start(self, host: str = "0.0.0.0", port: int = 3737):
         """Start the web server (non-blocking)."""

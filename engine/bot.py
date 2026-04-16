@@ -112,6 +112,7 @@ class AlgoTraderBot:
             db=self.db,
             paper_trader=self.paper_trader,
             config=config,
+            bot=self,
         )
 
     async def start(self):
