@@ -1015,83 +1015,20 @@ If the operator gives you instructions, acknowledge them — they will be fed in
         return fixed
 
     def _build_full_trading_context(self) -> str:
-        """Build the SAME context the trading engine uses — so chat Claude IS trading Claude."""
-        # Try to get the full context from the actual trading engine
-        if self.bot and hasattr(self.bot, 'strategy') and hasattr(self.bot.strategy, '_build_context'):
-            try:
-                strategy = self.bot.strategy
-                position = self.db.get_open_position()
-                trades = self.db.get_trades(limit=10)
-                balance = self.paper_trader.get_balance() if self.paper_trader else None
+        """Return the EXACT same context the trading engine used on its last scan."""
+        # Use the cached context from the last trading scan — this is the real deal
+        if self.bot and hasattr(self.bot, 'strategy'):
+            cached = getattr(self.bot.strategy, '_last_context', '')
+            if cached:
+                return cached
 
-                # Use whatever the strategy last cached
-                context = strategy._build_context(
-                    price=self._last_price,
-                    bars=None,  # We don't cache bars, but price data is in signals
-                    signals=None,  # Indicator details are in _last_signals
-                    sentiment=None,  # Sentiment is in _last_signals
-                    position=position,
-                    trades=trades,
-                    balance=balance,
-                    market_overview=strategy._last_market_overview if hasattr(strategy, '_last_market_overview') else None,
-                )
-
-                # Append the latest signal summary since bars/signals/sentiment were None
-                sig = self._last_signals
-                extras = []
-                if sig.get("rsi"):
-                    extras.append(f"RSI (14): {sig['rsi']:.1f}")
-                if sig.get("ema_fast"):
-                    extras.append(f"EMA: ${sig['ema_fast']:,.0f} / ${sig.get('ema_slow', 0):,.0f} ({sig.get('ema_crossover', '')})")
-                if sig.get("fear_greed") is not None:
-                    extras.append(f"Fear & Greed: {sig['fear_greed']} ({sig.get('fear_greed_label', '')})")
-                if sig.get("news_sentiment"):
-                    extras.append(f"News: {sig['news_sentiment']}")
-                if sig.get("ai_action"):
-                    extras.append(f"Last decision: {sig['ai_action']} (confidence: {sig.get('ai_confidence', 0):.0%})")
-                    extras.append(f"Reasoning: {sig.get('ai_reasoning', '')}")
-
-                if extras:
-                    context += "\n\n## LATEST INDICATORS (from last scan)\n" + "\n".join(extras)
-
-                return context
-
-            except Exception as e:
-                logger.warning(f"Failed to build full trading context for chat: {e}")
-
-        # Fallback: build from cached signals
-        parts = []
+        # Fallback only if no scan has run yet
+        parts = ["Waiting for first scan to complete — market data not yet available."]
         if self._last_price:
             parts.append(f"BTC/USD: ${self._last_price:,.2f}")
-
-        sig = self._last_signals
-        if sig:
-            if sig.get("ai_action"):
-                parts.append(f"Last decision: {sig['ai_action']} (confidence: {sig.get('ai_confidence', 0):.0%})")
-                parts.append(f"Reasoning: {sig.get('ai_reasoning', 'N/A')}")
-            if sig.get("rsi"):
-                parts.append(f"RSI: {sig['rsi']:.1f} | EMA: {sig.get('ema_fast', 0):,.0f}/{sig.get('ema_slow', 0):,.0f}")
-            if sig.get("fear_greed") is not None:
-                parts.append(f"Fear & Greed: {sig['fear_greed']} ({sig.get('fear_greed_label', '')})")
-            if sig.get("coin_data"):
-                parts.append(f"Market: {sig.get('market_momentum', '')} | Rotation: {sig.get('sector_rotation', '')}")
-                for c in sig["coin_data"]:
-                    name = c["symbol"].replace("USD", "").replace("XBT", "BTC")
-                    parts.append(f"  {name}: ${c['price']:,.2f} | 1h: {c.get('change_1h', 0):+.2f}% | 24h: {c.get('change_24h', 0):+.2f}%")
-
         if self.paper_trader:
             bal = self.paper_trader.get_balance()
-            starting = self.config.paper.starting_capital if self.config else 10000
-            parts.append(f"Equity: ${bal.total_equity:,.2f} | Cash: ${bal.cash_usd:,.2f} | BTC: {bal.btc_quantity:.6f}")
-
-        pos = self.db.get_open_position()
-        if pos:
-            price = self._last_price or pos.entry_price
-            upnl_pct = (price - pos.entry_price) / pos.entry_price * 100 if pos.entry_price else 0
-            parts.append(f"Position: {pos.quantity:.6f} BTC @ ${pos.entry_price:,.2f} ({upnl_pct:+.2f}%)")
-        else:
-            parts.append("No open position")
-
+            parts.append(f"Equity: ${bal.total_equity:,.2f} | Cash: ${bal.cash_usd:,.2f}")
         parts.append(f"Mode: {'PAPER' if self.config and self.config.mode == 'paper' else 'LIVE'}")
         return "\n".join(parts)
 

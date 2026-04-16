@@ -135,6 +135,7 @@ class AIStrategy:
         self._scanner = MarketScanner(self._http)
         self._last_market_overview = None
         self._last_decision = None
+        self._last_context = ""  # Full context string from last scan — reused by chat
         self._highest_price_since_entry = 0.0
         self._trailing_stop_pct = 0.0
 
@@ -211,6 +212,7 @@ class AIStrategy:
             current_price, bars, signals, sentiment_data,
             position, recent_trades, balance, market_overview,
         )
+        self._last_context = context  # Cache for chat to reuse
 
         decision = await self._call_claude(context)
         self._last_decision = decision
