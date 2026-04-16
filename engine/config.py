@@ -65,6 +65,10 @@ class BotConfig:
     log_level: str = "INFO"
     # Kraken OHLCV candle interval in minutes (1, 5, 15, 30, 60, 240, 1440)
     candle_interval: int = 15
+    # AI-powered strategy (requires Anthropic API key)
+    use_ai_strategy: bool = True
+    anthropic_api_key: str = ""
+    ai_model: str = "claude-sonnet-4-20250514"
     # Kraken
     kraken: KrakenConfig = field(default_factory=KrakenConfig)
     # Strategy
@@ -80,6 +84,9 @@ def load_config() -> BotConfig:
         db_path=os.getenv("BOT_DB_PATH", "bot_data.db"),
         log_level=os.getenv("BOT_LOG_LEVEL", "INFO"),
         candle_interval=int(os.getenv("BOT_CANDLE_INTERVAL", "15")),
+        use_ai_strategy=os.getenv("USE_AI_STRATEGY", "true").lower() == "true",
+        anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
+        ai_model=os.getenv("AI_MODEL", "claude-sonnet-4-20250514"),
         kraken=KrakenConfig(
             api_key=os.getenv("KRAKEN_API_KEY", ""),
             api_secret=os.getenv("KRAKEN_API_SECRET", ""),

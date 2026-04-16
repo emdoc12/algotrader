@@ -22,7 +22,7 @@ from aiohttp import web
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# HTML template — single self-contained page, no external deps except Chart.js CDN
+# HTML template — single self-contained page with AI reasoning panel
 # ---------------------------------------------------------------------------
 
 DASHBOARD_HTML = """<!DOCTYPE html>
@@ -37,17 +37,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     --bg: #0f1117; --card: #1a1d27; --border: #2a2d3a;
     --text: #e1e4eb; --muted: #8b8fa3; --green: #22c55e;
     --red: #ef4444; --blue: #3b82f6; --yellow: #eab308;
-    --orange: #f97316;
+    --orange: #f97316; --purple: #a855f7;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 16px; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 16px; max-width: 1400px; margin: 0 auto; }
   .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
   .header h1 { font-size: 20px; font-weight: 600; }
-  .header .mode { padding: 4px 12px; border-radius: 12px; font-size: 12px; font-weight: 600; text-transform: uppercase; }
+  .header .badges { display: flex; gap: 8px; }
+  .badge { padding: 4px 12px; border-radius: 12px; font-size: 12px; font-weight: 600; text-transform: uppercase; }
   .mode-paper { background: var(--yellow); color: #000; }
   .mode-live { background: var(--red); color: #fff; }
+  .badge-ai { background: var(--purple); color: #fff; }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 16px; }
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+  .card-wide { grid-column: span 2; }
   .card h2 { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px; }
   .big-number { font-size: 32px; font-weight: 700; font-variant-numeric: tabular-nums; }
   .stat-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 14px; }
@@ -60,19 +63,27 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .signal-buy { background: rgba(34,197,94,0.15); color: var(--green); }
   .signal-sell { background: rgba(239,68,68,0.15); color: var(--red); }
   .signal-hold { background: rgba(139,143,163,0.15); color: var(--muted); }
+  .ai-reasoning { background: rgba(168,85,247,0.08); border: 1px solid rgba(168,85,247,0.2); border-radius: 8px; padding: 12px; margin-top: 8px; font-size: 14px; line-height: 1.5; }
+  .confidence-bar { height: 6px; background: var(--border); border-radius: 3px; margin-top: 8px; overflow: hidden; }
+  .confidence-fill { height: 100%; border-radius: 3px; transition: width 0.5s; }
+  .fear-greed-bar { height: 8px; background: linear-gradient(to right, #ef4444, #f97316, #eab308, #22c55e, #22c55e); border-radius: 4px; position: relative; margin: 8px 0; }
+  .fear-greed-marker { position: absolute; top: -3px; width: 14px; height: 14px; background: white; border-radius: 50%; border: 2px solid var(--bg); transform: translateX(-50%); }
   .chart-container { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
   .chart-container h2 { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th { text-align: left; color: var(--muted); font-weight: 500; padding: 8px 6px; border-bottom: 1px solid var(--border); }
   td { padding: 8px 6px; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
   .refresh-info { text-align: center; color: var(--muted); font-size: 12px; padding: 12px; }
-  @media (max-width: 640px) { .grid { grid-template-columns: 1fr; } .big-number { font-size: 24px; } }
+  @media (max-width: 640px) { .grid { grid-template-columns: 1fr; } .card-wide { grid-column: span 1; } .big-number { font-size: 24px; } }
 </style>
 </head>
 <body>
 <div class="header">
   <h1>AlgoTrader v2.0.0</h1>
-  <span class="mode" id="modeLabel">--</span>
+  <div class="badges">
+    <span class="badge badge-ai" id="aiLabel">AI</span>
+    <span class="badge" id="modeLabel">--</span>
+  </div>
 </div>
 
 <div class="grid">
@@ -96,6 +107,32 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div id="positionInfo">
       <div style="color:var(--muted);font-size:14px">No open position</div>
     </div>
+  </div>
+  <div class="card">
+    <h2>Market Sentiment</h2>
+    <div class="stat-row"><span class="stat-label">Fear & Greed</span><span id="fearGreed">--</span></div>
+    <div class="fear-greed-bar"><div class="fear-greed-marker" id="fgMarker" style="left:50%"></div></div>
+    <div class="stat-row"><span class="stat-label">News Sentiment</span><span id="newsSentiment">--</span></div>
+    <div class="stat-row"><span class="stat-label">AI Outlook</span><span id="aiOutlook">--</span></div>
+  </div>
+</div>
+
+<div class="grid" style="grid-template-columns: 1fr 1fr;">
+  <div class="card">
+    <h2>AI Decision</h2>
+    <div style="display:flex;align-items:center;gap:12px">
+      <span class="signal-badge signal-hold" id="aiAction" style="font-size:16px;padding:6px 16px">--</span>
+      <div>
+        <div style="font-size:13px;color:var(--muted)">Confidence</div>
+        <div style="font-size:18px;font-weight:600" id="aiConfidence">--</div>
+      </div>
+      <div>
+        <div style="font-size:13px;color:var(--muted)">Strategy</div>
+        <div style="font-size:14px" id="aiStrategy">--</div>
+      </div>
+    </div>
+    <div class="confidence-bar"><div class="confidence-fill" id="confFill" style="width:0;background:var(--muted)"></div></div>
+    <div class="ai-reasoning" id="aiReasoning">Waiting for first scan...</div>
   </div>
   <div class="card">
     <h2>Indicators</h2>
@@ -128,21 +165,53 @@ async function fetchData() {
   try {
     const resp = await fetch('/api/status');
     const d = await resp.json();
+    const sig = d.signals || {};
 
     // Mode
     const ml = document.getElementById('modeLabel');
     ml.textContent = d.mode;
-    ml.className = 'mode mode-' + d.mode;
+    ml.className = 'badge mode-' + d.mode;
 
     // Price
     document.getElementById('price').textContent = d.price ? '$' + Number(d.price).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) : '--';
 
-    // Signal
+    // Signal badge
     const sb = document.getElementById('signalBadge');
-    const rec = d.signals?.recommendation || '--';
+    const rec = sig.recommendation || sig.ai_action || '--';
     sb.textContent = rec;
     sb.className = 'signal-badge ' + (rec.includes('BUY') ? 'signal-buy' : rec.includes('SELL') ? 'signal-sell' : 'signal-hold');
-    document.getElementById('composite').textContent = d.signals?.composite !== undefined ? 'Score: ' + d.signals.composite.toFixed(3) : '';
+    document.getElementById('composite').textContent = sig.composite !== undefined ? 'Confidence: ' + (sig.composite * 100).toFixed(0) + '%' : '';
+
+    // AI Decision panel
+    const aiAction = sig.ai_action || '--';
+    const aiEl = document.getElementById('aiAction');
+    aiEl.textContent = aiAction;
+    aiEl.className = 'signal-badge ' + (aiAction.includes('BUY') ? 'signal-buy' : aiAction.includes('SELL') ? 'signal-sell' : 'signal-hold');
+
+    const conf = sig.ai_confidence || 0;
+    document.getElementById('aiConfidence').textContent = (conf * 100).toFixed(0) + '%';
+    const confFill = document.getElementById('confFill');
+    confFill.style.width = (conf * 100) + '%';
+    confFill.style.background = conf >= 0.6 ? (aiAction === 'BUY' ? 'var(--green)' : aiAction === 'SELL' ? 'var(--red)' : 'var(--muted)') : 'var(--muted)';
+
+    document.getElementById('aiStrategy').textContent = sig.ai_strategy || '--';
+    document.getElementById('aiReasoning').textContent = sig.ai_reasoning || 'Waiting for scan...';
+
+    // Sentiment
+    const fg = sig.fear_greed;
+    if (fg !== undefined) {
+      document.getElementById('fearGreed').textContent = fg + ' (' + (sig.fear_greed_label || '') + ')';
+      document.getElementById('fgMarker').style.left = fg + '%';
+    }
+    const ns = sig.news_sentiment || '--';
+    const nsEl = document.getElementById('newsSentiment');
+    nsEl.textContent = ns.replace('_', ' ');
+    nsEl.className = ns.includes('bullish') ? 'positive' : ns.includes('bearish') ? 'negative' : 'neutral';
+
+    const outlook = sig.ai_outlook || '--';
+    const olEl = document.getElementById('aiOutlook');
+    olEl.textContent = outlook;
+    olEl.className = outlook === 'bullish' ? 'positive' : outlook === 'bearish' ? 'negative' : 'neutral';
 
     // Account
     const bal = d.balance || {};
@@ -157,7 +226,6 @@ async function fetchData() {
     pnlEl.className = pnl >= 0 ? 'positive' : 'negative';
 
     // Indicators
-    const sig = d.signals || {};
     document.getElementById('ema').textContent = sig.ema_fast && sig.ema_slow ? '$' + sig.ema_fast.toLocaleString(undefined,{maximumFractionDigits:0}) + ' / $' + sig.ema_slow.toLocaleString(undefined,{maximumFractionDigits:0}) : '--';
     const cross = sig.ema_crossover || '--';
     const crossEl = document.getElementById('emaCross');
@@ -192,15 +260,9 @@ async function fetchData() {
     if (d.trades && d.trades.length > 0) {
       tbody.innerHTML = d.trades.map(t => {
         const dt = new Date(t.timestamp * 1000);
-        const time = dt.toLocaleDateString() + ' ' + dt.toLocaleTimeString();
+        const ts = dt.toLocaleDateString() + ' ' + dt.toLocaleTimeString();
         const sideClass = t.side === 'buy' ? 'positive' : 'negative';
-        return '<tr>' +
-          '<td>' + time + '</td>' +
-          '<td class="' + sideClass + '">' + t.side.toUpperCase() + '</td>' +
-          '<td>' + Number(t.quantity).toFixed(6) + '</td>' +
-          '<td>$' + Number(t.price).toLocaleString(undefined,{minimumFractionDigits:2}) + '</td>' +
-          '<td>$' + Number(t.value).toLocaleString(undefined,{minimumFractionDigits:2}) + '</td>' +
-          '<td>$' + Number(t.fee).toFixed(2) + '</td></tr>';
+        return '<tr><td>' + ts + '</td><td class="' + sideClass + '">' + t.side.toUpperCase() + '</td><td>' + Number(t.quantity).toFixed(6) + '</td><td>$' + Number(t.price).toLocaleString(undefined,{minimumFractionDigits:2}) + '</td><td>$' + Number(t.value).toLocaleString(undefined,{minimumFractionDigits:2}) + '</td><td>$' + Number(t.fee).toFixed(2) + '</td></tr>';
       }).join('');
     }
 
@@ -211,7 +273,6 @@ async function fetchData() {
         return dt.toLocaleDateString() + ' ' + dt.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
       });
       const data = d.equity_history.map(p => p.equity);
-
       if (equityChart) {
         equityChart.data.labels = labels;
         equityChart.data.datasets[0].data = data;
@@ -219,34 +280,15 @@ async function fetchData() {
       } else {
         equityChart = new Chart(document.getElementById('equityChart'), {
           type: 'line',
-          data: {
-            labels: labels,
-            datasets: [{
-              label: 'Equity',
-              data: data,
-              borderColor: '#3b82f6',
-              backgroundColor: 'rgba(59,130,246,0.1)',
-              fill: true,
-              tension: 0.3,
-              pointRadius: 0,
-              borderWidth: 2
-            }]
-          },
-          options: {
-            responsive: true,
-            plugins: { legend: { display: false } },
-            scales: {
-              x: { display: true, ticks: { color: '#8b8fa3', maxTicksLimit: 8, font: { size: 10 } }, grid: { color: '#2a2d3a' } },
-              y: { ticks: { color: '#8b8fa3', callback: v => '$' + v.toLocaleString() }, grid: { color: '#2a2d3a' } }
-            }
-          }
+          data: { labels, datasets: [{ label: 'Equity', data, borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', fill: true, tension: 0.3, pointRadius: 0, borderWidth: 2 }] },
+          options: { responsive: true, plugins: { legend: { display: false } }, scales: {
+            x: { ticks: { color: '#8b8fa3', maxTicksLimit: 8, font: { size: 10 } }, grid: { color: '#2a2d3a' } },
+            y: { ticks: { color: '#8b8fa3', callback: v => '$' + v.toLocaleString() }, grid: { color: '#2a2d3a' } }
+          }}
         });
       }
     }
-
-  } catch (e) {
-    console.error('Fetch error:', e);
-  }
+  } catch (e) { console.error('Fetch error:', e); }
 }
 
 fetchData();

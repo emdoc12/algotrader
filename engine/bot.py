@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 # Ensure engine/ directory is on the import path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from ai_strategy import AIStrategy
 from config import BotConfig, load_config
 from dashboard import Dashboard
 from database import Database
@@ -86,13 +87,25 @@ class AlgoTraderBot:
                 taker_fee_pct=config.paper.taker_fee_pct,
             )
 
-        # Strategy
-        self.strategy = TradingStrategy(
-            config=config,
-            db=self.db,
-            kraken=self.kraken,
-            paper_trader=self.paper_trader,
-        )
+        # Strategy — AI-powered or indicator-based fallback
+        if config.use_ai_strategy and config.anthropic_api_key:
+            self.strategy = AIStrategy(
+                config=config,
+                db=self.db,
+                kraken=self.kraken,
+                paper_trader=self.paper_trader,
+            )
+            self._using_ai = True
+        else:
+            self.strategy = TradingStrategy(
+                config=config,
+                db=self.db,
+                kraken=self.kraken,
+                paper_trader=self.paper_trader,
+            )
+            self._using_ai = False
+            if config.use_ai_strategy and not config.anthropic_api_key:
+                logger.warning("AI strategy enabled but no ANTHROPIC_API_KEY set — using indicator fallback")
 
         # Web dashboard
         self.dashboard = Dashboard(
@@ -142,6 +155,24 @@ class AlgoTraderBot:
                             "rsi_signal": signals.rsi.signal,
                             "bb_position": round(signals.bollinger.price_position, 4),
                         }
+                    # Add AI decision info if available
+                    ai_decision = result.get("ai_decision")
+                    if ai_decision:
+                        signals_dict["ai_action"] = ai_decision.action
+                        signals_dict["ai_confidence"] = ai_decision.confidence
+                        signals_dict["ai_reasoning"] = ai_decision.reasoning
+                        signals_dict["ai_outlook"] = ai_decision.market_outlook
+                        signals_dict["ai_strategy"] = ai_decision.strategy_used
+                        signals_dict["recommendation"] = ai_decision.action
+                        signals_dict["composite"] = ai_decision.confidence
+
+                    # Add sentiment if available
+                    sentiment = result.get("sentiment")
+                    if sentiment and hasattr(sentiment, 'fear_greed_value'):
+                        signals_dict["fear_greed"] = sentiment.fear_greed_value
+                        signals_dict["fear_greed_label"] = sentiment.fear_greed_label
+                        signals_dict["news_sentiment"] = sentiment.news_sentiment_summary
+
                     self.dashboard.update_signals(result["price"], signals_dict)
             except Exception as e:
                 logger.error(f"Scan #{scan_count} failed: {e}")
@@ -170,6 +201,8 @@ class AlgoTraderBot:
         self.running = False
         if self._dashboard_runner:
             await self._dashboard_runner.cleanup()
+        if self._using_ai and hasattr(self.strategy, 'close'):
+            await self.strategy.close()
         self.db.log("INFO", "Bot stopped")
         await self.kraken.close()
         self.db.close()
@@ -180,7 +213,9 @@ class AlgoTraderBot:
         c = self.config
         mode_label = "PAPER TRADING" if c.mode == "paper" else "LIVE TRADING"
         logger.info("=" * 60)
+        ai_label = "AI-Powered (Claude)" if self._using_ai else "Indicator-Based"
         logger.info(f"  AlgoTrader v2.0.0 — Kraken BTC Bot")
+        logger.info(f"  Strategy: {ai_label}")
         logger.info(f"  Mode: {mode_label}")
         logger.info(f"  Symbol: {c.kraken.display_symbol}")
         logger.info(f"  Candle interval: {c.candle_interval}m")
