@@ -12,7 +12,7 @@ FROM python:3.12-slim
 LABEL maintainer="emdoc12"
 LABEL org.opencontainers.image.title="AlgoTrader"
 LABEL org.opencontainers.image.description="24/7 Bitcoin trading bot for Kraken"
-LABEL org.opencontainers.image.version="2.6.1"
+LABEL org.opencontainers.image.version="2.6.2"
 
 # ── System deps ──────────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \

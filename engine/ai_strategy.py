@@ -490,8 +490,42 @@ class AIStrategy:
         if trades:
             parts.append(f"\n## RECENT TRADES (last {len(trades)})")
             for t in trades[:5]:
+                coin = getattr(t, 'symbol', 'BTC/USD')
                 ts = time.strftime('%m/%d %H:%M', time.gmtime(t.timestamp))
-                parts.append(f"  {ts} | {t.side.upper()} {t.quantity:.6f} BTC @ ${t.price:,.2f} | ${t.value:,.2f}")
+                parts.append(f"  {ts} | {t.side.upper()} {t.quantity:.6f} {coin} @ ${t.price:,.2f} | ${t.value:,.2f}")
+
+        # Performance stats — win rate, drawdown, profit factor, per-coin breakdown
+        try:
+            perf = self.db.get_performance_stats()
+            if perf["total_sells"] > 0:
+                parts.append(f"\n## YOUR PERFORMANCE STATS")
+                parts.append(f"Total completed trades: {perf['total_sells']} sells out of {perf['total_trades']} total")
+                parts.append(f"Win rate: {perf['win_rate']:.1f}% ({perf['winners']}W / {perf['losers']}L)")
+                parts.append(f"Average win: ${perf['avg_win']:,.2f} | Average loss: ${perf['avg_loss']:,.2f}")
+                parts.append(f"Profit factor: {perf['profit_factor']:.2f} (gross wins / gross losses)")
+                parts.append(f"Total realized P&L: ${perf['total_pnl']:,.2f}")
+                parts.append(f"Total fees paid: ${perf['total_fees']:,.2f}")
+                parts.append(f"Max drawdown: ${perf['max_drawdown']:,.2f}")
+
+                if perf["by_coin"]:
+                    parts.append(f"\nPerformance by coin:")
+                    for sym, stats in sorted(perf["by_coin"].items(), key=lambda x: x[1]["pnl"], reverse=True):
+                        parts.append(
+                            f"  {sym}: {stats['win_rate']:.0f}% win rate "
+                            f"({stats['wins']}W/{stats['losses']}L) | P&L: ${stats['pnl']:,.2f}"
+                        )
+
+                if perf["by_strategy"]:
+                    parts.append(f"\nPerformance by strategy:")
+                    for strat, stats in sorted(perf["by_strategy"].items(), key=lambda x: x[1]["pnl"], reverse=True):
+                        parts.append(
+                            f"  {strat}: {stats['win_rate']:.0f}% win rate "
+                            f"({stats['wins']}W/{stats['losses']}L) | P&L: ${stats['pnl']:,.2f}"
+                        )
+
+                parts.append(f"\nUse these stats to refine your strategy. Double down on what works, cut what doesn't.")
+        except Exception as e:
+            logger.debug(f"Could not load performance stats: {e}")
 
         # Goals and progress
         goals = self.db.get_goals()

@@ -459,6 +459,96 @@ class Database:
         self.conn.commit()
 
     # ------------------------------------------------------------------
+    # Performance stats for AI context
+    # ------------------------------------------------------------------
+
+    def get_performance_stats(self) -> dict:
+        """Compute full performance statistics from trade history.
+
+        Returns dict with: win_rate, avg_win, avg_loss, profit_factor,
+        max_drawdown, max_drawdown_pct, total_pnl, total_fees,
+        by_coin (per-coin stats), by_strategy (per-strategy stats).
+        """
+        trades = self.get_trades_with_pnl()  # newest-first
+        trades.reverse()  # oldest-first for drawdown calc
+
+        sells = [t for t in trades if t["side"] == "sell" and t["pnl_dollar"] is not None]
+        winners = [t for t in sells if t["pnl_dollar"] > 0]
+        losers = [t for t in sells if t["pnl_dollar"] <= 0]
+
+        total_sells = len(sells)
+        win_rate = (len(winners) / total_sells * 100) if total_sells else 0
+        avg_win = (sum(t["pnl_dollar"] for t in winners) / len(winners)) if winners else 0
+        avg_loss = (sum(t["pnl_dollar"] for t in losers) / len(losers)) if losers else 0
+        gross_profit = sum(t["pnl_dollar"] for t in winners)
+        gross_loss = abs(sum(t["pnl_dollar"] for t in losers)) if losers else 0
+        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (999.0 if gross_profit > 0 else 0)
+        total_pnl = sum(t["pnl_dollar"] for t in sells)
+        total_fees = sum(t.get("fee", 0) for t in trades)
+
+        # Max drawdown from running P&L curve
+        peak_pnl = 0.0
+        max_dd = 0.0
+        running = 0.0
+        for t in sells:
+            running += t["pnl_dollar"]
+            if running > peak_pnl:
+                peak_pnl = running
+            dd = peak_pnl - running
+            if dd > max_dd:
+                max_dd = dd
+
+        # Per-coin breakdown
+        by_coin = {}
+        for t in sells:
+            sym = t.get("symbol", "BTC/USD")
+            if sym not in by_coin:
+                by_coin[sym] = {"wins": 0, "losses": 0, "pnl": 0.0}
+            if t["pnl_dollar"] > 0:
+                by_coin[sym]["wins"] += 1
+            else:
+                by_coin[sym]["losses"] += 1
+            by_coin[sym]["pnl"] += t["pnl_dollar"]
+        for sym in by_coin:
+            total = by_coin[sym]["wins"] + by_coin[sym]["losses"]
+            by_coin[sym]["win_rate"] = (by_coin[sym]["wins"] / total * 100) if total else 0
+            by_coin[sym]["pnl"] = round(by_coin[sym]["pnl"], 2)
+
+        # Per-strategy breakdown
+        by_strategy = {}
+        for t in sells:
+            strat = t.get("strategy", "unknown") or "unknown"
+            # Clean up "ai_" prefix for readability
+            strat = strat.replace("ai_", "")
+            if strat not in by_strategy:
+                by_strategy[strat] = {"wins": 0, "losses": 0, "pnl": 0.0}
+            if t["pnl_dollar"] > 0:
+                by_strategy[strat]["wins"] += 1
+            else:
+                by_strategy[strat]["losses"] += 1
+            by_strategy[strat]["pnl"] += t["pnl_dollar"]
+        for strat in by_strategy:
+            total = by_strategy[strat]["wins"] + by_strategy[strat]["losses"]
+            by_strategy[strat]["win_rate"] = (by_strategy[strat]["wins"] / total * 100) if total else 0
+            by_strategy[strat]["pnl"] = round(by_strategy[strat]["pnl"], 2)
+
+        return {
+            "total_trades": len(trades),
+            "total_sells": total_sells,
+            "winners": len(winners),
+            "losers": len(losers),
+            "win_rate": round(win_rate, 1),
+            "avg_win": round(avg_win, 2),
+            "avg_loss": round(avg_loss, 2),
+            "profit_factor": round(profit_factor, 2),
+            "total_pnl": round(total_pnl, 2),
+            "total_fees": round(total_fees, 2),
+            "max_drawdown": round(max_dd, 2),
+            "by_coin": by_coin,
+            "by_strategy": by_strategy,
+        }
+
+    # ------------------------------------------------------------------
     # Weekly/Monthly P&L calculations
     # ------------------------------------------------------------------
 
