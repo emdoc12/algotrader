@@ -68,3 +68,9 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 ### Fixed
 - GitHub Actions: add `setup-buildx-action` so GHA cache backend works correctly
 - Repo visibility set to public so `ghcr.io/emdoc12/algotrader:latest` is pullable without auth
+
+## [1.2.3] - 2026-04-15
+
+### Fixed
+- Dockerfile: run `npm ci` with scripts enabled so `better-sqlite3` native addon compiles correctly
+- supervisord: increase engine `startsecs` to 15s so web server is fully up before Python engine connects

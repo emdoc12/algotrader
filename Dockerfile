@@ -10,21 +10,26 @@
 # Run:    docker run -p 3000:3000 --env-file engine/.env emdoc12/algotrader:latest
 # ─────────────────────────────────────────────────────────────────────────────
 
-FROM node:22-slim AS node-builder
+# ── Stage 1: build the React/Vite client + bundle the Express server ─────────
+FROM node:22-slim AS builder
 
 WORKDIR /build
 
-# Install dependencies
-COPY package*.json ./
-RUN npm ci --ignore-scripts
+# Need python3 + build tools here only for any native deps during npm install
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy source and build
+COPY package*.json ./
+# Run scripts so better-sqlite3 compiles its native addon in the builder
+RUN npm ci
+
 COPY . .
 RUN npm run build
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Final image: Node 22 slim + Python 3.12 + supervisord
+# Stage 2: lean runtime image
 # ─────────────────────────────────────────────────────────────────────────────
 FROM node:22-slim
 
@@ -32,7 +37,7 @@ LABEL maintainer="emdoc12"
 LABEL org.opencontainers.image.title="AlgoTrader"
 LABEL org.opencontainers.image.description="Automated trading bot — Tastytrade + Kraken + Bullflow scanner"
 
-# ── System deps ──────────────────────────────────────────────────────────────
+# ── System deps ───────────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
@@ -42,27 +47,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# ── App directory ────────────────────────────────────────────────────────────
 WORKDIR /app
 
-# Copy built Node.js dist
-COPY --from=node-builder /build/dist ./dist
-COPY --from=node-builder /build/node_modules ./node_modules
-COPY --from=node-builder /build/package.json ./package.json
+# ── Node app: copy built dist + node_modules (native .node already compiled) ──
+COPY --from=builder /build/dist        ./dist
+COPY --from=builder /build/node_modules ./node_modules
+COPY --from=builder /build/package.json ./package.json
 
-# Copy Python engine
+# ── Python engine ─────────────────────────────────────────────────────────────
 COPY engine/ ./engine/
 
-# ── Python virtualenv + deps ─────────────────────────────────────────────────
 RUN python3 -m venv /app/engine/.venv \
     && /app/engine/.venv/bin/pip install --upgrade pip --quiet \
     && /app/engine/.venv/bin/pip install -r /app/engine/requirements.txt --quiet
 
-# ── Data directory (SQLite DB lives here — mount as volume) ──────────────────
+# ── Persistent data directory (mount as Unraid volume) ───────────────────────
 RUN mkdir -p /app/data
 VOLUME ["/app/data"]
 
-# ── supervisord config ────────────────────────────────────────────────────────
+# ── Process supervisor ────────────────────────────────────────────────────────
 COPY supervisord.conf /etc/supervisor/conf.d/algotrader.conf
 
 # ── Entrypoint ────────────────────────────────────────────────────────────────
