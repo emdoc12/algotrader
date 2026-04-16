@@ -243,6 +243,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
 </div>
 
+<div class="card" style="margin-bottom:16px">
+  <h2>Market Overview <span style="font-size:11px;color:var(--muted);text-transform:none;letter-spacing:0" id="coinCount"></span></h2>
+  <div style="display:flex;gap:16px;margin-bottom:8px;flex-wrap:wrap">
+    <div><span style="font-size:12px;color:var(--muted)">Momentum</span><br><span style="font-size:14px;font-weight:600" id="mktMomentum">--</span></div>
+    <div><span style="font-size:12px;color:var(--muted)">Rotation</span><br><span style="font-size:14px;font-weight:600" id="mktRotation">--</span></div>
+    <div><span style="font-size:12px;color:var(--muted)">Top Movers</span><br><span style="font-size:14px;font-weight:600" id="mktMovers">--</span></div>
+  </div>
+  <div style="overflow-x:auto">
+    <table>
+      <thead><tr><th>Coin</th><th>Price</th><th>1h</th><th>24h</th><th>RSI</th><th>Signal</th></tr></thead>
+      <tbody id="coinTableBody"><tr><td colspan="6" style="color:var(--muted)">Scanning market...</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
 <div class="chart-container">
   <h2>Equity Curve</h2>
   <canvas id="equityChart" height="80"></canvas>
@@ -373,6 +388,38 @@ async function fetchData() {
     const olEl = document.getElementById('aiOutlook');
     olEl.textContent = outlook;
     olEl.className = outlook === 'bullish' ? 'positive' : outlook === 'bearish' ? 'negative' : 'neutral';
+
+    // Market overview
+    if (sig.coins_scanned) {
+      document.getElementById('coinCount').textContent = '(' + sig.coins_scanned + ' coins)';
+      const mm = sig.market_momentum || '--';
+      const mmEl = document.getElementById('mktMomentum');
+      mmEl.textContent = mm.replace('_', ' ');
+      mmEl.className = mm === 'risk_on' ? 'positive' : mm === 'risk_off' ? 'negative' : 'neutral';
+      document.getElementById('mktRotation').textContent = (sig.sector_rotation || '--').replace(/_/g, ' ');
+      document.getElementById('mktMovers').textContent = sig.top_movers || '--';
+
+      if (sig.coin_data && sig.coin_data.length > 0) {
+        const tbody = document.getElementById('coinTableBody');
+        tbody.innerHTML = sig.coin_data.map(function(c) {
+          const ch1 = c.change_1h || 0;
+          const ch24 = c.change_24h || 0;
+          const rsi = c.rsi || 0;
+          const mom = c.momentum || 0;
+          const sigClass = mom > 0.3 ? 'signal-buy' : mom < -0.3 ? 'signal-sell' : 'signal-hold';
+          const sigText = mom > 0.3 ? 'Bullish' : mom < -0.3 ? 'Bearish' : 'Neutral';
+          const name = c.symbol.replace('USD', '').replace('XBT', 'BTC');
+          return '<tr>' +
+            '<td style="font-weight:600">' + name + '</td>' +
+            '<td>$' + Number(c.price).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) + '</td>' +
+            '<td class="' + (ch1 >= 0 ? 'positive' : 'negative') + '">' + (ch1 >= 0 ? '+' : '') + ch1.toFixed(2) + '%</td>' +
+            '<td class="' + (ch24 >= 0 ? 'positive' : 'negative') + '">' + (ch24 >= 0 ? '+' : '') + ch24.toFixed(2) + '%</td>' +
+            '<td>' + rsi.toFixed(0) + '</td>' +
+            '<td><span class="signal-badge ' + sigClass + '">' + sigText + '</span></td>' +
+            '</tr>';
+        }).join('');
+      }
+    }
 
     // Account
     const bal = d.balance || {};

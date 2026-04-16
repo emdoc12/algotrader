@@ -174,6 +174,25 @@ class AlgoTraderBot:
                         signals_dict["fear_greed_label"] = sentiment.fear_greed_label
                         signals_dict["news_sentiment"] = sentiment.news_sentiment_summary
 
+                    # Add market overview if available
+                    mkt = result.get("market_overview")
+                    if mkt and hasattr(mkt, 'coin_snapshots'):
+                        signals_dict["market_momentum"] = mkt.market_momentum
+                        signals_dict["sector_rotation"] = mkt.sector_rotation_signal
+                        signals_dict["top_movers"] = ", ".join(mkt.top_movers[:3]) if mkt.top_movers else ""
+                        signals_dict["coins_scanned"] = len(mkt.coin_snapshots)
+                        signals_dict["coin_data"] = [
+                            {
+                                "symbol": c.symbol,
+                                "price": c.price,
+                                "change_1h": c.change_1h,
+                                "change_24h": c.change_24h,
+                                "rsi": c.rsi,
+                                "momentum": c.momentum_score,
+                            }
+                            for c in mkt.coin_snapshots[:10]
+                        ]
+
                     self.dashboard.update_signals(result["price"], signals_dict)
             except Exception as e:
                 logger.error(f"Scan #{scan_count} failed: {e}")
