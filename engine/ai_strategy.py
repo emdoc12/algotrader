@@ -348,7 +348,7 @@ class AIStrategy:
 
         # Multi-coin market overview
         if market_overview and market_overview.coin_snapshots:
-            parts.append(market_overview.format_for_ai())
+            parts.append(self._scanner.format_for_ai(market_overview))
 
         # Account state
         parts.append(f"\n## ACCOUNT STATE")

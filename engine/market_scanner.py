@@ -72,7 +72,7 @@ class MarketScanner:
         "AVAXUSD",
         "LINKUSD",
         "DOTUSD",
-        "MATICUSD",
+        "POLUSD",
         "XRPUSD",
     ]
 
@@ -86,7 +86,7 @@ class MarketScanner:
         "AVAXUSD": "AVAX",
         "LINKUSD": "LINK",
         "DOTUSD": "DOT",
-        "MATICUSD": "MATIC",
+        "POLUSD": "POL",
         "XRPUSD": "XRP",
     }
 
