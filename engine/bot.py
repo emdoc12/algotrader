@@ -160,6 +160,7 @@ class AlgoTraderBot:
                     ai_decision = result.get("ai_decision")
                     if ai_decision:
                         signals_dict["ai_action"] = ai_decision.action
+                        signals_dict["ai_symbol"] = getattr(ai_decision, 'symbol', 'BTC/USD')
                         signals_dict["ai_confidence"] = ai_decision.confidence
                         signals_dict["ai_reasoning"] = ai_decision.reasoning
                         signals_dict["ai_outlook"] = ai_decision.market_outlook

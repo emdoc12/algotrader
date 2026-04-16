@@ -30,6 +30,7 @@ class Trade:
     strategy: str = ""
     signals: str = ""       # JSON snapshot of signals at time of trade
     status: str = ""        # "filled", "validated", "pending"
+    symbol: str = "BTC/USD" # trading pair
 
 
 @dataclass
@@ -50,9 +51,16 @@ class Position:
 class PaperBalance:
     """Paper trading account state."""
     cash_usd: float = 10000.0
-    btc_quantity: float = 0.0
+    btc_quantity: float = 0.0        # Legacy — kept for backward compat
     total_equity: float = 10000.0
     last_updated: float = 0.0
+    holdings: dict = None  # {symbol: quantity} e.g. {"BTC": 0.05, "ETH": 1.2}
+
+    def __post_init__(self):
+        if self.holdings is None:
+            self.holdings = {}
+            if self.btc_quantity > 0:
+                self.holdings["BTC"] = self.btc_quantity
 
 
 class Database:
@@ -135,7 +143,17 @@ class Database:
                 role TEXT NOT NULL,
                 message TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS holdings (
+                symbol TEXT PRIMARY KEY,
+                quantity REAL NOT NULL DEFAULT 0
+            );
         """)
+        # Add symbol column to trades if not present (migration)
+        try:
+            self.conn.execute("SELECT symbol FROM trades LIMIT 1")
+        except sqlite3.OperationalError:
+            self.conn.execute("ALTER TABLE trades ADD COLUMN symbol TEXT DEFAULT 'BTC/USD'")
         self.conn.commit()
 
     # ------------------------------------------------------------------
@@ -146,11 +164,12 @@ class Database:
         """Insert a trade record. Returns the trade ID."""
         cursor = self.conn.execute(
             """INSERT INTO trades (timestamp, side, price, quantity, value, fee,
-               order_id, mode, strategy, signals, status)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               order_id, mode, strategy, signals, status, symbol)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (trade.timestamp or time.time(), trade.side, trade.price,
              trade.quantity, trade.value, trade.fee, trade.order_id,
-             trade.mode, trade.strategy, trade.signals, trade.status),
+             trade.mode, trade.strategy, trade.signals, trade.status,
+             trade.symbol),
         )
         self.conn.commit()
         return cursor.lastrowid
@@ -268,18 +287,50 @@ class Database:
         self.conn.commit()
         return position.id
 
-    def get_open_position(self) -> Optional[Position]:
-        """Get the current open position (we only hold one at a time)."""
-        row = self.conn.execute(
-            "SELECT * FROM positions ORDER BY id DESC LIMIT 1"
-        ).fetchone()
+    def get_open_position(self, symbol: str = None) -> Optional[Position]:
+        """Get an open position, optionally filtered by symbol."""
+        if symbol:
+            row = self.conn.execute(
+                "SELECT * FROM positions WHERE symbol=? ORDER BY id DESC LIMIT 1", (symbol,)
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT * FROM positions ORDER BY id DESC LIMIT 1"
+            ).fetchone()
         if row:
             return Position(**dict(row))
         return None
 
+    def get_open_positions(self) -> list[Position]:
+        """Get ALL open positions (one per coin)."""
+        rows = self.conn.execute(
+            "SELECT * FROM positions ORDER BY entry_time ASC"
+        ).fetchall()
+        return [Position(**dict(row)) for row in rows]
+
     def close_position(self, position_id: int):
         """Remove a closed position."""
         self.conn.execute("DELETE FROM positions WHERE id=?", (position_id,))
+        self.conn.commit()
+
+    # ------------------------------------------------------------------
+    # Holdings (multi-coin paper balances)
+    # ------------------------------------------------------------------
+
+    def get_holdings(self) -> dict:
+        """Get all coin holdings. Returns {symbol: quantity}."""
+        rows = self.conn.execute("SELECT symbol, quantity FROM holdings").fetchall()
+        return {row["symbol"]: row["quantity"] for row in rows}
+
+    def update_holding(self, symbol: str, quantity: float):
+        """Set holding quantity for a coin. Removes if quantity <= 0."""
+        if quantity <= 0.000000001:
+            self.conn.execute("DELETE FROM holdings WHERE symbol=?", (symbol,))
+        else:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO holdings (symbol, quantity) VALUES (?, ?)",
+                (symbol, quantity),
+            )
         self.conn.commit()
 
     # ------------------------------------------------------------------

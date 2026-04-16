@@ -35,15 +35,21 @@ from sentiment import SentimentFetcher, SentimentData
 logger = logging.getLogger(__name__)
 
 
-SYSTEM_PROMPT = """You are an expert cryptocurrency trader with FULL CONTROL over a BTC/USD portfolio on Kraken.
+SYSTEM_PROMPT = """You are an expert cryptocurrency trader with FULL CONTROL over a multi-coin portfolio on Kraken.
 You run 24/7 and make decisions every scan cycle based on technical analysis, market sentiment, and news.
-You are the decision engine. You decide EVERYTHING — position sizing, entries, exits, scaling in/out, risk management.
+You are the decision engine. You decide EVERYTHING — which coins to trade, position sizing, entries, exits, scaling in/out, risk management.
 
 ## YOUR DUAL OBJECTIVE
 1. **Grow the USD cash balance** — take profits when conditions warrant
-2. **Accumulate more Bitcoin** — buy dips, stack sats when the price is favorable
+2. **Accumulate crypto assets** — buy dips across any coin you believe in
 
 You must balance these objectives dynamically based on market conditions.
+
+## TRADEABLE COINS
+You can trade ANY of these Kraken pairs:
+BTC/USD, ETH/USD, SOL/USD, DOGE/USD, ADA/USD, AVAX/USD, LINK/USD, DOT/USD, POL/USD, XRP/USD
+
+Choose the best opportunity each cycle. You can hold multiple positions across different coins simultaneously.
 
 ## RISK PROFILE: AGGRESSIVE
 - You control your own position sizing — go big on high-conviction setups
@@ -52,6 +58,7 @@ You must balance these objectives dynamically based on market conditions.
 - You use stops and targets flexibly based on your conviction and market structure
 - You actively look for momentum trades, mean reversion, and accumulation opportunities
 - You manage your own cash reserves — allocate as you see fit
+- You can hold positions in multiple coins at the same time
 
 ## CRITICAL: FEE AWARENESS (ONE HARD RULE)
 Kraken charges a 0.26% taker fee per trade. A full round trip (buy + sell) costs 0.52% in fees.
@@ -60,11 +67,10 @@ Everything else is your call. Factor fees into your decisions:
 - Round-trip cost is 0.52%, so any take-profit below that is a net loss
 - Quick in-and-out scalps are fee destroyers — make sure the move justifies the cost
 - For long-term accumulation buys, fees matter less
-- At current BTC prices, 0.26% fee = roughly $180-220 per BTC traded
 
 ## YOUR CAPABILITIES
-- You can BUY any amount of BTC (limited by available cash)
-- You can SELL any amount of BTC you're holding (full or partial sells)
+- You can BUY any amount of any tradeable coin (limited by available cash)
+- You can SELL any amount of any coin you're holding (full or partial sells)
 - You can scale into positions — buy more when already holding
 - You can average down on dips or add to winning positions
 - You can adjust your stop-loss and take-profit levels every scan
@@ -72,13 +78,13 @@ Everything else is your call. Factor fees into your decisions:
 - Trailing stops automatically ratchet up as price rises — they never move down
 - Set trailing_stop_pct to 0 for a fixed stop-loss, or a value like 1.5-3.0 for a trailing stop
 - You can hold through volatility or cut losses fast — YOUR CALL
-- Minimum order size: 0.0001 BTC
-- Only BTC/USD spot (no shorting, no futures)
+- No shorting, no futures — spot only
 
 ## RESPONSE FORMAT
 You MUST respond with valid JSON only, no other text. Use this exact structure:
 {
   "action": "BUY" | "SELL" | "HOLD",
+  "symbol": "BTC/USD",
   "quantity": 0.0,
   "stop_loss": 0.0,
   "take_profit": 0.0,
@@ -89,17 +95,48 @@ You MUST respond with valid JSON only, no other text. Use this exact structure:
   "strategy_used": "momentum" | "mean_reversion" | "trend_following" | "sentiment" | "accumulation" | "scaling" | "profit_taking" | "stop_loss"
 }
 
-For HOLD actions, quantity/stop_loss/take_profit can be 0.
-For BUY when already holding: this ADDS to your position (scaling in). Set updated stop/target for the full position.
-For SELL: quantity is how much BTC to sell. Can be partial — sell some, keep some.
+IMPORTANT: "symbol" MUST be one of: BTC/USD, ETH/USD, SOL/USD, DOGE/USD, ADA/USD, AVAX/USD, LINK/USD, DOT/USD, POL/USD, XRP/USD
+For HOLD actions, symbol should be whichever coin you're monitoring most closely. quantity/stop_loss/take_profit can be 0.
+For BUY when already holding that coin: this ADDS to your position (scaling in). Set updated stop/target for the full position.
+For SELL: quantity is how much of that coin to sell. Can be partial — sell some, keep some.
 Confidence is 0.0 to 1.0 — only act on confidence >= 0.6.
 """
+
+
+# Map display symbols to Kraken pair names and base coin symbols
+SYMBOL_MAP = {
+    "BTC/USD": {"kraken": "XBTUSD", "base": "BTC"},
+    "ETH/USD": {"kraken": "ETHUSD", "base": "ETH"},
+    "SOL/USD": {"kraken": "SOLUSD", "base": "SOL"},
+    "DOGE/USD": {"kraken": "DOGEUSD", "base": "DOGE"},
+    "ADA/USD": {"kraken": "ADAUSD", "base": "ADA"},
+    "AVAX/USD": {"kraken": "AVAXUSD", "base": "AVAX"},
+    "LINK/USD": {"kraken": "LINKUSD", "base": "LINK"},
+    "DOT/USD": {"kraken": "DOTUSD", "base": "DOT"},
+    "POL/USD": {"kraken": "POLUSD", "base": "POL"},
+    "XRP/USD": {"kraken": "XRPUSD", "base": "XRP"},
+}
+
+# Minimum order sizes per coin on Kraken
+MIN_ORDER_SIZE = {
+    "BTC": 0.0001,
+    "ETH": 0.001,
+    "SOL": 0.01,
+    "DOGE": 10.0,
+    "ADA": 1.0,
+    "AVAX": 0.1,
+    "LINK": 0.1,
+    "DOT": 0.1,
+    "POL": 1.0,
+    "XRP": 1.0,
+}
 
 
 @dataclass
 class AIDecision:
     """Structured decision from the AI."""
     action: str = "HOLD"
+    symbol: str = "BTC/USD"     # which coin to trade
     quantity: float = 0.0
     stop_loss: float = 0.0
     take_profit: float = 0.0
@@ -136,8 +173,8 @@ class AIStrategy:
         self._last_market_overview = None
         self._last_decision = None
         self._last_context = ""  # Full context string from last scan — reused by chat
-        self._highest_price_since_entry = 0.0
-        self._trailing_stop_pct = 0.0
+        # Per-symbol trailing stop tracking: {symbol: {highest_price, trailing_pct}}
+        self._trailing_stops = {}
 
     async def run_scan(self) -> dict:
         """Run one AI-powered scan cycle."""
@@ -198,19 +235,25 @@ class AIStrategy:
             logger.warning(f"Market scan failed: {e}")
             market_overview = None
 
-        # --- 5. Update equity ---
+        # --- 5. Update equity with prices for all held coins ---
         if self.is_paper and self.paper_trader:
-            self.paper_trader.update_equity(current_price)
+            # Build price map from market scanner data
+            prices = {"BTC": current_price}
+            if market_overview:
+                for snap in market_overview.coin_snapshots:
+                    base = self._scanner.SYMBOL_MAP.get(snap.symbol, snap.symbol.replace("USD", ""))
+                    prices[base] = snap.price
+            self.paper_trader.update_equity(prices)
 
-        # --- 6. Get current state ---
-        position = self.db.get_open_position()
+        # --- 6. Get current state (all positions) ---
+        positions = self.db.get_open_positions()
         recent_trades = self.db.get_trades(limit=10)
         balance = self.paper_trader.get_balance() if self.paper_trader else None
 
         # --- 7. Build prompt and call Claude ---
         context = self._build_context(
             current_price, bars, signals, sentiment_data,
-            position, recent_trades, balance, market_overview,
+            positions, recent_trades, balance, market_overview,
         )
         self._last_context = context  # Cache for chat to reuse
 
@@ -218,66 +261,112 @@ class AIStrategy:
         self._last_decision = decision
 
         # --- 8. Execute decision ---
+        # Resolve the target symbol and get its current price
+        target_symbol = decision.symbol  # e.g. "ETH/USD"
+        sym_info = SYMBOL_MAP.get(target_symbol, SYMBOL_MAP["BTC/USD"])
+        base_coin = sym_info["base"]
+
+        # Get current price for the target coin
+        if target_symbol == "BTC/USD" or target_symbol == self.config.kraken.display_symbol:
+            target_price = current_price
+        elif market_overview:
+            # Look up price from market scanner
+            kraken_pair = sym_info["kraken"]
+            target_price = next(
+                (s.price for s in market_overview.coin_snapshots if s.symbol == kraken_pair),
+                current_price  # fallback
+            )
+        else:
+            target_price = current_price
+
+        # Find existing position for this specific coin
+        position = self.db.get_open_position(symbol=target_symbol)
+
         # Fee constants
         TAKER_FEE_PCT = 0.26
-        ROUND_TRIP_FEE_PCT = TAKER_FEE_PCT * 2  # 0.52% for buy + sell
-        MIN_PROFIT_PCT = 0.60  # minimum profit % to justify selling (above round-trip fees)
+        ROUND_TRIP_FEE_PCT = TAKER_FEE_PCT * 2  # 0.52%
+        MIN_PROFIT_PCT = 0.60
 
         action_taken = "hold"
         if decision.confidence >= 0.6:
             if decision.action == "BUY":
                 if position is not None:
-                    # Scaling in — add to existing position
-                    action_taken = await self._execute_scale_in(decision, position, current_price)
+                    action_taken = await self._execute_scale_in(decision, position, target_price)
                 else:
-                    # New position
-                    action_taken = await self._execute_buy(decision, current_price)
+                    action_taken = await self._execute_buy(decision, target_price)
 
             elif decision.action == "SELL" and position is not None:
-                # Fee guard: the ONE hard rule — block sells that don't cover fees
-                profit_pct = (current_price - position.entry_price) / position.entry_price * 100
+                profit_pct = (target_price - position.entry_price) / position.entry_price * 100
                 if 0 < profit_pct < MIN_PROFIT_PCT and decision.strategy_used not in ("stop_loss",):
                     logger.info(
-                        f"Blocking sell: {profit_pct:.2f}% gain doesn't cover "
+                        f"Blocking sell on {target_symbol}: {profit_pct:.2f}% gain doesn't cover "
                         f"{ROUND_TRIP_FEE_PCT:.2f}% round-trip fees. Holding."
                     )
                     action_taken = f"blocked_insufficient_profit ({profit_pct:.2f}%)"
                     self.db.log("INFO",
-                        f"Sell blocked: {profit_pct:.2f}% profit < {MIN_PROFIT_PCT:.2f}% minimum after fees")
+                        f"Sell blocked on {target_symbol}: {profit_pct:.2f}% profit < {MIN_PROFIT_PCT:.2f}% minimum")
                 else:
-                    action_taken = await self._execute_sell(decision, position, current_price)
+                    action_taken = await self._execute_sell(decision, position, target_price)
 
         elif decision.action != "HOLD":
-            logger.info(f"AI suggested {decision.action} but confidence too low ({decision.confidence:.2f})")
+            logger.info(f"AI suggested {decision.action} {target_symbol} but confidence too low ({decision.confidence:.2f})")
             action_taken = f"low_confidence_{decision.action.lower()}"
 
-        # --- 9. Check stop-loss / take-profit on existing position ---
-        # Claude sets these each scan, so respect them — but Claude can also update them
-        if position and action_taken == "hold":
-            # Update stop/target if Claude provided new ones (even on HOLD)
-            if decision.stop_loss > 0 and decision.action == "HOLD":
-                position.stop_loss = decision.stop_loss
-            if decision.take_profit > 0 and decision.action == "HOLD":
-                position.take_profit = decision.take_profit
-
-            # Trailing stop logic: ratchet stop-loss up as price rises
-            if self._trailing_stop_pct > 0:
-                self._highest_price_since_entry = max(self._highest_price_since_entry, current_price)
-                trailing_stop_price = self._highest_price_since_entry * (1 - self._trailing_stop_pct / 100)
-                if trailing_stop_price > position.stop_loss:
-                    logger.info(
-                        f"Trailing stop ratcheted up: ${position.stop_loss:,.2f} -> ${trailing_stop_price:,.2f} "
-                        f"(highest: ${self._highest_price_since_entry:,.2f}, trail: {self._trailing_stop_pct:.1f}%)"
-                    )
-                    position.stop_loss = trailing_stop_price
-
-            if current_price <= position.stop_loss:
-                action_taken = await self._execute_stop_loss(position, current_price)
-            elif current_price >= position.take_profit:
-                action_taken = await self._execute_take_profit(position, current_price)
+        # --- 9. Check stop-loss / take-profit on ALL open positions ---
+        for pos in positions:
+            # Get current price for this position's coin
+            pos_sym_info = SYMBOL_MAP.get(pos.symbol, {})
+            pos_kraken = pos_sym_info.get("kraken", "XBTUSD")
+            if pos.symbol == "BTC/USD":
+                pos_price = current_price
+            elif market_overview:
+                pos_price = next(
+                    (s.price for s in market_overview.coin_snapshots if s.symbol == pos_kraken),
+                    0
+                )
             else:
-                position.unrealized_pnl = (current_price - position.entry_price) * position.quantity
-                self.db.save_position(position)
+                pos_price = 0
+
+            if pos_price <= 0:
+                continue
+
+            # Update stop/target if Claude provided new ones for this specific coin
+            if decision.stop_loss > 0 and decision.action == "HOLD" and decision.symbol == pos.symbol:
+                pos.stop_loss = decision.stop_loss
+            if decision.take_profit > 0 and decision.action == "HOLD" and decision.symbol == pos.symbol:
+                pos.take_profit = decision.take_profit
+
+            # Per-symbol trailing stop logic
+            trail = self._trailing_stops.get(pos.symbol, {})
+            trail_pct = trail.get("trailing_pct", 0)
+            if trail_pct > 0:
+                highest = max(trail.get("highest_price", pos_price), pos_price)
+                trail["highest_price"] = highest
+                self._trailing_stops[pos.symbol] = trail
+                trailing_stop_price = highest * (1 - trail_pct / 100)
+                if trailing_stop_price > pos.stop_loss:
+                    logger.info(
+                        f"Trailing stop on {pos.symbol} ratcheted: ${pos.stop_loss:,.2f} -> ${trailing_stop_price:,.2f}"
+                    )
+                    pos.stop_loss = trailing_stop_price
+
+            if pos.stop_loss > 0 and pos_price <= pos.stop_loss:
+                sell_decision = AIDecision(
+                    action="SELL", symbol=pos.symbol, quantity=pos.quantity,
+                    confidence=1.0, strategy_used="stop_loss",
+                    reasoning=f"Stop-loss triggered at ${pos_price:,.2f}",
+                )
+                action_taken = await self._execute_sell(sell_decision, pos, pos_price)
+            elif pos.take_profit > 0 and pos_price >= pos.take_profit:
+                sell_decision = AIDecision(
+                    action="SELL", symbol=pos.symbol, quantity=pos.quantity,
+                    confidence=1.0, strategy_used="profit_taking",
+                    reasoning=f"Take-profit triggered at ${pos_price:,.2f}",
+                )
+                action_taken = await self._execute_sell(sell_decision, pos, pos_price)
+            else:
+                pos.unrealized_pnl = (pos_price - pos.entry_price) * pos.quantity
+                self.db.save_position(pos)
 
         # --- Build result ---
         result = {
@@ -286,21 +375,16 @@ class AIStrategy:
             "ai_decision": decision,
             "recommendation": decision.action,
             "composite_score": decision.confidence,
-            "has_position": position is not None,
+            "has_position": len(positions) > 0,
+            "positions": positions,
             "signals": signals,
             "sentiment": sentiment_data,
             "market_overview": market_overview,
         }
 
-        if position and action_taken == "hold":
-            result["position_entry"] = position.entry_price
-            result["unrealized_pnl_pct"] = (
-                (current_price - position.entry_price) / position.entry_price * 100
-            )
-
         return result
 
-    def _build_context(self, price, bars, signals, sentiment, position, trades, balance, market_overview=None) -> str:
+    def _build_context(self, price, bars, signals, sentiment, positions, trades, balance, market_overview=None) -> str:
         """Build the data context string for Claude."""
         parts = []
 
@@ -354,40 +438,53 @@ class AIStrategy:
         parts.append(f"\n## ACCOUNT STATE")
         if balance:
             parts.append(f"Cash (USD): ${balance.cash_usd:,.2f}")
-            parts.append(f"BTC held: {balance.btc_quantity:.6f} BTC (${balance.btc_quantity * price:,.2f})")
+            if balance.holdings:
+                for sym, qty in balance.holdings.items():
+                    parts.append(f"{sym} held: {qty:.6f}")
             parts.append(f"Total equity: ${balance.total_equity:,.2f}")
             starting = self.config.paper.starting_capital
             pnl = balance.total_equity - starting
             parts.append(f"Total P&L: ${pnl:,.2f} ({pnl/starting*100:+.2f}%)")
 
-        # Current position with fee analysis
-        if position:
-            upnl = (price - position.entry_price) * position.quantity
-            upnl_pct = (price - position.entry_price) / position.entry_price * 100
-            buy_fee = position.entry_price * position.quantity * 0.0026
-            sell_fee = price * position.quantity * 0.0026
-            total_fees = buy_fee + sell_fee
-            net_profit = upnl - total_fees
-            net_profit_pct = net_profit / (position.entry_price * position.quantity) * 100
-            breakeven_price = position.entry_price * 1.0052  # 0.52% above entry
+        # All open positions with fee analysis
+        if positions:
+            parts.append(f"\n## OPEN POSITIONS ({len(positions)})")
+            for position in (positions if isinstance(positions, list) else [positions]):
+                # Get current price for this position's coin
+                pos_price = price  # default to BTC price
+                if market_overview and position.symbol != "BTC/USD":
+                    sym_info = SYMBOL_MAP.get(position.symbol, {})
+                    kraken_pair = sym_info.get("kraken", "")
+                    for snap in (market_overview.coin_snapshots if market_overview else []):
+                        if snap.symbol == kraken_pair:
+                            pos_price = snap.price
+                            break
 
-            parts.append(f"\n## OPEN POSITION")
-            parts.append(f"Side: LONG")
-            parts.append(f"Entry: ${position.entry_price:,.2f}")
-            parts.append(f"Quantity: {position.quantity:.6f} BTC")
-            parts.append(f"Stop-loss: ${position.stop_loss:,.2f}")
-            parts.append(f"Take-profit: ${position.take_profit:,.2f}")
-            parts.append(f"Unrealized P&L (before fees): ${upnl:,.2f} ({upnl_pct:+.2f}%)")
-            parts.append(f"Estimated round-trip fees: ${total_fees:,.2f}")
-            parts.append(f"NET P&L (after fees): ${net_profit:,.2f} ({net_profit_pct:+.2f}%)")
-            parts.append(f"Breakeven price (including fees): ${breakeven_price:,.2f}")
-            if self._trailing_stop_pct > 0:
-                trail_price = self._highest_price_since_entry * (1 - self._trailing_stop_pct / 100)
-                parts.append(f"Trailing stop: {self._trailing_stop_pct:.1f}% (highest since entry: ${self._highest_price_since_entry:,.2f}, current trail: ${trail_price:,.2f})")
-            if net_profit < 0 and upnl > 0:
-                parts.append(f"⚠ WARNING: Position is profitable before fees but a LOSS after fees. Do NOT sell unless thesis has changed.")
+                upnl = (pos_price - position.entry_price) * position.quantity
+                upnl_pct = (pos_price - position.entry_price) / position.entry_price * 100 if position.entry_price > 0 else 0
+                buy_fee = position.entry_price * position.quantity * 0.0026
+                sell_fee = pos_price * position.quantity * 0.0026
+                total_fees = buy_fee + sell_fee
+                net_profit = upnl - total_fees
+                net_profit_pct = net_profit / (position.entry_price * position.quantity) * 100 if position.entry_price > 0 else 0
+                breakeven_price = position.entry_price * 1.0052
+
+                base = SYMBOL_MAP.get(position.symbol, {}).get("base", "???")
+                parts.append(f"\n### {position.symbol}")
+                parts.append(f"Side: LONG | Entry: ${position.entry_price:,.4f} | Qty: {position.quantity:.6f} {base}")
+                parts.append(f"Current: ${pos_price:,.4f} | Stop: ${position.stop_loss:,.4f} | Target: ${position.take_profit:,.4f}")
+                parts.append(f"Unrealized P&L: ${upnl:,.2f} ({upnl_pct:+.2f}%) | NET (after fees): ${net_profit:,.2f} ({net_profit_pct:+.2f}%)")
+                parts.append(f"Breakeven: ${breakeven_price:,.4f}")
+
+                trail = self._trailing_stops.get(position.symbol, {})
+                if trail.get("trailing_pct", 0) > 0:
+                    trail_price = trail["highest_price"] * (1 - trail["trailing_pct"] / 100)
+                    parts.append(f"Trailing stop: {trail['trailing_pct']:.1f}% (highest: ${trail['highest_price']:,.2f}, trail: ${trail_price:,.2f})")
+
+                if net_profit < 0 and upnl > 0:
+                    parts.append(f"⚠ Position profitable before fees but a LOSS after. Hold unless thesis changed.")
         else:
-            parts.append(f"\nNo open position.")
+            parts.append(f"\nNo open positions.")
 
         # Recent trades
         if trades:
@@ -489,8 +586,21 @@ class AIStrategy:
 
             decision_data = json.loads(json_str)
 
+            # Parse symbol — default to BTC/USD if not specified
+            raw_symbol = decision_data.get("symbol", "BTC/USD")
+            # Normalize: accept "ETHUSD", "ETH/USD", "ETH", etc.
+            if "/" not in raw_symbol and raw_symbol.endswith("USD"):
+                raw_symbol = raw_symbol[:-3] + "/USD"
+            elif "/" not in raw_symbol:
+                raw_symbol = raw_symbol + "/USD"
+            # Validate it's a known symbol
+            if raw_symbol not in SYMBOL_MAP:
+                logger.warning(f"Unknown symbol '{raw_symbol}' from AI, defaulting to BTC/USD")
+                raw_symbol = "BTC/USD"
+
             decision = AIDecision(
                 action=decision_data.get("action", "HOLD").upper(),
+                symbol=raw_symbol,
                 quantity=float(decision_data.get("quantity", 0)),
                 stop_loss=float(decision_data.get("stop_loss", 0)),
                 take_profit=float(decision_data.get("take_profit", 0)),
@@ -523,77 +633,9 @@ class AIStrategy:
 
     async def _execute_buy(self, decision: AIDecision, price: float) -> str:
         """Execute a buy based on AI decision."""
-        quantity = decision.quantity
-
-        # Cap to available cash (Claude decides how much to use)
-        # Reserve 0.26% for taker fee so we don't overshoot available funds
-        if self.paper_trader:
-            max_qty = self.paper_trader.balance.cash_usd / (price * 1.0026)
-            quantity = min(quantity, max_qty)
-
-        if quantity < 0.0001:
-            logger.info("AI buy quantity too small after caps, skipping")
-            return "skip_too_small"
-
-        signals_json = json.dumps({
-            "ai_action": decision.action,
-            "ai_confidence": decision.confidence,
-            "ai_reasoning": decision.reasoning,
-            "ai_outlook": decision.market_outlook,
-            "ai_strategy": decision.strategy_used,
-        })
-
-        try:
-            if self.is_paper and self.paper_trader:
-                self.paper_trader.execute_buy(
-                    price=price, quantity=quantity,
-                    strategy=f"ai_{decision.strategy_used}",
-                    signals_json=signals_json,
-                )
-            else:
-                result = await self.kraken.place_market_order(
-                    side="buy", volume=Decimal(str(round(quantity, 8))),
-                    validate=(self.config.mode != "live"),
-                )
-                self.db.record_trade(Trade(
-                    timestamp=time.time(), side="buy", price=price,
-                    quantity=quantity, value=price * quantity,
-                    order_id=result.order_id, mode="live",
-                    strategy=f"ai_{decision.strategy_used}",
-                    signals=signals_json, status=result.status,
-                ))
-
-            # Save position
-            position = Position(
-                symbol=self.config.kraken.display_symbol,
-                side="long", entry_price=price, quantity=quantity,
-                entry_time=time.time(),
-                stop_loss=decision.stop_loss if decision.stop_loss > 0 else price * 0.95,
-                take_profit=decision.take_profit if decision.take_profit > 0 else price * 1.10,
-            )
-            self.db.save_position(position)
-
-            # Initialize trailing stop tracking
-            self._trailing_stop_pct = decision.trailing_stop_pct
-            self._highest_price_since_entry = price
-
-            self.db.log("TRADE",
-                f"AI BUY: {quantity:.6f} BTC @ ${price:,.2f} | "
-                f"Strategy: {decision.strategy_used} | {decision.reasoning}",
-                signals_json)
-
-            logger.info(
-                f"OPENED LONG: {quantity:.6f} BTC @ ${price:,.2f} | "
-                f"SL: ${position.stop_loss:,.2f} | TP: ${position.take_profit:,.2f}"
-            )
-            return "buy"
-
-        except Exception as e:
-            logger.error(f"Buy execution failed: {e}")
-            return f"error: {e}"
-
-    async def _execute_scale_in(self, decision: AIDecision, position: Position, price: float) -> str:
-        """Add to an existing position (scale in / average down/up)."""
+        sym_info = SYMBOL_MAP.get(decision.symbol, SYMBOL_MAP["BTC/USD"])
+        base_coin = sym_info["base"]
+        min_size = MIN_ORDER_SIZE.get(base_coin, 0.0001)
         quantity = decision.quantity
 
         # Cap to available cash (reserve 0.26% for taker fee)
@@ -601,12 +643,13 @@ class AIStrategy:
             max_qty = self.paper_trader.balance.cash_usd / (price * 1.0026)
             quantity = min(quantity, max_qty)
 
-        if quantity < 0.0001:
-            logger.info("Scale-in quantity too small, skipping")
+        if quantity < min_size:
+            logger.info(f"AI buy quantity {quantity} below min {min_size} for {base_coin}, skipping")
             return "skip_too_small"
 
         signals_json = json.dumps({
-            "ai_action": "BUY (scale-in)",
+            "ai_action": decision.action,
+            "ai_symbol": decision.symbol,
             "ai_confidence": decision.confidence,
             "ai_reasoning": decision.reasoning,
             "ai_outlook": decision.market_outlook,
@@ -617,20 +660,108 @@ class AIStrategy:
             if self.is_paper and self.paper_trader:
                 self.paper_trader.execute_buy(
                     price=price, quantity=quantity,
-                    strategy=f"ai_{decision.strategy_used}_scalein",
+                    symbol=base_coin, display_symbol=decision.symbol,
+                    strategy=f"ai_{decision.strategy_used}",
                     signals_json=signals_json,
                 )
             else:
+                # For live trading, temporarily swap the kraken client symbol
+                orig_symbol = self.kraken.symbol
+                self.kraken.symbol = sym_info["kraken"]
                 result = await self.kraken.place_market_order(
                     side="buy", volume=Decimal(str(round(quantity, 8))),
                     validate=(self.config.mode != "live"),
                 )
+                self.kraken.symbol = orig_symbol
+                self.db.record_trade(Trade(
+                    timestamp=time.time(), side="buy", price=price,
+                    quantity=quantity, value=price * quantity,
+                    order_id=result.order_id, mode="live",
+                    strategy=f"ai_{decision.strategy_used}",
+                    signals=signals_json, status=result.status,
+                    symbol=decision.symbol,
+                ))
+
+            # Save position
+            position = Position(
+                symbol=decision.symbol,
+                side="long", entry_price=price, quantity=quantity,
+                entry_time=time.time(),
+                stop_loss=decision.stop_loss if decision.stop_loss > 0 else price * 0.95,
+                take_profit=decision.take_profit if decision.take_profit > 0 else price * 1.10,
+            )
+            self.db.save_position(position)
+
+            # Initialize per-symbol trailing stop tracking
+            if decision.trailing_stop_pct > 0:
+                self._trailing_stops[decision.symbol] = {
+                    "trailing_pct": decision.trailing_stop_pct,
+                    "highest_price": price,
+                }
+
+            self.db.log("TRADE",
+                f"AI BUY: {quantity:.6f} {base_coin} @ ${price:,.2f} | "
+                f"Strategy: {decision.strategy_used} | {decision.reasoning}",
+                signals_json)
+
+            logger.info(
+                f"OPENED LONG {decision.symbol}: {quantity:.6f} {base_coin} @ ${price:,.2f} | "
+                f"SL: ${position.stop_loss:,.2f} | TP: ${position.take_profit:,.2f}"
+            )
+            return "buy"
+
+        except Exception as e:
+            logger.error(f"Buy execution failed for {decision.symbol}: {e}")
+            return f"error: {e}"
+
+    async def _execute_scale_in(self, decision: AIDecision, position: Position, price: float) -> str:
+        """Add to an existing position (scale in / average down/up)."""
+        sym_info = SYMBOL_MAP.get(decision.symbol, SYMBOL_MAP["BTC/USD"])
+        base_coin = sym_info["base"]
+        min_size = MIN_ORDER_SIZE.get(base_coin, 0.0001)
+        quantity = decision.quantity
+
+        # Cap to available cash (reserve 0.26% for taker fee)
+        if self.paper_trader:
+            max_qty = self.paper_trader.balance.cash_usd / (price * 1.0026)
+            quantity = min(quantity, max_qty)
+
+        if quantity < min_size:
+            logger.info(f"Scale-in quantity {quantity} below min {min_size} for {base_coin}, skipping")
+            return "skip_too_small"
+
+        signals_json = json.dumps({
+            "ai_action": "BUY (scale-in)",
+            "ai_symbol": decision.symbol,
+            "ai_confidence": decision.confidence,
+            "ai_reasoning": decision.reasoning,
+            "ai_outlook": decision.market_outlook,
+            "ai_strategy": decision.strategy_used,
+        })
+
+        try:
+            if self.is_paper and self.paper_trader:
+                self.paper_trader.execute_buy(
+                    price=price, quantity=quantity,
+                    symbol=base_coin, display_symbol=decision.symbol,
+                    strategy=f"ai_{decision.strategy_used}_scalein",
+                    signals_json=signals_json,
+                )
+            else:
+                orig_symbol = self.kraken.symbol
+                self.kraken.symbol = sym_info["kraken"]
+                result = await self.kraken.place_market_order(
+                    side="buy", volume=Decimal(str(round(quantity, 8))),
+                    validate=(self.config.mode != "live"),
+                )
+                self.kraken.symbol = orig_symbol
                 self.db.record_trade(Trade(
                     timestamp=time.time(), side="buy", price=price,
                     quantity=quantity, value=price * quantity,
                     order_id=result.order_id, mode="live",
                     strategy=f"ai_{decision.strategy_used}_scalein",
                     signals=signals_json, status=result.status,
+                    symbol=decision.symbol,
                 ))
 
             # Update position with weighted average entry
@@ -645,33 +776,40 @@ class AIStrategy:
             position.take_profit = decision.take_profit if decision.take_profit > 0 else position.take_profit
             self.db.save_position(position)
 
-            # Update trailing stop tracking for scale-in
-            self._trailing_stop_pct = decision.trailing_stop_pct
-            self._highest_price_since_entry = price
+            # Update per-symbol trailing stop
+            if decision.trailing_stop_pct > 0:
+                self._trailing_stops[decision.symbol] = {
+                    "trailing_pct": decision.trailing_stop_pct,
+                    "highest_price": price,
+                }
 
             self.db.log("TRADE",
-                f"AI SCALE-IN: +{quantity:.6f} BTC @ ${price:,.2f} | "
-                f"Total: {total_qty:.6f} BTC | Avg entry: ${avg_entry:,.2f} | "
+                f"AI SCALE-IN {decision.symbol}: +{quantity:.6f} {base_coin} @ ${price:,.2f} | "
+                f"Total: {total_qty:.6f} | Avg entry: ${avg_entry:,.2f} | "
                 f"{decision.reasoning}", signals_json)
 
             logger.info(
-                f"SCALED IN: +{quantity:.6f} BTC @ ${price:,.2f} | "
-                f"Total: {total_qty:.6f} @ ${avg_entry:,.2f} avg | "
-                f"SL: ${position.stop_loss:,.2f} | TP: ${position.take_profit:,.2f}"
+                f"SCALED IN {decision.symbol}: +{quantity:.6f} {base_coin} @ ${price:,.2f} | "
+                f"Total: {total_qty:.6f} @ ${avg_entry:,.2f} avg"
             )
             return "scale_in"
 
         except Exception as e:
-            logger.error(f"Scale-in execution failed: {e}")
+            logger.error(f"Scale-in execution failed for {decision.symbol}: {e}")
             return f"error: {e}"
 
     async def _execute_sell(self, decision: AIDecision, position: Position, price: float) -> str:
         """Execute a sell based on AI decision."""
+        sym_info = SYMBOL_MAP.get(decision.symbol, SYMBOL_MAP["BTC/USD"])
+        base_coin = sym_info["base"]
+        min_size = MIN_ORDER_SIZE.get(base_coin, 0.0001)
+
         # AI can suggest partial sells
         quantity = min(decision.quantity, position.quantity) if decision.quantity > 0 else position.quantity
 
         signals_json = json.dumps({
             "ai_action": decision.action,
+            "ai_symbol": decision.symbol,
             "ai_confidence": decision.confidence,
             "ai_reasoning": decision.reasoning,
             "ai_outlook": decision.market_outlook,
@@ -682,27 +820,32 @@ class AIStrategy:
             if self.is_paper and self.paper_trader:
                 self.paper_trader.execute_sell(
                     price=price, quantity=quantity,
+                    symbol=base_coin, display_symbol=decision.symbol,
                     strategy=f"ai_{decision.strategy_used}",
                     signals_json=signals_json,
                 )
             else:
+                orig_symbol = self.kraken.symbol
+                self.kraken.symbol = sym_info["kraken"]
                 result = await self.kraken.place_market_order(
                     side="sell", volume=Decimal(str(round(quantity, 8))),
                     validate=(self.config.mode != "live"),
                 )
+                self.kraken.symbol = orig_symbol
                 self.db.record_trade(Trade(
                     timestamp=time.time(), side="sell", price=price,
                     quantity=quantity, value=price * quantity,
                     order_id=result.order_id, mode="live",
                     strategy=f"ai_{decision.strategy_used}",
                     signals=signals_json, status=result.status,
+                    symbol=decision.symbol,
                 ))
 
             pnl = (price - position.entry_price) * quantity
             pnl_pct = (price - position.entry_price) / position.entry_price * 100
 
             remaining = position.quantity - quantity
-            if remaining >= 0.0001:
+            if remaining >= min_size:
                 # Partial sell — keep position open with reduced quantity
                 position.quantity = remaining
                 position.unrealized_pnl = (price - position.entry_price) * remaining
@@ -715,49 +858,32 @@ class AIStrategy:
             else:
                 # Full close
                 self.db.close_position(position.id)
-                self._trailing_stop_pct = 0.0
-                self._highest_price_since_entry = 0.0
+                self._trailing_stops.pop(decision.symbol, None)
                 sell_type = "SELL"
 
             self.db.log("TRADE",
-                f"AI {sell_type}: {quantity:.6f} BTC @ ${price:,.2f} | "
+                f"AI {sell_type} {decision.symbol}: {quantity:.6f} {base_coin} @ ${price:,.2f} | "
                 f"P&L: ${pnl:,.2f} ({pnl_pct:+.2f}%) | "
-                f"{'Remaining: ' + f'{remaining:.6f} BTC' if remaining >= 0.0001 else 'Position closed'} | "
+                f"{'Remaining: ' + f'{remaining:.6f}' if remaining >= min_size else 'Position closed'} | "
                 f"{decision.reasoning}",
                 signals_json)
 
-            if remaining >= 0.0001:
+            if remaining >= min_size:
                 logger.info(
-                    f"PARTIAL SELL: {quantity:.6f} BTC @ ${price:,.2f} | "
-                    f"P&L: ${pnl:,.2f} ({pnl_pct:+.2f}%) | Keeping {remaining:.6f} BTC"
+                    f"PARTIAL SELL {decision.symbol}: {quantity:.6f} {base_coin} @ ${price:,.2f} | "
+                    f"P&L: ${pnl:,.2f} ({pnl_pct:+.2f}%) | Keeping {remaining:.6f}"
                 )
                 return f"partial_sell (ai_{decision.strategy_used})"
             else:
                 logger.info(
-                    f"CLOSED LONG: {quantity:.6f} BTC @ ${price:,.2f} | "
+                    f"CLOSED {decision.symbol}: {quantity:.6f} {base_coin} @ ${price:,.2f} | "
                     f"P&L: ${pnl:,.2f} ({pnl_pct:+.2f}%)"
                 )
                 return f"sell (ai_{decision.strategy_used})"
 
         except Exception as e:
-            logger.error(f"Sell execution failed: {e}")
+            logger.error(f"Sell execution failed for {decision.symbol}: {e}")
             return f"error: {e}"
-
-    async def _execute_stop_loss(self, position: Position, price: float) -> str:
-        """Execute stop-loss exit."""
-        return await self._execute_sell(
-            AIDecision(action="SELL", quantity=position.quantity,
-                      confidence=1.0, reasoning="Stop-loss triggered",
-                      strategy_used="stop_loss"),
-            position, price)
-
-    async def _execute_take_profit(self, position: Position, price: float) -> str:
-        """Execute take-profit exit."""
-        return await self._execute_sell(
-            AIDecision(action="SELL", quantity=position.quantity,
-                      confidence=1.0, reasoning="Take-profit triggered",
-                      strategy_used="take_profit"),
-            position, price)
 
     async def close(self):
         """Clean up."""

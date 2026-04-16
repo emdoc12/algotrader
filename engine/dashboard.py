@@ -31,7 +31,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AlgoTrader v2.5.0</title>
+<title>AlgoTrader v2.6.0</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4" async></script>
 <style>
   :root {
@@ -147,7 +147,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="header">
-  <h1>AlgoTrader v2.5.0</h1>
+  <h1>AlgoTrader v2.6.0</h1>
   <div class="badges">
     <span class="badge badge-ai" id="aiLabel">AI</span>
     <div class="toggle-wrap">
@@ -203,9 +203,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="stat-row"><span class="stat-label">Total P&L</span><span id="totalPnl">--</span></div>
   </div>
   <div class="card">
-    <h2>Position</h2>
+    <h2>Open Positions</h2>
     <div id="positionInfo">
-      <div style="color:var(--muted);font-size:14px">No open position</div>
+      <div style="color:var(--muted);font-size:14px">No open positions</div>
     </div>
   </div>
   <div class="card">
@@ -279,8 +279,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <span style="font-size:12px;color:var(--muted)">Last 3 days</span>
     </div>
     <table>
-      <thead><tr><th>Time</th><th>Side</th><th>Qty</th><th>Price</th><th>Value</th><th>Fee</th><th>P&L</th></tr></thead>
-      <tbody id="tradesBody"><tr><td colspan="7" style="color:var(--muted)">No trades yet</td></tr></tbody>
+      <thead><tr><th>Time</th><th>Coin</th><th>Side</th><th>Qty</th><th>Price</th><th>Value</th><th>Fee</th><th>P&L</th></tr></thead>
+      <tbody id="tradesBody"><tr><td colspan="8" style="color:var(--muted)">No trades yet</td></tr></tbody>
     </table>
   </div>
 
@@ -288,8 +288,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="tab-content" id="tab-alltrades" style="padding:0 16px 16px">
     <div id="allTradesSummary" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-bottom:12px"></div>
     <table>
-      <thead><tr><th>Time</th><th>Side</th><th>Qty</th><th>Price</th><th>Value</th><th>Fee</th><th>P&L</th><th>Running</th></tr></thead>
-      <tbody id="allTradesBody"><tr><td colspan="8" style="color:var(--muted)">Loading...</td></tr></tbody>
+      <thead><tr><th>Time</th><th>Coin</th><th>Side</th><th>Qty</th><th>Price</th><th>Value</th><th>Fee</th><th>P&L</th><th>Running</th></tr></thead>
+      <tbody id="allTradesBody"><tr><td colspan="9" style="color:var(--muted)">Loading...</td></tr></tbody>
     </table>
   </div>
 
@@ -372,7 +372,8 @@ async function fetchData() {
     document.getElementById('composite').textContent = sig.composite !== undefined ? 'Confidence: ' + (sig.composite * 100).toFixed(0) + '%' : '';
 
     // AI Decision panel
-    const aiAction = sig.ai_action || '--';
+    const aiSymbol = sig.ai_symbol || 'BTC/USD';
+    const aiAction = sig.ai_action ? sig.ai_action + ' ' + aiSymbol : '--';
     const aiEl = document.getElementById('aiAction');
     aiEl.textContent = aiAction;
     aiEl.className = 'signal-badge ' + (aiAction.includes('BUY') ? 'signal-buy' : aiAction.includes('SELL') ? 'signal-sell' : 'signal-hold');
@@ -460,20 +461,25 @@ async function fetchData() {
     }
     document.getElementById('bbPos').textContent = sig.bb_position !== undefined ? (sig.bb_position * 100).toFixed(1) + '%' : '--';
 
-    // Position
+    // Positions (multi-coin)
     const posDiv = document.getElementById('positionInfo');
-    const pos = d.position;
-    if (pos) {
-      const upnl = (d.price - pos.entry_price) * pos.quantity;
-      const upnlPct = ((d.price - pos.entry_price) / pos.entry_price * 100);
-      posDiv.innerHTML =
-        '<div class="stat-row"><span class="stat-label">Side</span><span>LONG</span></div>' +
-        '<div class="stat-row"><span class="stat-label">Entry</span><span>$' + pos.entry_price.toLocaleString(undefined,{minimumFractionDigits:2}) + '</span></div>' +
-        '<div class="stat-row"><span class="stat-label">Quantity</span><span>' + pos.quantity.toFixed(6) + ' BTC</span></div>' +
-        '<div class="stat-row"><span class="stat-label">Stop / Target</span><span>$' + pos.stop_loss.toLocaleString(undefined,{maximumFractionDigits:0}) + ' / $' + pos.take_profit.toLocaleString(undefined,{maximumFractionDigits:0}) + '</span></div>' +
-        '<div class="stat-row"><span class="stat-label">Unrealized P&L</span><span class="' + (upnl >= 0 ? 'positive' : 'negative') + '">' + (upnl >= 0 ? '+' : '') + '$' + upnl.toFixed(2) + ' (' + upnlPct.toFixed(2) + '%)</span></div>';
+    const allPos = d.positions || (d.position ? [d.position] : []);
+    if (allPos.length > 0) {
+      posDiv.innerHTML = allPos.map(pos => {
+        const upnl = pos.unrealized_pnl || 0;
+        const upnlPct = pos.entry_price > 0 ? ((upnl / (pos.entry_price * pos.quantity)) * 100) : 0;
+        const sym = pos.symbol || 'BTC/USD';
+        const coin = sym.replace('/USD', '');
+        return '<div style="margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid var(--border)">' +
+          '<div style="font-weight:600;margin-bottom:4px;color:var(--blue)">' + sym + '</div>' +
+          '<div class="stat-row"><span class="stat-label">Entry</span><span>$' + pos.entry_price.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:4}) + '</span></div>' +
+          '<div class="stat-row"><span class="stat-label">Quantity</span><span>' + pos.quantity.toFixed(6) + ' ' + coin + '</span></div>' +
+          '<div class="stat-row"><span class="stat-label">Stop / Target</span><span>$' + pos.stop_loss.toLocaleString(undefined,{maximumFractionDigits:2}) + ' / $' + pos.take_profit.toLocaleString(undefined,{maximumFractionDigits:2}) + '</span></div>' +
+          '<div class="stat-row"><span class="stat-label">Unrealized P&L</span><span class="' + (upnl >= 0 ? 'positive' : 'negative') + '">' + (upnl >= 0 ? '+' : '') + '$' + upnl.toFixed(2) + ' (' + upnlPct.toFixed(2) + '%)</span></div>' +
+          '</div>';
+      }).join('');
     } else {
-      posDiv.innerHTML = '<div style="color:var(--muted);font-size:14px;padding:8px 0">No open position</div>';
+      posDiv.innerHTML = '<div style="color:var(--muted);font-size:14px;padding:8px 0">No open positions</div>';
     }
 
     // Trades (last 3 days with P&L)
@@ -483,13 +489,14 @@ async function fetchData() {
         const dt = new Date(t.timestamp * 1000);
         const ts = dt.toLocaleDateString() + ' ' + dt.toLocaleTimeString();
         const sideClass = t.side === 'buy' ? 'positive' : 'negative';
+        const coin = (t.symbol || 'BTC/USD').replace('/USD', '');
         let pnlCell = '<td style="color:var(--muted)">—</td>';
         if (t.pnl_dollar !== null && t.pnl_dollar !== undefined) {
           const pnlClass = t.pnl_dollar >= 0 ? 'positive' : 'negative';
           const sign = t.pnl_dollar >= 0 ? '+' : '';
           pnlCell = '<td class="' + pnlClass + '">' + sign + '$' + t.pnl_dollar.toFixed(2) + ' (' + sign + t.pnl_pct.toFixed(1) + '%)</td>';
         }
-        return '<tr><td>' + ts + '</td><td class="' + sideClass + '">' + t.side.toUpperCase() + '</td><td>' + Number(t.quantity).toFixed(6) + '</td><td>$' + Number(t.price).toLocaleString(undefined,{minimumFractionDigits:2}) + '</td><td>$' + Number(t.value).toLocaleString(undefined,{minimumFractionDigits:2}) + '</td><td>$' + Number(t.fee).toFixed(2) + '</td>' + pnlCell + '</tr>';
+        return '<tr><td>' + ts + '</td><td>' + coin + '</td><td class="' + sideClass + '">' + t.side.toUpperCase() + '</td><td>' + Number(t.quantity).toFixed(6) + '</td><td>$' + Number(t.price).toLocaleString(undefined,{minimumFractionDigits:2}) + '</td><td>$' + Number(t.value).toLocaleString(undefined,{minimumFractionDigits:2}) + '</td><td>$' + Number(t.fee).toFixed(2) + '</td>' + pnlCell + '</tr>';
       }).join('');
     }
 
@@ -563,10 +570,11 @@ async function loadAllTrades() {
         const runClass = t.running_pnl >= 0 ? 'positive' : 'negative';
         const runSign = t.running_pnl >= 0 ? '+' : '';
         const runCell = '<td class="' + runClass + '">' + runSign + '$' + t.running_pnl.toFixed(2) + '</td>';
-        return '<tr><td>' + ts + '</td><td class="' + sideClass + '">' + t.side.toUpperCase() + '</td><td>' + Number(t.quantity).toFixed(6) + '</td><td>$' + Number(t.price).toLocaleString(undefined,{minimumFractionDigits:2}) + '</td><td>$' + Number(t.value).toLocaleString(undefined,{minimumFractionDigits:2}) + '</td><td>$' + Number(t.fee).toFixed(2) + '</td>' + pnlCell + runCell + '</tr>';
+        const coin = (t.symbol || 'BTC/USD').replace('/USD', '');
+        return '<tr><td>' + ts + '</td><td>' + coin + '</td><td class="' + sideClass + '">' + t.side.toUpperCase() + '</td><td>' + Number(t.quantity).toFixed(6) + '</td><td>$' + Number(t.price).toLocaleString(undefined,{minimumFractionDigits:2}) + '</td><td>$' + Number(t.value).toLocaleString(undefined,{minimumFractionDigits:2}) + '</td><td>$' + Number(t.fee).toFixed(2) + '</td>' + pnlCell + runCell + '</tr>';
       }).join('');
     } else {
-      tbody.innerHTML = '<tr><td colspan="8" style="color:var(--muted)">No trades yet</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="9" style="color:var(--muted)">No trades yet</td></tr>';
     }
     allTradesLoaded = true;
   } catch(e) {
@@ -852,20 +860,26 @@ class Dashboard:
                 "cash_usd": bal.cash_usd,
                 "btc_quantity": bal.btc_quantity,
                 "total_equity": bal.total_equity,
+                "holdings": bal.holdings if bal.holdings else {},
             }
             starting_capital = self.config.paper.starting_capital if self.config else 10000
 
-        # Position
-        position = None
-        pos = self.db.get_open_position()
-        if pos:
-            position = {
+        # All open positions
+        positions_list = self.db.get_open_positions()
+        positions_data = [
+            {
+                "symbol": pos.symbol,
                 "entry_price": pos.entry_price,
                 "quantity": pos.quantity,
                 "stop_loss": pos.stop_loss,
                 "take_profit": pos.take_profit,
                 "entry_time": pos.entry_time,
+                "unrealized_pnl": pos.unrealized_pnl,
             }
+            for pos in positions_list
+        ]
+        # Backward compat: "position" is the first/primary position
+        position = positions_data[0] if positions_data else None
 
         # Trades (last 3 days with P&L)
         three_days_ago = time.time() - (3 * 86400)
@@ -881,6 +895,7 @@ class Dashboard:
             "balance": balance,
             "starting_capital": starting_capital,
             "position": position,
+            "positions": positions_data,
             "trades": trades_data,
             "equity_history": equity_history,
             "has_kraken_keys": bool(self.config and self.config.kraken.api_key),
