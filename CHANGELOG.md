@@ -74,3 +74,9 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 ### Fixed
 - Dockerfile: run `npm ci` with scripts enabled so `better-sqlite3` native addon compiles correctly
 - supervisord: increase engine `startsecs` to 15s so web server is fully up before Python engine connects
+
+## [1.2.4] - 2026-04-15
+
+### Fixed
+- supervisord + entrypoint: API_BASE_URL was pointing to port 3000 but Express listens on 5000 — corrected to http://localhost:5000
+- Dockerfile: EXPOSE updated to 5000

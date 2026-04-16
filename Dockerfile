@@ -72,6 +72,6 @@ COPY supervisord.conf /etc/supervisor/conf.d/algotrader.conf
 COPY docker-entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-EXPOSE 3000
+EXPOSE 5000
 
 ENTRYPOINT ["/entrypoint.sh"]
