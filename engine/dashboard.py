@@ -32,7 +32,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AlgoTrader v2.0.0</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4" async></script>
 <style>
   :root {
     --bg: #0f1117; --card: #1a1d27; --border: #2a2d3a;
@@ -427,8 +427,8 @@ async function fetchData() {
       }).join('');
     }
 
-    // Equity chart
-    if (d.equity_history && d.equity_history.length > 1) {
+    // Equity chart (only if Chart.js loaded)
+    if (typeof Chart !== 'undefined' && d.equity_history && d.equity_history.length > 1) {
       const labels = d.equity_history.map(p => {
         const dt = new Date(p.timestamp * 1000);
         return dt.toLocaleDateString() + ' ' + dt.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
@@ -540,8 +540,8 @@ function appendChatMsg(role, text, ts) {
   div.className = 'chat-msg ' + (role === 'user' ? 'chat-msg-user' : 'chat-msg-ai');
   // Simple markdown-ish: bold, line breaks
   let html = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-  html = html.replace(/\n/g, '<br>');
+  html = html.replace(/[*][*](.*?)[*][*]/g, '<strong>$1</strong>');
+  html = html.replace(/\\n/g, '<br>');
   if (ts) {
     const dt = new Date(ts * 1000);
     html += '<div class="chat-msg-time">' + dt.toLocaleTimeString() + '</div>';
