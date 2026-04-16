@@ -50,14 +50,27 @@ You must balance these objectives. Don't be all-in or all-out. Think in terms of
 - You are comfortable with drawdowns if the thesis is intact
 - You actively look for momentum trades and mean reversion opportunities
 
+## CRITICAL: FEE AWARENESS
+Kraken charges a 0.26% taker fee per trade. A full round trip (buy + sell) costs 0.52% in fees.
+This means:
+- **NEVER enter a trade where your take-profit target is less than 1.0% above entry** — anything below ~0.6% is a guaranteed loss after fees
+- **Ideal minimum take-profit: 1.5%+** to ensure a meaningful gain after the 0.52% round-trip cost
+- **For scalp/momentum trades**: target at least 2-3% moves to justify the fees
+- **For accumulation buys**: fees matter less since you're holding long-term, but still factor them into your entry timing
+- **When evaluating a SELL**: if current profit is under 0.6%, it's usually better to HOLD and wait unless stop-loss is about to hit
+- **Quick in-and-out trades are fee destroyers** — prefer higher-conviction, larger-move setups over frequent small trades
+- At current BTC prices (~$70-85k), 0.26% fee = roughly $180-220 per BTC traded
+
 ## RULES
 - You can only trade BTC/USD (spot, not futures)
 - Minimum order size: 0.0001 BTC
 - You can hold ONE position at a time (long only — no shorting on spot)
 - Always set a stop-loss and take-profit for risk management
-- Consider fees (0.26% taker fee) in your calculations
+- Take-profit MUST be at least 1.5% above entry price to clear fees with profit
+- Stop-loss should reflect your conviction — tighter for weaker signals, wider for strong ones
 - NEVER go all-in. Keep at least 20% cash reserve
 - When in doubt, HOLD — don't force trades
+- Patience is profitable. Waiting for a strong setup beats overtrading.
 
 ## RESPONSE FORMAT
 You MUST respond with valid JSON only, no other text. Use this exact structure:
@@ -181,12 +194,40 @@ class AIStrategy:
         self._last_decision = decision
 
         # --- 8. Execute decision ---
+        # Fee constants
+        TAKER_FEE_PCT = 0.26
+        ROUND_TRIP_FEE_PCT = TAKER_FEE_PCT * 2  # 0.52% for buy + sell
+        MIN_PROFIT_PCT = 0.60  # minimum profit % to justify selling (above round-trip fees)
+
         action_taken = "hold"
         if decision.confidence >= 0.6:
             if decision.action == "BUY" and position is None:
+                # Validate take-profit covers fees
+                if decision.take_profit > 0 and current_price > 0:
+                    tp_gain_pct = (decision.take_profit - current_price) / current_price * 100
+                    if tp_gain_pct < ROUND_TRIP_FEE_PCT + 0.5:
+                        logger.warning(
+                            f"AI take-profit too close to entry ({tp_gain_pct:.2f}%), "
+                            f"bumping to {ROUND_TRIP_FEE_PCT + 1.0:.1f}% minimum"
+                        )
+                        decision.take_profit = current_price * (1 + (ROUND_TRIP_FEE_PCT + 1.0) / 100)
+
                 action_taken = await self._execute_buy(decision, current_price)
+
             elif decision.action == "SELL" and position is not None:
-                action_taken = await self._execute_sell(decision, position, current_price)
+                # Fee guard: block signal-based sells that don't cover fees
+                profit_pct = (current_price - position.entry_price) / position.entry_price * 100
+                if 0 < profit_pct < MIN_PROFIT_PCT and decision.strategy_used not in ("stop_loss",):
+                    logger.info(
+                        f"Blocking sell: {profit_pct:.2f}% gain doesn't cover "
+                        f"{ROUND_TRIP_FEE_PCT:.2f}% round-trip fees. Holding."
+                    )
+                    action_taken = f"blocked_insufficient_profit ({profit_pct:.2f}%)"
+                    self.db.log("INFO",
+                        f"Sell blocked: {profit_pct:.2f}% profit < {MIN_PROFIT_PCT:.2f}% minimum after fees")
+                else:
+                    action_taken = await self._execute_sell(decision, position, current_price)
+
         elif decision.action != "HOLD":
             logger.info(f"AI suggested {decision.action} but confidence too low ({decision.confidence:.2f})")
             action_taken = f"low_confidence_{decision.action.lower()}"
@@ -276,17 +317,29 @@ class AIStrategy:
             pnl = balance.total_equity - starting
             parts.append(f"Total P&L: ${pnl:,.2f} ({pnl/starting*100:+.2f}%)")
 
-        # Current position
+        # Current position with fee analysis
         if position:
             upnl = (price - position.entry_price) * position.quantity
             upnl_pct = (price - position.entry_price) / position.entry_price * 100
+            buy_fee = position.entry_price * position.quantity * 0.0026
+            sell_fee = price * position.quantity * 0.0026
+            total_fees = buy_fee + sell_fee
+            net_profit = upnl - total_fees
+            net_profit_pct = net_profit / (position.entry_price * position.quantity) * 100
+            breakeven_price = position.entry_price * 1.0052  # 0.52% above entry
+
             parts.append(f"\n## OPEN POSITION")
             parts.append(f"Side: LONG")
             parts.append(f"Entry: ${position.entry_price:,.2f}")
             parts.append(f"Quantity: {position.quantity:.6f} BTC")
             parts.append(f"Stop-loss: ${position.stop_loss:,.2f}")
             parts.append(f"Take-profit: ${position.take_profit:,.2f}")
-            parts.append(f"Unrealized P&L: ${upnl:,.2f} ({upnl_pct:+.2f}%)")
+            parts.append(f"Unrealized P&L (before fees): ${upnl:,.2f} ({upnl_pct:+.2f}%)")
+            parts.append(f"Estimated round-trip fees: ${total_fees:,.2f}")
+            parts.append(f"NET P&L (after fees): ${net_profit:,.2f} ({net_profit_pct:+.2f}%)")
+            parts.append(f"Breakeven price (including fees): ${breakeven_price:,.2f}")
+            if net_profit < 0 and upnl > 0:
+                parts.append(f"⚠ WARNING: Position is profitable before fees but a LOSS after fees. Do NOT sell unless thesis has changed.")
         else:
             parts.append(f"\nNo open position.")
 
