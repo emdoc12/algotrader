@@ -899,20 +899,8 @@ class Dashboard:
     # Chat API
     # ------------------------------------------------------------------
 
-    CHAT_SYSTEM_PROMPT = """You are Claude, the AI trading strategist for a BTC/USD algo trading bot running on Kraken.
-The user is your operator — they set goals, review your decisions, and want to understand your reasoning.
-
-You have access to the current market data, your recent decisions, and the bot's performance metrics (provided below).
-
-Be conversational but data-driven. Reference specific numbers from the context when explaining your thinking.
-If the user asks about strategy, explain what you'd look for and why.
-If they ask about performance, cite actual P&L, trade count, and win rate from the data.
-If they set goals, acknowledge them and explain how you'll adjust.
-Keep responses concise — 2-4 paragraphs max. Use $ and % formatting for financial data.
-You're aggressive by nature — you look for momentum plays and mean reversion, but you respect fee economics (0.52% round-trip on Kraken)."""
-
     async def _api_chat(self, request):
-        """Handle a chat message from the user."""
+        """Handle a chat message from the user — uses the SAME trading engine brain."""
         try:
             body = await request.json()
             user_msg = body.get("message", "").strip()
@@ -929,37 +917,43 @@ You're aggressive by nature — you look for momentum plays and mean reversion, 
             # Save user message
             self.db.add_chat_message("user", user_msg)
 
-            # Build context from current bot state
-            context = self._build_chat_context()
+            # Get the REAL trading engine system prompt and context
+            # This makes chat Claude the SAME brain as trading Claude
+            from ai_strategy import SYSTEM_PROMPT as TRADING_PROMPT
+            system_prompt = TRADING_PROMPT + """
 
-            # Build conversation history (last 10 messages for context)
+## CHAT MODE
+Your operator is talking to you via the dashboard chat. Respond conversationally — do NOT respond in JSON format.
+Be direct and data-driven. Reference specific numbers from the market data below.
+You ARE the trading engine — when you say "I'll do X", you mean it. Your next scan cycle will reflect your thinking here.
+Keep responses concise (2-4 paragraphs). Use $ and % formatting for financial data.
+If the operator gives you instructions, acknowledge them — they will be fed into your next trading scan."""
+
+            # Build the SAME rich context the trading engine sees
+            context = self._build_full_trading_context()
+
+            # Build conversation history (last 10 messages)
             history = self.db.get_chat_history(limit=10)
             messages = []
-            # Add context as first user message
+
+            # First message: full market context
             messages.append({
                 "role": "user",
-                "content": f"[CURRENT BOT STATE]\n{context}\n\n[END BOT STATE]\n\nThe operator says: {history[0]['message']}" if history else f"[CURRENT BOT STATE]\n{context}\n\n[END BOT STATE]\n\nThe operator says: {user_msg}",
+                "content": f"[LIVE MARKET DATA - SAME DATA YOU USE FOR TRADING]\n{context}\n[END MARKET DATA]",
+            })
+            messages.append({
+                "role": "assistant",
+                "content": "I have the full market picture. What would you like to discuss?",
             })
 
-            # Build alternating messages from history (skip first, it's in context)
-            if len(history) > 1:
-                # We need to rebuild the conversation properly
-                messages = [{
-                    "role": "user",
-                    "content": f"[CURRENT BOT STATE]\n{context}\n\n[END BOT STATE]",
-                }]
-                # Pair up history messages, ensuring proper alternation
-                for msg in history:
-                    role = msg["role"]
-                    if role == "user":
-                        messages.append({"role": "user", "content": msg["message"]})
-                    else:
-                        messages.append({"role": "assistant", "content": msg["message"]})
+            # Add conversation history
+            for msg in history:
+                messages.append({"role": msg["role"], "content": msg["message"]})
 
-                # Ensure it starts with user and alternates properly
-                messages = self._fix_message_alternation(messages)
+            # Ensure proper alternation
+            messages = self._fix_message_alternation(messages)
 
-            # Call Claude
+            # Call Claude with the SAME model and personality as the trading engine
             model = self.config.ai_model if self.config else "claude-sonnet-4-20250514"
             resp = await self._http.post(
                 "https://api.anthropic.com/v1/messages",
@@ -971,7 +965,7 @@ You're aggressive by nature — you look for momentum plays and mean reversion, 
                 json={
                     "model": model,
                     "max_tokens": 800,
-                    "system": self.CHAT_SYSTEM_PROMPT,
+                    "system": system_prompt,
                     "messages": messages,
                 },
             )
@@ -1020,80 +1014,85 @@ You're aggressive by nature — you look for momentum plays and mean reversion, 
             pass  # The last user message should already be there
         return fixed
 
-    def _build_chat_context(self) -> str:
-        """Build a summary of current bot state for the chat context."""
-        parts = []
+    def _build_full_trading_context(self) -> str:
+        """Build the SAME context the trading engine uses — so chat Claude IS trading Claude."""
+        # Try to get the full context from the actual trading engine
+        if self.bot and hasattr(self.bot, 'strategy') and hasattr(self.bot.strategy, '_build_context'):
+            try:
+                strategy = self.bot.strategy
+                position = self.db.get_open_position()
+                trades = self.db.get_trades(limit=10)
+                balance = self.paper_trader.get_balance() if self.paper_trader else None
 
-        # Price and signals
+                # Use whatever the strategy last cached
+                context = strategy._build_context(
+                    price=self._last_price,
+                    bars=None,  # We don't cache bars, but price data is in signals
+                    signals=None,  # Indicator details are in _last_signals
+                    sentiment=None,  # Sentiment is in _last_signals
+                    position=position,
+                    trades=trades,
+                    balance=balance,
+                    market_overview=strategy._last_market_overview if hasattr(strategy, '_last_market_overview') else None,
+                )
+
+                # Append the latest signal summary since bars/signals/sentiment were None
+                sig = self._last_signals
+                extras = []
+                if sig.get("rsi"):
+                    extras.append(f"RSI (14): {sig['rsi']:.1f}")
+                if sig.get("ema_fast"):
+                    extras.append(f"EMA: ${sig['ema_fast']:,.0f} / ${sig.get('ema_slow', 0):,.0f} ({sig.get('ema_crossover', '')})")
+                if sig.get("fear_greed") is not None:
+                    extras.append(f"Fear & Greed: {sig['fear_greed']} ({sig.get('fear_greed_label', '')})")
+                if sig.get("news_sentiment"):
+                    extras.append(f"News: {sig['news_sentiment']}")
+                if sig.get("ai_action"):
+                    extras.append(f"Last decision: {sig['ai_action']} (confidence: {sig.get('ai_confidence', 0):.0%})")
+                    extras.append(f"Reasoning: {sig.get('ai_reasoning', '')}")
+
+                if extras:
+                    context += "\n\n## LATEST INDICATORS (from last scan)\n" + "\n".join(extras)
+
+                return context
+
+            except Exception as e:
+                logger.warning(f"Failed to build full trading context for chat: {e}")
+
+        # Fallback: build from cached signals
+        parts = []
         if self._last_price:
             parts.append(f"BTC/USD: ${self._last_price:,.2f}")
+
         sig = self._last_signals
         if sig:
             if sig.get("ai_action"):
-                parts.append(f"Last AI decision: {sig['ai_action']} (confidence: {sig.get('ai_confidence', 0):.0%})")
+                parts.append(f"Last decision: {sig['ai_action']} (confidence: {sig.get('ai_confidence', 0):.0%})")
                 parts.append(f"Reasoning: {sig.get('ai_reasoning', 'N/A')}")
-                parts.append(f"Strategy: {sig.get('ai_strategy', 'N/A')}")
-                parts.append(f"Outlook: {sig.get('ai_outlook', 'N/A')}")
             if sig.get("rsi"):
                 parts.append(f"RSI: {sig['rsi']:.1f} | EMA: {sig.get('ema_fast', 0):,.0f}/{sig.get('ema_slow', 0):,.0f}")
             if sig.get("fear_greed") is not None:
                 parts.append(f"Fear & Greed: {sig['fear_greed']} ({sig.get('fear_greed_label', '')})")
+            if sig.get("coin_data"):
+                parts.append(f"Market: {sig.get('market_momentum', '')} | Rotation: {sig.get('sector_rotation', '')}")
+                for c in sig["coin_data"]:
+                    name = c["symbol"].replace("USD", "").replace("XBT", "BTC")
+                    parts.append(f"  {name}: ${c['price']:,.2f} | 1h: {c.get('change_1h', 0):+.2f}% | 24h: {c.get('change_24h', 0):+.2f}%")
 
-        # Balance
         if self.paper_trader:
             bal = self.paper_trader.get_balance()
             starting = self.config.paper.starting_capital if self.config else 10000
-            pnl = bal.total_equity - starting
             parts.append(f"Equity: ${bal.total_equity:,.2f} | Cash: ${bal.cash_usd:,.2f} | BTC: {bal.btc_quantity:.6f}")
-            parts.append(f"Total P&L: ${pnl:,.2f} ({pnl/starting*100:+.2f}%)")
 
-        # Position
         pos = self.db.get_open_position()
         if pos:
             price = self._last_price or pos.entry_price
-            upnl = (price - pos.entry_price) * pos.quantity
             upnl_pct = (price - pos.entry_price) / pos.entry_price * 100 if pos.entry_price else 0
-            parts.append(f"Open position: {pos.quantity:.6f} BTC @ ${pos.entry_price:,.2f} | P&L: ${upnl:,.2f} ({upnl_pct:+.2f}%)")
-            parts.append(f"Stop: ${pos.stop_loss:,.2f} | Target: ${pos.take_profit:,.2f}")
+            parts.append(f"Position: {pos.quantity:.6f} BTC @ ${pos.entry_price:,.2f} ({upnl_pct:+.2f}%)")
         else:
             parts.append("No open position")
 
-        # Goals
-        goals = self.db.get_goals()
-        weekly_pnl = self.db.get_period_pnl(7 * 86400)
-        monthly_pnl = self.db.get_period_pnl(30 * 86400)
-        parts.append(f"This week: {weekly_pnl['trade_count']} trades, ${weekly_pnl['realized_pnl']:,.2f} realized P&L")
-        parts.append(f"This month: {monthly_pnl['trade_count']} trades, ${monthly_pnl['realized_pnl']:,.2f} realized P&L")
-
-        if goals.get("weekly_profit_target", 0) > 0:
-            parts.append(f"Weekly profit target: ${goals['weekly_profit_target']:,.2f}")
-        if goals.get("monthly_profit_target", 0) > 0:
-            parts.append(f"Monthly profit target: ${goals['monthly_profit_target']:,.2f}")
-
-        # Trade stats
-        stats = self.db.get_trade_stats()
-        if stats.get("total_trades", 0) > 0:
-            parts.append(f"All-time: {stats['total_trades']} trades ({stats['buys']} buys, {stats['sells']} sells) | Fees: ${stats['total_fees']:,.2f}")
-
-        # Multi-coin market data
-        if sig.get("coin_data"):
-            parts.append(f"\n--- CRYPTO MARKET OVERVIEW ---")
-            parts.append(f"Market momentum: {sig.get('market_momentum', 'N/A')}")
-            parts.append(f"Sector rotation: {sig.get('sector_rotation', 'N/A')}")
-            parts.append(f"Top movers: {sig.get('top_movers', 'N/A')}")
-            for c in sig["coin_data"]:
-                name = c["symbol"].replace("USD", "").replace("XBT", "BTC")
-                parts.append(
-                    f"  {name}: ${c['price']:,.2f} | "
-                    f"1h: {c.get('change_1h', 0):+.2f}% | "
-                    f"24h: {c.get('change_24h', 0):+.2f}% | "
-                    f"RSI: {c.get('rsi', 0):.0f} | "
-                    f"Momentum: {c.get('momentum', 0):+.2f}"
-                )
-
-        parts.append(f"\nMode: {'PAPER' if self.config and self.config.mode == 'paper' else 'LIVE'}")
-        parts.append(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}")
-
+        parts.append(f"Mode: {'PAPER' if self.config and self.config.mode == 'paper' else 'LIVE'}")
         return "\n".join(parts)
 
     async def start(self, host: str = "0.0.0.0", port: int = 3737):
