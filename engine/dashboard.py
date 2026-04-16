@@ -1075,7 +1075,23 @@ You're aggressive by nature — you look for momentum plays and mean reversion, 
         if stats.get("total_trades", 0) > 0:
             parts.append(f"All-time: {stats['total_trades']} trades ({stats['buys']} buys, {stats['sells']} sells) | Fees: ${stats['total_fees']:,.2f}")
 
-        parts.append(f"Mode: {'PAPER' if self.config and self.config.mode == 'paper' else 'LIVE'}")
+        # Multi-coin market data
+        if sig.get("coin_data"):
+            parts.append(f"\n--- CRYPTO MARKET OVERVIEW ---")
+            parts.append(f"Market momentum: {sig.get('market_momentum', 'N/A')}")
+            parts.append(f"Sector rotation: {sig.get('sector_rotation', 'N/A')}")
+            parts.append(f"Top movers: {sig.get('top_movers', 'N/A')}")
+            for c in sig["coin_data"]:
+                name = c["symbol"].replace("USD", "").replace("XBT", "BTC")
+                parts.append(
+                    f"  {name}: ${c['price']:,.2f} | "
+                    f"1h: {c.get('change_1h', 0):+.2f}% | "
+                    f"24h: {c.get('change_24h', 0):+.2f}% | "
+                    f"RSI: {c.get('rsi', 0):.0f} | "
+                    f"Momentum: {c.get('momentum', 0):+.2f}"
+                )
+
+        parts.append(f"\nMode: {'PAPER' if self.config and self.config.mode == 'paper' else 'LIVE'}")
         parts.append(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}")
 
         return "\n".join(parts)
