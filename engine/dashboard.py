@@ -17,6 +17,7 @@ import logging
 import time
 from datetime import datetime, timezone
 
+import httpx
 from aiohttp import web
 
 logger = logging.getLogger(__name__)
@@ -95,7 +96,53 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   th { text-align: left; color: var(--muted); font-weight: 500; padding: 8px 6px; border-bottom: 1px solid var(--border); }
   td { padding: 8px 6px; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
   .refresh-info { text-align: center; color: var(--muted); font-size: 12px; padding: 12px; }
-  @media (max-width: 640px) { .grid { grid-template-columns: 1fr; } .card-wide { grid-column: span 1; } .big-number { font-size: 24px; } }
+
+  /* Chat panel */
+  .chat-panel { margin-top: 16px; }
+  .chat-messages { max-height: 400px; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+  .chat-msg { padding: 10px 14px; border-radius: 12px; max-width: 85%; font-size: 14px; line-height: 1.5; word-wrap: break-word; }
+  .chat-msg-user { background: var(--blue); color: white; align-self: flex-end; border-bottom-right-radius: 4px; }
+  .chat-msg-ai { background: var(--border); color: var(--text); align-self: flex-start; border-bottom-left-radius: 4px; }
+  .chat-msg-time { font-size: 10px; opacity: 0.6; margin-top: 4px; }
+  .chat-input-wrap { display: flex; gap: 8px; margin-top: 12px; }
+  .chat-input { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; color: var(--text); font-size: 14px; outline: none; resize: none; font-family: inherit; }
+  .chat-input:focus { border-color: var(--purple); }
+  .chat-input::placeholder { color: var(--muted); }
+  .btn-send { background: var(--purple); color: white; border: none; border-radius: 8px; padding: 10px 20px; font-size: 14px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+  .btn-send:hover { opacity: 0.9; }
+  .btn-send:disabled { opacity: 0.5; cursor: not-allowed; }
+  .chat-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
+  .btn-clear { background: transparent; border: 1px solid var(--border); color: var(--muted); border-radius: 6px; padding: 4px 12px; font-size: 11px; cursor: pointer; }
+  .btn-clear:hover { border-color: var(--red); color: var(--red); }
+  .typing-indicator { color: var(--purple); font-size: 13px; padding: 4px 0; }
+
+  /* Goals panel */
+  .goals-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .goal-field { display: flex; flex-direction: column; gap: 4px; }
+  .goal-field label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+  .goal-field input, .goal-field textarea { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; color: var(--text); font-size: 14px; outline: none; font-family: inherit; }
+  .goal-field input:focus, .goal-field textarea:focus { border-color: var(--purple); }
+  .goal-field textarea { resize: vertical; min-height: 60px; grid-column: span 2; }
+  .goal-field-wide { grid-column: span 2; }
+  .goals-actions { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; }
+  .btn-save-goals { background: var(--green); color: white; border: none; border-radius: 8px; padding: 8px 20px; font-size: 14px; font-weight: 600; cursor: pointer; }
+  .btn-save-goals:hover { opacity: 0.9; }
+  .goals-status { font-size: 13px; color: var(--green); }
+  .progress-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border); }
+  .progress-row:last-child { border: none; }
+  .progress-label { font-size: 13px; color: var(--muted); }
+  .progress-bar-wrap { width: 120px; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+  .progress-bar-fill { height: 100%; border-radius: 3px; background: var(--green); transition: width 0.5s; }
+  .progress-val { font-size: 13px; font-weight: 600; min-width: 80px; text-align: right; }
+
+  /* Tabs for bottom section */
+  .tab-bar { display: flex; gap: 4px; margin-bottom: 12px; }
+  .tab-btn { background: transparent; border: 1px solid var(--border); color: var(--muted); border-radius: 8px 8px 0 0; padding: 8px 20px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+  .tab-btn.active { background: var(--card); color: var(--purple); border-color: var(--purple); border-bottom-color: var(--card); }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+
+  @media (max-width: 640px) { .grid { grid-template-columns: 1fr; } .card-wide { grid-column: span 1; } .big-number { font-size: 24px; } .goals-grid { grid-template-columns: 1fr; } .goal-field-wide { grid-column: span 1; } }
 </style>
 </head>
 <body>
@@ -201,12 +248,75 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <canvas id="equityChart" height="80"></canvas>
 </div>
 
-<div class="card">
-  <h2>Recent Trades</h2>
-  <table>
-    <thead><tr><th>Time</th><th>Side</th><th>Qty</th><th>Price</th><th>Value</th><th>Fee</th></tr></thead>
-    <tbody id="tradesBody"><tr><td colspan="6" style="color:var(--muted)">No trades yet</td></tr></tbody>
-  </table>
+<div class="card" style="padding:0;overflow:hidden">
+  <div style="padding:16px 16px 0 16px">
+    <div class="tab-bar">
+      <button class="tab-btn active" onclick="switchTab('trades')">Trades</button>
+      <button class="tab-btn" onclick="switchTab('chat')">Chat with Claude</button>
+      <button class="tab-btn" onclick="switchTab('goals')">Goals</button>
+    </div>
+  </div>
+
+  <!-- Trades Tab -->
+  <div class="tab-content active" id="tab-trades" style="padding:0 16px 16px">
+    <table>
+      <thead><tr><th>Time</th><th>Side</th><th>Qty</th><th>Price</th><th>Value</th><th>Fee</th></tr></thead>
+      <tbody id="tradesBody"><tr><td colspan="6" style="color:var(--muted)">No trades yet</td></tr></tbody>
+    </table>
+  </div>
+
+  <!-- Chat Tab -->
+  <div class="tab-content" id="tab-chat" style="padding:0 16px 16px">
+    <div class="chat-panel">
+      <div class="chat-messages" id="chatMessages">
+        <div class="chat-msg chat-msg-ai">Hey! I'm Claude, your AI trading strategist. Ask me about my current strategy, market outlook, or anything about the bot's performance.</div>
+      </div>
+      <div id="typingIndicator" class="typing-indicator" style="display:none">Claude is thinking...</div>
+      <div class="chat-input-wrap">
+        <textarea class="chat-input" id="chatInput" placeholder="Ask Claude about strategy, market outlook, goals..." rows="1" onkeydown="handleChatKey(event)"></textarea>
+        <button class="btn-send" id="chatSendBtn" onclick="sendChat()">Send</button>
+      </div>
+      <div class="chat-actions">
+        <button class="btn-clear" onclick="clearChat()">Clear history</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Goals Tab -->
+  <div class="tab-content" id="tab-goals" style="padding:0 16px 16px">
+    <div style="margin-bottom:16px">
+      <h3 style="font-size:14px;color:var(--text);margin-bottom:4px">Progress</h3>
+      <div id="goalsProgress">
+        <div style="color:var(--muted);font-size:13px;padding:8px 0">Set targets below to track progress</div>
+      </div>
+    </div>
+    <div class="goals-grid">
+      <div class="goal-field">
+        <label>Weekly USD Profit Target ($)</label>
+        <input type="number" id="goalWeeklyProfit" step="10" min="0" placeholder="e.g. 500">
+      </div>
+      <div class="goal-field">
+        <label>Monthly USD Profit Target ($)</label>
+        <input type="number" id="goalMonthlyProfit" step="50" min="0" placeholder="e.g. 2000">
+      </div>
+      <div class="goal-field">
+        <label>Weekly BTC Accumulation Target</label>
+        <input type="number" id="goalWeeklyBtc" step="0.001" min="0" placeholder="e.g. 0.01">
+      </div>
+      <div class="goal-field">
+        <label>Monthly BTC Accumulation Target</label>
+        <input type="number" id="goalMonthlyBtc" step="0.01" min="0" placeholder="e.g. 0.05">
+      </div>
+      <div class="goal-field goal-field-wide">
+        <label>Notes / Strategy Instructions for Claude</label>
+        <textarea id="goalNotes" placeholder="e.g. Focus on accumulating BTC during dips, be more aggressive when Fear &amp; Greed is below 30..."></textarea>
+      </div>
+    </div>
+    <div class="goals-actions">
+      <span class="goals-status" id="goalsStatus"></span>
+      <button class="btn-save-goals" onclick="saveGoals()">Save Goals</button>
+    </div>
+  </div>
 </div>
 
 <div class="refresh-info">Auto-refreshes every 10 seconds</div>
@@ -391,6 +501,183 @@ async function confirmModeSwitch(mode) {
   }
   pendingMode = null;
 }
+
+// --- Tabs ---
+function switchTab(tab) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  document.getElementById('tab-' + tab).classList.add('active');
+  event.target.classList.add('active');
+  if (tab === 'chat') loadChatHistory();
+  if (tab === 'goals') loadGoals();
+}
+
+// --- Chat ---
+let chatLoaded = false;
+
+async function loadChatHistory() {
+  if (chatLoaded) return;
+  try {
+    const resp = await fetch('/api/chat/history');
+    const d = await resp.json();
+    if (d.messages && d.messages.length > 0) {
+      const container = document.getElementById('chatMessages');
+      container.innerHTML = '';
+      d.messages.forEach(m => appendChatMsg(m.role, m.message, m.timestamp));
+      scrollChat();
+    }
+    chatLoaded = true;
+  } catch(e) { console.error('Chat history load failed:', e); }
+}
+
+function appendChatMsg(role, text, ts) {
+  const container = document.getElementById('chatMessages');
+  const div = document.createElement('div');
+  div.className = 'chat-msg ' + (role === 'user' ? 'chat-msg-user' : 'chat-msg-ai');
+  // Simple markdown-ish: bold, line breaks
+  let html = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/\n/g, '<br>');
+  if (ts) {
+    const dt = new Date(ts * 1000);
+    html += '<div class="chat-msg-time">' + dt.toLocaleTimeString() + '</div>';
+  }
+  div.innerHTML = html;
+  container.appendChild(div);
+}
+
+function scrollChat() {
+  const c = document.getElementById('chatMessages');
+  c.scrollTop = c.scrollHeight;
+}
+
+function handleChatKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendChat();
+  }
+}
+
+async function sendChat() {
+  const input = document.getElementById('chatInput');
+  const msg = input.value.trim();
+  if (!msg) return;
+
+  const btn = document.getElementById('chatSendBtn');
+  btn.disabled = true;
+  input.value = '';
+
+  appendChatMsg('user', msg);
+  scrollChat();
+
+  document.getElementById('typingIndicator').style.display = 'block';
+
+  try {
+    const resp = await fetch('/api/chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({message: msg})
+    });
+    const d = await resp.json();
+    document.getElementById('typingIndicator').style.display = 'none';
+
+    if (d.error) {
+      appendChatMsg('assistant', 'Error: ' + d.error);
+    } else {
+      appendChatMsg('assistant', d.reply);
+    }
+    scrollChat();
+  } catch(e) {
+    document.getElementById('typingIndicator').style.display = 'none';
+    appendChatMsg('assistant', 'Failed to reach Claude: ' + e);
+    scrollChat();
+  }
+  btn.disabled = false;
+  input.focus();
+}
+
+async function clearChat() {
+  if (!confirm('Clear all chat history?')) return;
+  try {
+    await fetch('/api/chat/clear', {method: 'POST'});
+    const container = document.getElementById('chatMessages');
+    container.innerHTML = '<div class="chat-msg chat-msg-ai">Chat cleared. Ask me anything about the bot, strategy, or market!</div>';
+    chatLoaded = false;
+  } catch(e) { console.error('Clear failed:', e); }
+}
+
+// --- Goals ---
+let goalsLoaded = false;
+
+async function loadGoals() {
+  try {
+    const resp = await fetch('/api/goals');
+    const d = await resp.json();
+    const g = d.goals || {};
+
+    document.getElementById('goalWeeklyProfit').value = g.weekly_profit_target || '';
+    document.getElementById('goalMonthlyProfit').value = g.monthly_profit_target || '';
+    document.getElementById('goalWeeklyBtc').value = g.weekly_btc_target || '';
+    document.getElementById('goalMonthlyBtc').value = g.monthly_btc_target || '';
+    document.getElementById('goalNotes').value = g.notes || '';
+
+    // Progress display
+    const wp = d.weekly_progress || {};
+    const mp = d.monthly_progress || {};
+    const progDiv = document.getElementById('goalsProgress');
+    let progHTML = '';
+
+    if (g.weekly_profit_target > 0) {
+      const pct = Math.min(100, Math.max(0, (wp.realized_pnl / g.weekly_profit_target) * 100));
+      const color = pct >= 100 ? 'var(--green)' : pct >= 50 ? 'var(--yellow)' : 'var(--red)';
+      progHTML += '<div class="progress-row"><span class="progress-label">Weekly USD</span><div class="progress-bar-wrap"><div class="progress-bar-fill" style="width:' + pct + '%;background:' + color + '"></div></div><span class="progress-val">$' + wp.realized_pnl.toFixed(2) + ' / $' + g.weekly_profit_target.toFixed(0) + '</span></div>';
+    }
+    if (g.monthly_profit_target > 0) {
+      const pct = Math.min(100, Math.max(0, (mp.realized_pnl / g.monthly_profit_target) * 100));
+      const color = pct >= 100 ? 'var(--green)' : pct >= 50 ? 'var(--yellow)' : 'var(--red)';
+      progHTML += '<div class="progress-row"><span class="progress-label">Monthly USD</span><div class="progress-bar-wrap"><div class="progress-bar-fill" style="width:' + pct + '%;background:' + color + '"></div></div><span class="progress-val">$' + mp.realized_pnl.toFixed(2) + ' / $' + g.monthly_profit_target.toFixed(0) + '</span></div>';
+    }
+
+    progHTML += '<div class="progress-row"><span class="progress-label">Weekly trades</span><span class="progress-val">' + (wp.trade_count || 0) + '</span></div>';
+    progHTML += '<div class="progress-row"><span class="progress-label">Monthly trades</span><span class="progress-val">' + (mp.trade_count || 0) + '</span></div>';
+
+    progDiv.innerHTML = progHTML || '<div style="color:var(--muted);font-size:13px;padding:8px 0">Set targets below to track progress</div>';
+
+    goalsLoaded = true;
+  } catch(e) { console.error('Goals load failed:', e); }
+}
+
+async function saveGoals() {
+  const data = {
+    weekly_profit_target: parseFloat(document.getElementById('goalWeeklyProfit').value) || 0,
+    monthly_profit_target: parseFloat(document.getElementById('goalMonthlyProfit').value) || 0,
+    weekly_btc_target: parseFloat(document.getElementById('goalWeeklyBtc').value) || 0,
+    monthly_btc_target: parseFloat(document.getElementById('goalMonthlyBtc').value) || 0,
+    notes: document.getElementById('goalNotes').value,
+  };
+
+  try {
+    const resp = await fetch('/api/goals', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(data)
+    });
+    const d = await resp.json();
+    const status = document.getElementById('goalsStatus');
+    if (d.error) {
+      status.textContent = 'Error: ' + d.error;
+      status.style.color = 'var(--red)';
+    } else {
+      status.textContent = 'Saved!';
+      status.style.color = 'var(--green)';
+      loadGoals(); // refresh progress bars
+      setTimeout(() => { status.textContent = ''; }, 3000);
+    }
+  } catch(e) {
+    document.getElementById('goalsStatus').textContent = 'Save failed';
+    document.getElementById('goalsStatus').style.color = 'var(--red)';
+  }
+}
 </script>
 </body>
 </html>"""
@@ -406,10 +693,16 @@ class Dashboard:
         self.bot = bot  # reference to AlgoTraderBot for mode switching
         self._last_signals = {}
         self._last_price = 0
+        self._http = httpx.AsyncClient(timeout=60.0)
         self.app = web.Application()
         self.app.router.add_get('/', self._index)
         self.app.router.add_get('/api/status', self._api_status)
         self.app.router.add_post('/api/mode', self._api_set_mode)
+        self.app.router.add_get('/api/goals', self._api_get_goals)
+        self.app.router.add_post('/api/goals', self._api_save_goals)
+        self.app.router.add_post('/api/chat', self._api_chat)
+        self.app.router.add_get('/api/chat/history', self._api_chat_history)
+        self.app.router.add_post('/api/chat/clear', self._api_chat_clear)
 
     def update_signals(self, price: float, signals_dict: dict):
         """Called by the bot after each scan to update displayed signals."""
@@ -510,6 +803,223 @@ class Dashboard:
         except Exception as e:
             logger.error(f"Mode switch failed: {e}")
             return web.json_response({"error": str(e)}, status=500)
+
+    # ------------------------------------------------------------------
+    # Goals API
+    # ------------------------------------------------------------------
+
+    async def _api_get_goals(self, request):
+        """Get current profit goals."""
+        goals = self.db.get_goals()
+        weekly_pnl = self.db.get_period_pnl(7 * 86400)
+        monthly_pnl = self.db.get_period_pnl(30 * 86400)
+        return web.json_response({
+            "goals": goals,
+            "weekly_progress": weekly_pnl,
+            "monthly_progress": monthly_pnl,
+        })
+
+    async def _api_save_goals(self, request):
+        """Save profit goals."""
+        try:
+            body = await request.json()
+            self.db.save_goals(
+                weekly_profit=float(body.get("weekly_profit_target", 0)),
+                monthly_profit=float(body.get("monthly_profit_target", 0)),
+                weekly_btc=float(body.get("weekly_btc_target", 0)),
+                monthly_btc=float(body.get("monthly_btc_target", 0)),
+                notes=body.get("notes", ""),
+            )
+            self.db.log("INFO", "Goals updated via dashboard")
+            return web.json_response({"status": "saved"})
+        except Exception as e:
+            logger.error(f"Save goals failed: {e}")
+            return web.json_response({"error": str(e)}, status=500)
+
+    # ------------------------------------------------------------------
+    # Chat API
+    # ------------------------------------------------------------------
+
+    CHAT_SYSTEM_PROMPT = """You are Claude, the AI trading strategist for a BTC/USD algo trading bot running on Kraken.
+The user is your operator — they set goals, review your decisions, and want to understand your reasoning.
+
+You have access to the current market data, your recent decisions, and the bot's performance metrics (provided below).
+
+Be conversational but data-driven. Reference specific numbers from the context when explaining your thinking.
+If the user asks about strategy, explain what you'd look for and why.
+If they ask about performance, cite actual P&L, trade count, and win rate from the data.
+If they set goals, acknowledge them and explain how you'll adjust.
+Keep responses concise — 2-4 paragraphs max. Use $ and % formatting for financial data.
+You're aggressive by nature — you look for momentum plays and mean reversion, but you respect fee economics (0.52% round-trip on Kraken)."""
+
+    async def _api_chat(self, request):
+        """Handle a chat message from the user."""
+        try:
+            body = await request.json()
+            user_msg = body.get("message", "").strip()
+            if not user_msg:
+                return web.json_response({"error": "Empty message"}, status=400)
+
+            api_key = self.config.anthropic_api_key if self.config else ""
+            if not api_key:
+                return web.json_response(
+                    {"error": "No ANTHROPIC_API_KEY configured. Add it to your .env file."},
+                    status=400,
+                )
+
+            # Save user message
+            self.db.add_chat_message("user", user_msg)
+
+            # Build context from current bot state
+            context = self._build_chat_context()
+
+            # Build conversation history (last 10 messages for context)
+            history = self.db.get_chat_history(limit=10)
+            messages = []
+            # Add context as first user message
+            messages.append({
+                "role": "user",
+                "content": f"[CURRENT BOT STATE]\n{context}\n\n[END BOT STATE]\n\nThe operator says: {history[0]['message']}" if history else f"[CURRENT BOT STATE]\n{context}\n\n[END BOT STATE]\n\nThe operator says: {user_msg}",
+            })
+
+            # Build alternating messages from history (skip first, it's in context)
+            if len(history) > 1:
+                # We need to rebuild the conversation properly
+                messages = [{
+                    "role": "user",
+                    "content": f"[CURRENT BOT STATE]\n{context}\n\n[END BOT STATE]",
+                }]
+                # Pair up history messages, ensuring proper alternation
+                for msg in history:
+                    role = msg["role"]
+                    if role == "user":
+                        messages.append({"role": "user", "content": msg["message"]})
+                    else:
+                        messages.append({"role": "assistant", "content": msg["message"]})
+
+                # Ensure it starts with user and alternates properly
+                messages = self._fix_message_alternation(messages)
+
+            # Call Claude
+            model = self.config.ai_model if self.config else "claude-sonnet-4-20250514"
+            resp = await self._http.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "max_tokens": 800,
+                    "system": self.CHAT_SYSTEM_PROMPT,
+                    "messages": messages,
+                },
+            )
+            resp.raise_for_status()
+            result = resp.json()
+            ai_reply = result["content"][0]["text"]
+
+            # Save AI response
+            self.db.add_chat_message("assistant", ai_reply)
+
+            return web.json_response({"reply": ai_reply})
+
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Chat API error: {e.response.status_code} {e.response.text}")
+            return web.json_response({"error": f"Claude API error: {e.response.status_code}"}, status=500)
+        except Exception as e:
+            logger.error(f"Chat failed: {e}")
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _api_chat_history(self, request):
+        """Get chat history."""
+        history = self.db.get_chat_history(limit=50)
+        return web.json_response({"messages": history})
+
+    async def _api_chat_clear(self, request):
+        """Clear chat history."""
+        self.db.clear_chat_history()
+        return web.json_response({"status": "cleared"})
+
+    def _fix_message_alternation(self, messages):
+        """Ensure messages alternate user/assistant (Anthropic API requirement)."""
+        if not messages:
+            return messages
+        fixed = [messages[0]]
+        for msg in messages[1:]:
+            if msg["role"] == fixed[-1]["role"]:
+                # Same role back-to-back — merge content
+                fixed[-1]["content"] += "\n" + msg["content"]
+            else:
+                fixed.append(msg)
+        # Must start with user
+        if fixed and fixed[0]["role"] != "user":
+            fixed.insert(0, {"role": "user", "content": "Hello"})
+        # Must end with user for a new query
+        if fixed and fixed[-1]["role"] != "user":
+            pass  # The last user message should already be there
+        return fixed
+
+    def _build_chat_context(self) -> str:
+        """Build a summary of current bot state for the chat context."""
+        parts = []
+
+        # Price and signals
+        if self._last_price:
+            parts.append(f"BTC/USD: ${self._last_price:,.2f}")
+        sig = self._last_signals
+        if sig:
+            if sig.get("ai_action"):
+                parts.append(f"Last AI decision: {sig['ai_action']} (confidence: {sig.get('ai_confidence', 0):.0%})")
+                parts.append(f"Reasoning: {sig.get('ai_reasoning', 'N/A')}")
+                parts.append(f"Strategy: {sig.get('ai_strategy', 'N/A')}")
+                parts.append(f"Outlook: {sig.get('ai_outlook', 'N/A')}")
+            if sig.get("rsi"):
+                parts.append(f"RSI: {sig['rsi']:.1f} | EMA: {sig.get('ema_fast', 0):,.0f}/{sig.get('ema_slow', 0):,.0f}")
+            if sig.get("fear_greed") is not None:
+                parts.append(f"Fear & Greed: {sig['fear_greed']} ({sig.get('fear_greed_label', '')})")
+
+        # Balance
+        if self.paper_trader:
+            bal = self.paper_trader.get_balance()
+            starting = self.config.paper.starting_capital if self.config else 10000
+            pnl = bal.total_equity - starting
+            parts.append(f"Equity: ${bal.total_equity:,.2f} | Cash: ${bal.cash_usd:,.2f} | BTC: {bal.btc_quantity:.6f}")
+            parts.append(f"Total P&L: ${pnl:,.2f} ({pnl/starting*100:+.2f}%)")
+
+        # Position
+        pos = self.db.get_open_position()
+        if pos:
+            price = self._last_price or pos.entry_price
+            upnl = (price - pos.entry_price) * pos.quantity
+            upnl_pct = (price - pos.entry_price) / pos.entry_price * 100 if pos.entry_price else 0
+            parts.append(f"Open position: {pos.quantity:.6f} BTC @ ${pos.entry_price:,.2f} | P&L: ${upnl:,.2f} ({upnl_pct:+.2f}%)")
+            parts.append(f"Stop: ${pos.stop_loss:,.2f} | Target: ${pos.take_profit:,.2f}")
+        else:
+            parts.append("No open position")
+
+        # Goals
+        goals = self.db.get_goals()
+        weekly_pnl = self.db.get_period_pnl(7 * 86400)
+        monthly_pnl = self.db.get_period_pnl(30 * 86400)
+        parts.append(f"This week: {weekly_pnl['trade_count']} trades, ${weekly_pnl['realized_pnl']:,.2f} realized P&L")
+        parts.append(f"This month: {monthly_pnl['trade_count']} trades, ${monthly_pnl['realized_pnl']:,.2f} realized P&L")
+
+        if goals.get("weekly_profit_target", 0) > 0:
+            parts.append(f"Weekly profit target: ${goals['weekly_profit_target']:,.2f}")
+        if goals.get("monthly_profit_target", 0) > 0:
+            parts.append(f"Monthly profit target: ${goals['monthly_profit_target']:,.2f}")
+
+        # Trade stats
+        stats = self.db.get_trade_stats()
+        if stats.get("total_trades", 0) > 0:
+            parts.append(f"All-time: {stats['total_trades']} trades ({stats['buys']} buys, {stats['sells']} sells) | Fees: ${stats['total_fees']:,.2f}")
+
+        parts.append(f"Mode: {'PAPER' if self.config and self.config.mode == 'paper' else 'LIVE'}")
+        parts.append(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}")
+
+        return "\n".join(parts)
 
     async def start(self, host: str = "0.0.0.0", port: int = 3737):
         """Start the web server (non-blocking)."""

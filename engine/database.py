@@ -118,6 +118,23 @@ class Database:
                 btc_value REAL NOT NULL,
                 btc_price REAL NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS goals (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                weekly_profit_target REAL DEFAULT 0,
+                monthly_profit_target REAL DEFAULT 0,
+                weekly_btc_target REAL DEFAULT 0,
+                monthly_btc_target REAL DEFAULT 0,
+                notes TEXT DEFAULT '',
+                updated_at REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS chat_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                role TEXT NOT NULL,
+                message TEXT NOT NULL
+            );
         """)
         self.conn.commit()
 
@@ -270,6 +287,80 @@ class Database:
                 "SELECT * FROM bot_log ORDER BY timestamp DESC LIMIT ?", (limit,)
             ).fetchall()
         return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # Goals
+    # ------------------------------------------------------------------
+
+    def get_goals(self) -> dict:
+        """Get current profit goals."""
+        row = self.conn.execute("SELECT * FROM goals WHERE id=1").fetchone()
+        if row:
+            return dict(row)
+        return {
+            "weekly_profit_target": 0,
+            "monthly_profit_target": 0,
+            "weekly_btc_target": 0,
+            "monthly_btc_target": 0,
+            "notes": "",
+        }
+
+    def save_goals(self, weekly_profit: float = 0, monthly_profit: float = 0,
+                   weekly_btc: float = 0, monthly_btc: float = 0, notes: str = ""):
+        """Save profit goals."""
+        self.conn.execute(
+            """INSERT OR REPLACE INTO goals
+               (id, weekly_profit_target, monthly_profit_target, weekly_btc_target, monthly_btc_target, notes, updated_at)
+               VALUES (1, ?, ?, ?, ?, ?, ?)""",
+            (weekly_profit, monthly_profit, weekly_btc, monthly_btc, notes, time.time()),
+        )
+        self.conn.commit()
+
+    # ------------------------------------------------------------------
+    # Chat history
+    # ------------------------------------------------------------------
+
+    def add_chat_message(self, role: str, message: str):
+        """Add a chat message (role: 'user' or 'assistant')."""
+        self.conn.execute(
+            "INSERT INTO chat_history (timestamp, role, message) VALUES (?, ?, ?)",
+            (time.time(), role, message),
+        )
+        self.conn.commit()
+
+    def get_chat_history(self, limit: int = 50) -> list[dict]:
+        """Get recent chat messages, oldest first."""
+        rows = self.conn.execute(
+            "SELECT * FROM chat_history ORDER BY timestamp DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(row) for row in reversed(rows)]
+
+    def clear_chat_history(self):
+        """Clear all chat messages."""
+        self.conn.execute("DELETE FROM chat_history")
+        self.conn.commit()
+
+    # ------------------------------------------------------------------
+    # Weekly/Monthly P&L calculations
+    # ------------------------------------------------------------------
+
+    def get_period_pnl(self, seconds_ago: int) -> dict:
+        """Calculate P&L for a time period (e.g., 7*86400 for weekly)."""
+        cutoff = time.time() - seconds_ago
+        rows = self.conn.execute(
+            "SELECT side, value, fee FROM trades WHERE timestamp >= ?", (cutoff,)
+        ).fetchall()
+
+        buys = sum(r["value"] + r["fee"] for r in rows if r["side"] == "buy")
+        sells = sum(r["value"] - r["fee"] for r in rows if r["side"] == "sell")
+        trade_count = len(rows)
+
+        return {
+            "trade_count": trade_count,
+            "total_bought": buys,
+            "total_sold": sells,
+            "realized_pnl": sells - buys if sells > 0 else 0,
+        }
 
     # ------------------------------------------------------------------
     # Cleanup

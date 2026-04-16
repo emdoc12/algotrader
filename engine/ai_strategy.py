@@ -350,6 +350,43 @@ class AIStrategy:
                 ts = time.strftime('%m/%d %H:%M', time.gmtime(t.timestamp))
                 parts.append(f"  {ts} | {t.side.upper()} {t.quantity:.6f} BTC @ ${t.price:,.2f} | ${t.value:,.2f}")
 
+        # Goals and progress
+        goals = self.db.get_goals()
+        weekly_pnl = self.db.get_period_pnl(7 * 86400)
+        monthly_pnl = self.db.get_period_pnl(30 * 86400)
+
+        has_goals = any([
+            goals.get("weekly_profit_target", 0) > 0,
+            goals.get("monthly_profit_target", 0) > 0,
+            goals.get("weekly_btc_target", 0) > 0,
+            goals.get("monthly_btc_target", 0) > 0,
+        ])
+
+        if has_goals:
+            parts.append(f"\n## PROFIT GOALS & PROGRESS")
+            wpt = goals.get("weekly_profit_target", 0)
+            mpt = goals.get("monthly_profit_target", 0)
+            wbt = goals.get("weekly_btc_target", 0)
+            mbt = goals.get("monthly_btc_target", 0)
+
+            if wpt > 0:
+                wprog = weekly_pnl["realized_pnl"]
+                parts.append(f"Weekly USD target: ${wpt:,.2f} | Progress: ${wprog:,.2f} ({wprog/wpt*100:.0f}%)")
+            if mpt > 0:
+                mprog = monthly_pnl["realized_pnl"]
+                parts.append(f"Monthly USD target: ${mpt:,.2f} | Progress: ${mprog:,.2f} ({mprog/mpt*100:.0f}%)")
+            if wbt > 0:
+                parts.append(f"Weekly BTC accumulation target: {wbt:.6f} BTC")
+            if mbt > 0:
+                parts.append(f"Monthly BTC accumulation target: {mbt:.6f} BTC")
+
+            notes = goals.get("notes", "")
+            if notes:
+                parts.append(f"User notes: {notes}")
+
+            parts.append(f"\nThis week: {weekly_pnl['trade_count']} trades | This month: {monthly_pnl['trade_count']} trades")
+            parts.append(f"Adjust your aggressiveness based on whether you're ahead or behind on these goals.")
+
         return "\n".join(parts)
 
     async def _call_claude(self, context: str) -> AIDecision:
