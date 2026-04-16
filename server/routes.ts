@@ -160,19 +160,40 @@ export function registerRoutes(server: Server, app: Express) {
     res.status(204).send();
   });
 
+  // Called by Python engine on startup to auto-register broker accounts from env vars
+  app.post("/api/accounts/provision", (req, res) => {
+    const { platform, name, username, accountNumber } = req.body;
+    if (!platform || !username) return res.status(400).json({ error: "platform and username required" });
+    // Check if already exists by username + platform
+    const existing = storage.getAccounts().find(
+      a => a.username === username && a.platform === platform
+    );
+    if (existing) return res.json(existing); // idempotent
+    const account = storage.createAccount({
+      name: name || `${platform} (auto)`,
+      platform,
+      username,
+      accountNumber: accountNumber || username,
+      isActive: true,
+      isSandbox: false,
+    });
+    res.status(201).json(account);
+  });
+
   // ============ BACKTESTS ============
   app.get("/api/backtests", (_req, res) => {
     res.json(storage.getBacktests());
+  });
+
+  // Must come BEFORE /api/backtests/:id to avoid Express matching "strategy" as an id
+  app.get("/api/backtests/strategy/:strategyId", (req, res) => {
+    res.json(storage.getBacktestsByStrategy(Number(req.params.strategyId)));
   });
 
   app.get("/api/backtests/:id", (req, res) => {
     const bt = storage.getBacktest(Number(req.params.id));
     if (!bt) return res.status(404).json({ error: "Backtest not found" });
     res.json(bt);
-  });
-
-  app.get("/api/backtests/strategy/:strategyId", (req, res) => {
-    res.json(storage.getBacktestsByStrategy(Number(req.params.strategyId)));
   });
 
   // Create a new backtest job (status=pending, Python engine picks it up)

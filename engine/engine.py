@@ -70,6 +70,30 @@ class AlgoEngine:
         logger.info("AlgoTrader engine started. DRY_RUN=%s", config.DRY_RUN)
         await api_client.post_log("info", f"AlgoTrader engine started (DRY_RUN={config.DRY_RUN}).")
 
+        # Auto-provision broker accounts from env vars (idempotent)
+        if KRAKEN_ENABLED:
+            try:
+                acct = await api_client.provision_account(
+                    platform="kraken",
+                    name="Kraken Spot",
+                    username="kraken",
+                    account_number="kraken-spot",
+                )
+                logger.info("Kraken account provisioned (id=%s).", acct.get("id"))
+            except Exception as e:
+                logger.warning("Could not provision Kraken account: %s", e)
+
+        if TASTYTRADE_ENABLED and self.session_mgr:
+            try:
+                acct = await api_client.provision_account(
+                    platform="tastytrade",
+                    name="Tastytrade",
+                    username=config.TT_USERNAME,
+                )
+                logger.info("Tastytrade account provisioned (id=%s).", acct.get("id"))
+            except Exception as e:
+                logger.warning("Could not provision Tastytrade account: %s", e)
+
         loader = asyncio.create_task(self._strategy_loader())
         resetter = asyncio.create_task(self._midnight_resetter())
         self._tasks = [loader, resetter]

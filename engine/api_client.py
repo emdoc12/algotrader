@@ -74,6 +74,18 @@ async def get_backtests() -> list[dict]:
     return r.json()
 
 
+async def provision_account(platform: str, name: str, username: str, account_number: str = "") -> dict:
+    """Auto-register a broker account from env vars. Idempotent — safe to call on every startup."""
+    r = await _client.post("/api/accounts/provision", json={
+        "platform": platform,
+        "name": name,
+        "username": username,
+        "accountNumber": account_number or username,
+    })
+    r.raise_for_status()
+    return r.json()
+
+
 async def patch_backtest(backtest_id: int, data: dict) -> dict:
     """Update a backtest record (status, results, etc.)"""
     r = await _client.patch(f"/api/backtests/{backtest_id}", json=data)

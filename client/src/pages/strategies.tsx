@@ -31,8 +31,8 @@ const DEFAULT_PARAMS: Record<string, object> = {
   credit_spread: { minDTE: 30, maxDTE: 60, shortDelta: 0.30, width: 5, minCredit: 0.80 },
   covered_call: { minDTE: 20, maxDTE: 45, targetDelta: 0.30, minPremium: 0.30 },
   iron_condor: { minDTE: 30, maxDTE: 55, shortDelta: 0.16, width: 5, minCredit: 1.50 },
-  crypto_momentum: { maPeriod: 20, breakoutPercent: 2, stopLossPercent: 3, takeProfitPercent: 6 },
-  crypto_mean_reversion: { maPeriod: 50, deviationPercent: 5, stopLossPercent: 3, takeProfitPercent: 4 },
+  crypto_momentum: { symbol: "ETH", maPeriod: 20, breakoutPercent: 2, stopLossPercent: 3, takeProfitPercent: 6, initialCapital: 10000 },
+  crypto_mean_reversion: { symbol: "ETH", maPeriod: 50, deviationPercent: 5, stopLossPercent: 3, takeProfitPercent: 4, initialCapital: 10000 },
   options_flow_scanner: { minPremium: 25000, minScore: 5, callsOnly: true, excludeEtfs: true, minDTE: 7, maxDTE: 60, maxContracts: 1, execution: "calls" },
   custom: {},
 };
@@ -171,7 +171,7 @@ export default function Strategies() {
                 </Select>
               </div>
               <div>
-                <Label>Account{newStrategy.type === "options_flow_scanner" ? " (optional — for live execution)" : ""}</Label>
+                <Label>Account{newStrategy.platform === "kraken" || newStrategy.type === "options_flow_scanner" ? " (auto-configured from env vars)" : ""}</Label>
                 <Select
                   value={String(newStrategy.accountId || "")}
                   onValueChange={(v) => setNewStrategy({ ...newStrategy, accountId: Number(v) })}
@@ -246,7 +246,7 @@ export default function Strategies() {
                 data-testid="button-create-strategy"
                 className="w-full"
                 onClick={() => createMutation.mutate(newStrategy)}
-                disabled={!newStrategy.name || (newStrategy.type !== "options_flow_scanner" && !newStrategy.accountId) || createMutation.isPending}
+                disabled={!newStrategy.name || (["tastytrade","tasty_crypto"].includes(newStrategy.platform) && !newStrategy.accountId) || createMutation.isPending}
               >
                 {createMutation.isPending ? "Creating..." : "Create Strategy"}
               </Button>
