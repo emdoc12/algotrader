@@ -31,7 +31,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AlgoTrader v2.4.3</title>
+<title>AlgoTrader v2.4.4</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4" async></script>
 <style>
   :root {
@@ -1020,15 +1020,44 @@ If the operator gives you instructions, acknowledge them — they will be fed in
         if self.bot and hasattr(self.bot, 'strategy'):
             cached = getattr(self.bot.strategy, '_last_context', '')
             if cached:
+                logger.info(f"Chat using cached trading context ({len(cached)} chars)")
                 return cached
+            else:
+                logger.warning(f"Bot strategy exists but _last_context is empty — scan may not have run yet")
+        else:
+            logger.warning(f"Bot reference missing: bot={self.bot is not None}, has_strategy={hasattr(self.bot, 'strategy') if self.bot else 'N/A'}")
 
-        # Fallback only if no scan has run yet
-        parts = ["Waiting for first scan to complete — market data not yet available."]
+        # Fallback: build what we can from dashboard's own cached data
+        parts = []
         if self._last_price:
             parts.append(f"BTC/USD: ${self._last_price:,.2f}")
+        else:
+            parts.append("Waiting for first scan to complete — price data not yet available.")
+
+        if self._last_signals:
+            sigs = self._last_signals
+            if sigs.get("ai_action"):
+                parts.append(f"Last AI Decision: {sigs['ai_action']} (confidence: {sigs.get('ai_confidence', '?')})")
+                parts.append(f"Reasoning: {sigs.get('ai_reasoning', 'N/A')}")
+            if sigs.get("fear_greed"):
+                parts.append(f"Fear & Greed: {sigs['fear_greed']} ({sigs.get('fear_greed_label', '')})")
+            if sigs.get("rsi"):
+                parts.append(f"RSI: {sigs['rsi']}")
+            if sigs.get("coin_data"):
+                parts.append("Market Overview:")
+                for coin in sigs["coin_data"]:
+                    parts.append(f"  {coin['symbol']}: ${coin['price']:,.2f} (1h: {coin.get('change_1h', 0):+.1f}%, 24h: {coin.get('change_24h', 0):+.1f}%)")
+
         if self.paper_trader:
             bal = self.paper_trader.get_balance()
             parts.append(f"Equity: ${bal.total_equity:,.2f} | Cash: ${bal.cash_usd:,.2f}")
+
+        position = self.db.get_open_position()
+        if position:
+            parts.append(f"Open Position: {position.quantity:.6f} BTC @ ${position.entry_price:,.2f}")
+        else:
+            parts.append("No open position")
+
         parts.append(f"Mode: {'PAPER' if self.config and self.config.mode == 'paper' else 'LIVE'}")
         return "\n".join(parts)
 

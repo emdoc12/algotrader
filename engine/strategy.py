@@ -46,6 +46,7 @@ class TradingStrategy:
         self.kraken = kraken
         self.paper_trader = paper_trader
         self.is_paper = config.mode == "paper"
+        self._last_context = ""  # Compatibility with chat context cache
 
     async def run_scan(self) -> dict:
         """
