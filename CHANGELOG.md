@@ -80,3 +80,9 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 ### Fixed
 - supervisord + entrypoint: API_BASE_URL was pointing to port 3000 but Express listens on 5000 — corrected to http://localhost:5000
 - Dockerfile: EXPOSE updated to 5000
+
+## [1.2.5] - 2026-04-15
+
+### Fixed
+- server/db.ts: auto-create all tables on first boot using CREATE TABLE IF NOT EXISTS — no drizzle-kit push needed in Docker
+- Fixes "no such table: bot_logs / strategies" errors on fresh container start
