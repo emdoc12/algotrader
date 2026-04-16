@@ -39,10 +39,14 @@ ENV BOT_MODE=paper
 ENV BOT_DB_PATH=/app/data/bot_data.db
 ENV BOT_LOG_LEVEL=INFO
 ENV PYTHONUNBUFFERED=1
+ENV DASHBOARD_PORT=3737
 
-# ── Health check ─────────────────────────────────────────────────────────────
+# ── Dashboard port ───────────────────────────────────────────────────────────
+EXPOSE 3737
+
+# ── Health check (hits dashboard) ────────────────────────────────────────────
 HEALTHCHECK --interval=60s --timeout=10s --retries=3 \
-    CMD python3 -c "import httpx; r = httpx.get('https://api.kraken.com/0/public/SystemStatus'); assert r.json()['result']['status'] == 'online'" || exit 1
+    CMD curl -f http://localhost:3737/ || exit 1
 
 # ── Run ──────────────────────────────────────────────────────────────────────
 CMD ["python3", "-u", "engine/bot.py"]

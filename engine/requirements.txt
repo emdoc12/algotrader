@@ -1,3 +1,4 @@
+aiohttp>=3.9.0
 httpx>=0.27.0
 python-dotenv>=1.0.0
 python-kraken-sdk>=3.0.0

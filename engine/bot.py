@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import BotConfig, load_config
+from dashboard import Dashboard
 from database import Database
 from kraken_client import KrakenClient
 from paper_trader import PaperTrader
@@ -93,6 +94,13 @@ class AlgoTraderBot:
             paper_trader=self.paper_trader,
         )
 
+        # Web dashboard
+        self.dashboard = Dashboard(
+            db=self.db,
+            paper_trader=self.paper_trader,
+            config=config,
+        )
+
     async def start(self):
         """Start the bot and run until shutdown."""
         self.running = True
@@ -105,6 +113,10 @@ class AlgoTraderBot:
 
         self.db.log("INFO", f"Bot started in {self.config.mode.upper()} mode")
 
+        # Start web dashboard
+        dashboard_port = int(os.getenv("DASHBOARD_PORT", "3737"))
+        self._dashboard_runner = await self.dashboard.start(port=dashboard_port)
+
         # Print initial state
         await self._print_status()
 
@@ -115,6 +127,22 @@ class AlgoTraderBot:
             try:
                 result = await self.strategy.run_scan()
                 self._log_scan_result(scan_count, result)
+                # Feed latest data to dashboard
+                if "price" in result:
+                    signals = result.get("signals")
+                    signals_dict = {}
+                    if signals and hasattr(signals, 'ema'):
+                        signals_dict = {
+                            "recommendation": signals.recommendation,
+                            "composite": signals.composite_score,
+                            "ema_fast": round(signals.ema.fast_ema, 2),
+                            "ema_slow": round(signals.ema.slow_ema, 2),
+                            "ema_crossover": signals.ema.crossover,
+                            "rsi": round(signals.rsi.rsi, 2),
+                            "rsi_signal": signals.rsi.signal,
+                            "bb_position": round(signals.bollinger.price_position, 4),
+                        }
+                    self.dashboard.update_signals(result["price"], signals_dict)
             except Exception as e:
                 logger.error(f"Scan #{scan_count} failed: {e}")
                 self.db.log("ERROR", f"Scan failed: {e}")
@@ -140,6 +168,8 @@ class AlgoTraderBot:
         """Clean up resources."""
         logger.info("Shutting down...")
         self.running = False
+        if self._dashboard_runner:
+            await self._dashboard_runner.cleanup()
         self.db.log("INFO", "Bot stopped")
         await self.kraken.close()
         self.db.close()
