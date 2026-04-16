@@ -162,6 +162,73 @@ class Database:
         ).fetchall()
         return [Trade(**dict(row)) for row in rows]
 
+    def get_trades_with_pnl(self, limit: int = 0, since_ts: float = 0) -> list[dict]:
+        """Get trades with P&L computed for sells by matching against buys (FIFO).
+
+        Returns list of dicts: each trade dict plus 'pnl_dollar', 'pnl_pct', 'running_pnl'.
+        Buys show pnl_dollar=None. Sells show profit/loss vs matched buy cost basis.
+        """
+        query = "SELECT * FROM trades ORDER BY timestamp ASC"
+        rows = self.conn.execute(query).fetchall()
+        all_trades = [dict(row) for row in rows]
+
+        # FIFO matching: track buy lots as (price, qty, fee_per_unit)
+        buy_lots: list[dict] = []
+        results: list[dict] = []
+        running_pnl = 0.0
+
+        for t in all_trades:
+            t["pnl_dollar"] = None
+            t["pnl_pct"] = None
+
+            if t["side"] == "buy":
+                buy_lots.append({
+                    "price": t["price"],
+                    "qty": t["quantity"],
+                    "fee_per_unit": t["fee"] / t["quantity"] if t["quantity"] > 0 else 0,
+                })
+            elif t["side"] == "sell" and buy_lots:
+                # Match sell against oldest buys (FIFO)
+                sell_qty = t["quantity"]
+                sell_revenue = t["price"] * sell_qty
+                sell_fee = t["fee"]
+                cost_basis = 0.0
+                buy_fees = 0.0
+                qty_matched = 0.0
+
+                while sell_qty > 0 and buy_lots:
+                    lot = buy_lots[0]
+                    match_qty = min(sell_qty, lot["qty"])
+                    cost_basis += lot["price"] * match_qty
+                    buy_fees += lot["fee_per_unit"] * match_qty
+                    lot["qty"] -= match_qty
+                    sell_qty -= match_qty
+                    qty_matched += match_qty
+                    if lot["qty"] <= 0.00000001:
+                        buy_lots.pop(0)
+
+                total_fees = buy_fees + sell_fee
+                pnl = sell_revenue - cost_basis - total_fees
+                pnl_pct = (pnl / cost_basis * 100) if cost_basis > 0 else 0.0
+                running_pnl += pnl
+                t["pnl_dollar"] = round(pnl, 2)
+                t["pnl_pct"] = round(pnl_pct, 2)
+
+            t["running_pnl"] = round(running_pnl, 2)
+            results.append(t)
+
+        # Apply filters
+        if since_ts > 0:
+            results = [r for r in results if r["timestamp"] >= since_ts]
+
+        # Reverse to newest first
+        results.reverse()
+
+        if limit > 0:
+            results = results[:limit]
+
+        return results
+
     def get_trade_stats(self) -> dict:
         """Get aggregate trade statistics."""
         row = self.conn.execute("""

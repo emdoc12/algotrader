@@ -31,7 +31,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AlgoTrader v2.4.6</title>
+<title>AlgoTrader v2.5.0</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4" async></script>
 <style>
   :root {
@@ -147,7 +147,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="header">
-  <h1>AlgoTrader v2.4.6</h1>
+  <h1>AlgoTrader v2.5.0</h1>
   <div class="badges">
     <span class="badge badge-ai" id="aiLabel">AI</span>
     <div class="toggle-wrap">
@@ -267,16 +267,29 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div style="padding:16px 16px 0 16px">
     <div class="tab-bar">
       <button class="tab-btn active" onclick="switchTab('trades', this)">Trades</button>
+      <button class="tab-btn" onclick="switchTab('alltrades', this)">All Trades</button>
       <button class="tab-btn" onclick="switchTab('chat', this)">Chat with Claude</button>
       <button class="tab-btn" onclick="switchTab('goals', this)">Goals</button>
     </div>
   </div>
 
-  <!-- Trades Tab -->
+  <!-- Trades Tab (last 3 days) -->
   <div class="tab-content active" id="tab-trades" style="padding:0 16px 16px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <span style="font-size:12px;color:var(--muted)">Last 3 days</span>
+    </div>
     <table>
-      <thead><tr><th>Time</th><th>Side</th><th>Qty</th><th>Price</th><th>Value</th><th>Fee</th></tr></thead>
-      <tbody id="tradesBody"><tr><td colspan="6" style="color:var(--muted)">No trades yet</td></tr></tbody>
+      <thead><tr><th>Time</th><th>Side</th><th>Qty</th><th>Price</th><th>Value</th><th>Fee</th><th>P&L</th></tr></thead>
+      <tbody id="tradesBody"><tr><td colspan="7" style="color:var(--muted)">No trades yet</td></tr></tbody>
+    </table>
+  </div>
+
+  <!-- All Trades Tab -->
+  <div class="tab-content" id="tab-alltrades" style="padding:0 16px 16px">
+    <div id="allTradesSummary" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-bottom:12px"></div>
+    <table>
+      <thead><tr><th>Time</th><th>Side</th><th>Qty</th><th>Price</th><th>Value</th><th>Fee</th><th>P&L</th><th>Running</th></tr></thead>
+      <tbody id="allTradesBody"><tr><td colspan="8" style="color:var(--muted)">Loading...</td></tr></tbody>
     </table>
   </div>
 
@@ -463,14 +476,20 @@ async function fetchData() {
       posDiv.innerHTML = '<div style="color:var(--muted);font-size:14px;padding:8px 0">No open position</div>';
     }
 
-    // Trades
+    // Trades (last 3 days with P&L)
     const tbody = document.getElementById('tradesBody');
     if (d.trades && d.trades.length > 0) {
       tbody.innerHTML = d.trades.map(t => {
         const dt = new Date(t.timestamp * 1000);
         const ts = dt.toLocaleDateString() + ' ' + dt.toLocaleTimeString();
         const sideClass = t.side === 'buy' ? 'positive' : 'negative';
-        return '<tr><td>' + ts + '</td><td class="' + sideClass + '">' + t.side.toUpperCase() + '</td><td>' + Number(t.quantity).toFixed(6) + '</td><td>$' + Number(t.price).toLocaleString(undefined,{minimumFractionDigits:2}) + '</td><td>$' + Number(t.value).toLocaleString(undefined,{minimumFractionDigits:2}) + '</td><td>$' + Number(t.fee).toFixed(2) + '</td></tr>';
+        let pnlCell = '<td style="color:var(--muted)">—</td>';
+        if (t.pnl_dollar !== null && t.pnl_dollar !== undefined) {
+          const pnlClass = t.pnl_dollar >= 0 ? 'positive' : 'negative';
+          const sign = t.pnl_dollar >= 0 ? '+' : '';
+          pnlCell = '<td class="' + pnlClass + '">' + sign + '$' + t.pnl_dollar.toFixed(2) + ' (' + sign + t.pnl_pct.toFixed(1) + '%)</td>';
+        }
+        return '<tr><td>' + ts + '</td><td class="' + sideClass + '">' + t.side.toUpperCase() + '</td><td>' + Number(t.quantity).toFixed(6) + '</td><td>$' + Number(t.price).toLocaleString(undefined,{minimumFractionDigits:2}) + '</td><td>$' + Number(t.value).toLocaleString(undefined,{minimumFractionDigits:2}) + '</td><td>$' + Number(t.fee).toFixed(2) + '</td>' + pnlCell + '</tr>';
       }).join('');
     }
 
@@ -505,6 +524,55 @@ async function fetchData() {
 
 fetchData();
 setInterval(fetchData, 10000);
+
+// --- All Trades tab ---
+let allTradesLoaded = false;
+async function loadAllTrades() {
+  if (allTradesLoaded) return;
+  try {
+    const r = await fetch('/api/trades/all');
+    const d = await r.json();
+    if (d.error) { console.error(d.error); return; }
+
+    // Summary cards
+    const s = d.summary;
+    const sumDiv = document.getElementById('allTradesSummary');
+    const pnlClass = s.total_pnl >= 0 ? 'var(--green)' : 'var(--red)';
+    const pnlSign = s.total_pnl >= 0 ? '+' : '';
+    sumDiv.innerHTML =
+      '<div style="background:var(--bg);border-radius:8px;padding:10px;text-align:center"><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Total P&L</div><div style="font-size:20px;font-weight:700;color:' + pnlClass + '">' + pnlSign + '$' + s.total_pnl.toFixed(2) + '</div></div>' +
+      '<div style="background:var(--bg);border-radius:8px;padding:10px;text-align:center"><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Win Rate</div><div style="font-size:20px;font-weight:700">' + s.win_rate.toFixed(0) + '%</div><div style="font-size:11px;color:var(--muted)">' + s.winners + 'W / ' + s.losers + 'L</div></div>' +
+      '<div style="background:var(--bg);border-radius:8px;padding:10px;text-align:center"><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Avg Win</div><div style="font-size:20px;font-weight:700;color:var(--green)">+$' + s.avg_win.toFixed(2) + '</div></div>' +
+      '<div style="background:var(--bg);border-radius:8px;padding:10px;text-align:center"><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Avg Loss</div><div style="font-size:20px;font-weight:700;color:var(--red)">$' + s.avg_loss.toFixed(2) + '</div></div>' +
+      '<div style="background:var(--bg);border-radius:8px;padding:10px;text-align:center"><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Total Trades</div><div style="font-size:20px;font-weight:700">' + s.total_trades + '</div><div style="font-size:11px;color:var(--muted)">' + s.total_buys + ' buys / ' + s.total_sells + ' sells</div></div>' +
+      '<div style="background:var(--bg);border-radius:8px;padding:10px;text-align:center"><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Total Fees</div><div style="font-size:20px;font-weight:700;color:var(--orange)">$' + s.total_fees.toFixed(2) + '</div></div>';
+
+    // Trade rows
+    const tbody = document.getElementById('allTradesBody');
+    if (d.trades && d.trades.length > 0) {
+      tbody.innerHTML = d.trades.map(t => {
+        const dt = new Date(t.timestamp * 1000);
+        const ts = dt.toLocaleDateString() + ' ' + dt.toLocaleTimeString();
+        const sideClass = t.side === 'buy' ? 'positive' : 'negative';
+        let pnlCell = '<td style="color:var(--muted)">—</td>';
+        if (t.pnl_dollar !== null && t.pnl_dollar !== undefined) {
+          const pc = t.pnl_dollar >= 0 ? 'positive' : 'negative';
+          const sg = t.pnl_dollar >= 0 ? '+' : '';
+          pnlCell = '<td class="' + pc + '">' + sg + '$' + t.pnl_dollar.toFixed(2) + ' (' + sg + t.pnl_pct.toFixed(1) + '%)</td>';
+        }
+        const runClass = t.running_pnl >= 0 ? 'positive' : 'negative';
+        const runSign = t.running_pnl >= 0 ? '+' : '';
+        const runCell = '<td class="' + runClass + '">' + runSign + '$' + t.running_pnl.toFixed(2) + '</td>';
+        return '<tr><td>' + ts + '</td><td class="' + sideClass + '">' + t.side.toUpperCase() + '</td><td>' + Number(t.quantity).toFixed(6) + '</td><td>$' + Number(t.price).toLocaleString(undefined,{minimumFractionDigits:2}) + '</td><td>$' + Number(t.value).toLocaleString(undefined,{minimumFractionDigits:2}) + '</td><td>$' + Number(t.fee).toFixed(2) + '</td>' + pnlCell + runCell + '</tr>';
+      }).join('');
+    } else {
+      tbody.innerHTML = '<tr><td colspan="8" style="color:var(--muted)">No trades yet</td></tr>';
+    }
+    allTradesLoaded = true;
+  } catch(e) {
+    console.error('Failed to load all trades:', e);
+  }
+}
 
 // --- Mode toggle ---
 let pendingMode = null;
@@ -559,6 +627,7 @@ function switchTab(tab, btn) {
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
   document.getElementById('tab-' + tab).classList.add('active');
   btn.classList.add('active');
+  if (tab === 'alltrades') loadAllTrades();
   if (tab === 'chat') loadChatHistory();
   if (tab === 'goals') loadGoals();
 }
@@ -751,6 +820,7 @@ class Dashboard:
         self.app.router.add_post('/api/mode', self._api_set_mode)
         self.app.router.add_get('/api/goals', self._api_get_goals)
         self.app.router.add_post('/api/goals', self._api_save_goals)
+        self.app.router.add_get('/api/trades/all', self._api_all_trades)
         self.app.router.add_post('/api/chat', self._api_chat)
         self.app.router.add_get('/api/chat/history', self._api_chat_history)
         self.app.router.add_post('/api/chat/clear', self._api_chat_clear)
@@ -797,20 +867,9 @@ class Dashboard:
                 "entry_time": pos.entry_time,
             }
 
-        # Trades
-        trades = self.db.get_trades(limit=20)
-        trades_data = [
-            {
-                "timestamp": t.timestamp,
-                "side": t.side,
-                "price": t.price,
-                "quantity": t.quantity,
-                "value": t.value,
-                "fee": t.fee,
-                "status": t.status,
-            }
-            for t in trades
-        ]
+        # Trades (last 3 days with P&L)
+        three_days_ago = time.time() - (3 * 86400)
+        trades_data = self.db.get_trades_with_pnl(since_ts=three_days_ago)
 
         # Equity history
         equity_history = self.db.get_equity_history(limit=500)
@@ -898,6 +957,39 @@ class Dashboard:
     # ------------------------------------------------------------------
     # Chat API
     # ------------------------------------------------------------------
+
+    async def _api_all_trades(self, request):
+        """Return ALL trades with P&L data for the full history view."""
+        try:
+            trades = self.db.get_trades_with_pnl()
+            stats = self.db.get_trade_stats()
+            # Compute summary
+            sells = [t for t in trades if t["side"] == "sell" and t["pnl_dollar"] is not None]
+            total_pnl = sum(t["pnl_dollar"] for t in sells)
+            winners = [t for t in sells if t["pnl_dollar"] > 0]
+            losers = [t for t in sells if t["pnl_dollar"] < 0]
+            win_rate = (len(winners) / len(sells) * 100) if sells else 0
+            avg_win = (sum(t["pnl_dollar"] for t in winners) / len(winners)) if winners else 0
+            avg_loss = (sum(t["pnl_dollar"] for t in losers) / len(losers)) if losers else 0
+
+            return web.json_response({
+                "trades": trades,
+                "summary": {
+                    "total_trades": stats.get("total_trades", 0),
+                    "total_buys": stats.get("buys", 0),
+                    "total_sells": stats.get("sells", 0),
+                    "total_fees": round(stats.get("total_fees", 0) or 0, 2),
+                    "total_pnl": round(total_pnl, 2),
+                    "win_rate": round(win_rate, 1),
+                    "avg_win": round(avg_win, 2),
+                    "avg_loss": round(avg_loss, 2),
+                    "winners": len(winners),
+                    "losers": len(losers),
+                },
+            })
+        except Exception as e:
+            logger.error(f"All trades endpoint failed: {e}")
+            return web.json_response({"error": str(e)}, status=500)
 
     async def _api_chat(self, request):
         """Handle a chat message from the user — uses the SAME trading engine brain."""
