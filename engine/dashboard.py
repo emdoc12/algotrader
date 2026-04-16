@@ -449,7 +449,11 @@ async function fetchData() {
         });
       }
     }
-  } catch (e) { console.error('Fetch error:', e); }
+  } catch (e) {
+    console.error('Fetch error:', e);
+    document.querySelector('.refresh-info').textContent = 'Error: ' + e.message + ' — retrying in 10s';
+    document.querySelector('.refresh-info').style.color = 'var(--red)';
+  }
 }
 
 fetchData();
@@ -714,6 +718,14 @@ class Dashboard:
 
     async def _api_status(self, request):
         """JSON endpoint with all dashboard data."""
+        try:
+            return await self._api_status_inner(request)
+        except Exception as e:
+            logger.error(f"Status API error: {e}", exc_info=True)
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _api_status_inner(self, request):
+        """Actual status logic (wrapped for error handling)."""
         # Balance
         balance = {}
         starting_capital = 10000
