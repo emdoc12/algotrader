@@ -31,6 +31,7 @@ from kraken_client import KrakenClient, OHLCV
 from paper_trader import PaperTrader
 from market_scanner import MarketScanner
 from sentiment import SentimentFetcher, SentimentData
+from web_research import WebResearcher, ResearchResult
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,20 @@ Everything else is your call. Factor fees into your decisions:
 - You can hold through volatility or cut losses fast — YOUR CALL
 - No shorting, no futures — spot only
 
+## STRATEGY JOURNAL — YOUR PERSISTENT MEMORY
+You have a strategy journal that persists across reboots and rebuilds. Use it to record lessons learned,
+observations about specific coins or strategies, and insights from research. Your journal entries are
+fed back to you every scan cycle, so you REMEMBER what you've learned.
+
+Write journal entries whenever you learn something — after a good trade, a bad trade, when you notice
+a pattern, or when research reveals something useful. Be specific and actionable.
+
+## WEB RESEARCH
+You can request web research on trading strategies, market analysis, coin fundamentals, or any topic
+that would help your trading. Add a "research_query" field to your response when you want to learn
+something. The system will search the web and feed results back to you on the next scan cycle.
+Use this to stay current on market events, learn new strategies, or investigate specific coins.
+
 ## RESPONSE FORMAT
 You MUST respond with valid JSON only, no other text. Use this exact structure:
 {
@@ -92,7 +107,10 @@ You MUST respond with valid JSON only, no other text. Use this exact structure:
   "confidence": 0.0,
   "reasoning": "2-3 sentence explanation",
   "market_outlook": "bullish" | "bearish" | "neutral",
-  "strategy_used": "momentum" | "mean_reversion" | "trend_following" | "sentiment" | "accumulation" | "scaling" | "profit_taking" | "stop_loss"
+  "strategy_used": "momentum" | "mean_reversion" | "trend_following" | "sentiment" | "accumulation" | "scaling" | "profit_taking" | "stop_loss",
+  "journal_entry": "Optional: Write a lesson, observation, or insight to remember. Be specific. Leave empty string if nothing to note.",
+  "journal_category": "observation" | "lesson" | "strategy_idea" | "coin_insight" | "risk_note" | "research_finding",
+  "research_query": "Optional: A web search query if you want to research something. Leave empty string if no research needed."
 }
 
 IMPORTANT: "symbol" MUST be one of: BTC/USD, ETH/USD, SOL/USD, DOGE/USD, ADA/USD, AVAX/USD, LINK/USD, DOT/USD, POL/USD, XRP/USD
@@ -100,6 +118,7 @@ For HOLD actions, symbol should be whichever coin you're monitoring most closely
 For BUY when already holding that coin: this ADDS to your position (scaling in). Set updated stop/target for the full position.
 For SELL: quantity is how much of that coin to sell. Can be partial — sell some, keep some.
 Confidence is 0.0 to 1.0 — only act on confidence >= 0.6.
+journal_entry and research_query are optional — use empty strings if not needed.
 """
 
 
@@ -146,6 +165,9 @@ class AIDecision:
     market_outlook: str = "neutral"
     strategy_used: str = ""
     raw_response: str = ""
+    journal_entry: str = ""      # lesson/observation to persist
+    journal_category: str = ""   # observation, lesson, strategy_idea, etc.
+    research_query: str = ""     # web search query for next cycle
 
 
 class AIStrategy:
@@ -170,9 +192,12 @@ class AIStrategy:
         self.sentiment = SentimentFetcher()
         self._http = httpx.AsyncClient(timeout=60.0)
         self._scanner = MarketScanner(self._http)
+        self._researcher = WebResearcher(self._http)
         self._last_market_overview = None
         self._last_decision = None
         self._last_context = ""  # Full context string from last scan — reused by chat
+        self._last_research: Optional[ResearchResult] = None  # Cached research results
+        self._pending_research_query: str = ""  # Query to run on next scan cycle
         # Per-symbol trailing stop tracking: {symbol: {highest_price, trailing_pct}}
         self._trailing_stops = {}
 
@@ -250,7 +275,27 @@ class AIStrategy:
         recent_trades = self.db.get_trades(limit=10)
         balance = self.paper_trader.get_balance() if self.paper_trader else None
 
-        # --- 7. Build prompt and call Claude ---
+        # --- 7. Execute any pending web research from last cycle ---
+        if self._pending_research_query:
+            try:
+                self._last_research = await self._researcher.search(self._pending_research_query)
+                logger.info(f"Web research completed: '{self._pending_research_query}' → {len(self._last_research.results)} results")
+                # Save research findings to journal automatically
+                if self._last_research.results:
+                    summary_snippet = "; ".join(
+                        r.title for r in self._last_research.results[:3]
+                    )
+                    self.db.add_journal_entry(
+                        lesson=f"Research on '{self._pending_research_query}': {summary_snippet}",
+                        category="research_finding",
+                        confidence=0.4,
+                        source="web_research",
+                    )
+            except Exception as e:
+                logger.warning(f"Web research failed: {e}")
+            self._pending_research_query = ""
+
+        # --- 8. Build prompt and call Claude ---
         context = self._build_context(
             current_price, bars, signals, sentiment_data,
             positions, recent_trades, balance, market_overview,
@@ -260,7 +305,26 @@ class AIStrategy:
         decision = await self._call_claude(context)
         self._last_decision = decision
 
-        # --- 8. Execute decision ---
+        # --- 8b. Process journal entry and research request ---
+        if decision.journal_entry:
+            try:
+                self.db.add_journal_entry(
+                    lesson=decision.journal_entry,
+                    category=decision.journal_category or "observation",
+                    coin=SYMBOL_MAP.get(decision.symbol, {}).get("base", ""),
+                    strategy=decision.strategy_used,
+                    confidence=decision.confidence,
+                    source="ai_trade_cycle",
+                )
+                logger.info(f"Journal entry saved: [{decision.journal_category}] {decision.journal_entry[:80]}...")
+            except Exception as e:
+                logger.warning(f"Failed to save journal entry: {e}")
+
+        if decision.research_query:
+            self._pending_research_query = decision.research_query
+            logger.info(f"Research queued for next cycle: {decision.research_query}")
+
+        # --- 9. Execute decision ---
         # Resolve the target symbol and get its current price
         target_symbol = decision.symbol  # e.g. "ETH/USD"
         sym_info = SYMBOL_MAP.get(target_symbol, SYMBOL_MAP["BTC/USD"])
@@ -527,6 +591,25 @@ class AIStrategy:
         except Exception as e:
             logger.debug(f"Could not load performance stats: {e}")
 
+        # Strategy journal — persistent memory
+        try:
+            journal = self.db.get_journal_summary(limit=15)
+            if journal:
+                parts.append(f"\n## YOUR STRATEGY JOURNAL (persistent memory)")
+                parts.append(f"These are YOUR notes from previous cycles. You wrote them. Use them.")
+                for entry in journal:
+                    ts = time.strftime('%m/%d %H:%M', time.gmtime(entry["timestamp"]))
+                    cat = entry.get("category", "note")
+                    coin = entry.get("coin", "")
+                    coin_tag = f" [{coin}]" if coin else ""
+                    parts.append(f"  [{ts}] ({cat}){coin_tag}: {entry['lesson']}")
+        except Exception as e:
+            logger.debug(f"Could not load journal entries: {e}")
+
+        # Web research results from last cycle
+        if self._last_research and self._last_research.results:
+            parts.append(self._researcher.format_for_context(self._last_research))
+
         # Goals and progress
         goals = self.db.get_goals()
         weekly_pnl = self.db.get_period_pnl(7 * 86400)
@@ -599,7 +682,7 @@ class AIStrategy:
                 },
                 json={
                     "model": model,
-                    "max_tokens": 500,
+                    "max_tokens": 700,
                     "system": SYSTEM_PROMPT,
                     "messages": [
                         {"role": "user", "content": f"Analyze this market data and make a trading decision:\n\n{context}"}
@@ -654,6 +737,9 @@ class AIStrategy:
                 market_outlook=decision_data.get("market_outlook", "neutral"),
                 strategy_used=decision_data.get("strategy_used", ""),
                 raw_response=content,
+                journal_entry=decision_data.get("journal_entry", ""),
+                journal_category=decision_data.get("journal_category", "observation"),
+                research_query=decision_data.get("research_query", ""),
             )
 
             logger.info(

@@ -148,6 +148,17 @@ class Database:
                 symbol TEXT PRIMARY KEY,
                 quantity REAL NOT NULL DEFAULT 0
             );
+
+            CREATE TABLE IF NOT EXISTS strategy_journal (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                category TEXT NOT NULL DEFAULT 'observation',
+                coin TEXT DEFAULT '',
+                strategy TEXT DEFAULT '',
+                lesson TEXT NOT NULL,
+                confidence REAL DEFAULT 0.5,
+                source TEXT DEFAULT 'trade'
+            );
         """)
         # Add symbol column to trades if not present (migration)
         try:
@@ -457,6 +468,53 @@ class Database:
         """Clear all chat messages."""
         self.conn.execute("DELETE FROM chat_history")
         self.conn.commit()
+
+    # ------------------------------------------------------------------
+    # Strategy journal — persistent AI memory
+    # ------------------------------------------------------------------
+
+    def add_journal_entry(self, lesson: str, category: str = "observation",
+                          coin: str = "", strategy: str = "",
+                          confidence: float = 0.5, source: str = "trade") -> int:
+        """Write a lesson/observation to the strategy journal."""
+        cursor = self.conn.execute(
+            """INSERT INTO strategy_journal
+               (timestamp, category, coin, strategy, lesson, confidence, source)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (time.time(), category, coin, strategy, lesson, confidence, source),
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def get_journal_entries(self, limit: int = 20, category: str = "",
+                            coin: str = "") -> list[dict]:
+        """Get recent journal entries, newest first."""
+        query = "SELECT * FROM strategy_journal"
+        params = []
+        conditions = []
+        if category:
+            conditions.append("category = ?")
+            params.append(category)
+        if coin:
+            conditions.append("coin = ?")
+            params.append(coin)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(limit)
+        rows = self.conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_journal_summary(self, limit: int = 15) -> list[dict]:
+        """Get the most recent high-confidence journal entries for AI context."""
+        rows = self.conn.execute(
+            """SELECT * FROM strategy_journal
+               WHERE confidence >= 0.5
+               ORDER BY confidence DESC, timestamp DESC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     # ------------------------------------------------------------------
     # Performance stats for AI context

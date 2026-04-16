@@ -31,7 +31,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AlgoTrader v2.6.2</title>
+<title>AlgoTrader v2.7.0</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4" async></script>
 <style>
   :root {
@@ -147,7 +147,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="header">
-  <h1>AlgoTrader v2.6.2</h1>
+  <h1>AlgoTrader v2.7.0</h1>
   <div class="badges">
     <span class="badge badge-ai" id="aiLabel">AI</span>
     <div class="toggle-wrap">
@@ -1034,7 +1034,14 @@ Your operator is talking to you via the dashboard chat. Respond conversationally
 Be direct and data-driven. Reference specific numbers from the market data below.
 You ARE the trading engine — when you say "I'll do X", you mean it. Your next scan cycle will reflect your thinking here.
 Keep responses concise (2-4 paragraphs). Use $ and % formatting for financial data.
-If the operator gives you instructions, acknowledge them — they will be fed into your next trading scan."""
+If the operator gives you instructions, acknowledge them — they will be fed into your next trading scan.
+
+## RESEARCH & JOURNAL IN CHAT
+You can research topics and write to your strategy journal during chat too.
+To request research, include [RESEARCH: your query here] anywhere in your response.
+To save a lesson to your journal, include [JOURNAL: your note here] anywhere in your response.
+The operator won't see the raw tags — they'll be processed and you'll see the results next cycle.
+Use research when the operator asks about strategies, market events, or anything you'd benefit from looking up."""
 
             # Build the SAME rich context the trading engine sees
             context = self._build_full_trading_context()
@@ -1080,10 +1087,39 @@ If the operator gives you instructions, acknowledge them — they will be fed in
             result = resp.json()
             ai_reply = result["content"][0]["text"]
 
-            # Save AI response
-            self.db.add_chat_message("assistant", ai_reply)
+            # Process research requests and journal entries from chat
+            import re as _re
+            research_matches = _re.findall(r'\[RESEARCH:\s*(.+?)\]', ai_reply)
+            journal_matches = _re.findall(r'\[JOURNAL:\s*(.+?)\]', ai_reply)
 
-            return web.json_response({"reply": ai_reply})
+            # Queue research for next scan cycle
+            if research_matches and self.bot and hasattr(self.bot, 'strategy'):
+                strategy = self.bot.strategy
+                if hasattr(strategy, '_pending_research_query'):
+                    strategy._pending_research_query = research_matches[0]
+                    logger.info(f"Chat research queued: {research_matches[0]}")
+
+            # Save journal entries
+            for note in journal_matches:
+                try:
+                    self.db.add_journal_entry(
+                        lesson=note,
+                        category="observation",
+                        confidence=0.6,
+                        source="chat",
+                    )
+                    logger.info(f"Chat journal entry saved: {note[:60]}...")
+                except Exception as e:
+                    logger.warning(f"Failed to save chat journal entry: {e}")
+
+            # Clean tags from response before showing to user
+            clean_reply = _re.sub(r'\[RESEARCH:\s*.+?\]', '', ai_reply).strip()
+            clean_reply = _re.sub(r'\[JOURNAL:\s*.+?\]', '', clean_reply).strip()
+
+            # Save AI response (clean version)
+            self.db.add_chat_message("assistant", clean_reply)
+
+            return web.json_response({"reply": clean_reply})
 
         except httpx.HTTPStatusError as e:
             logger.error(f"Chat API error: {e.response.status_code} {e.response.text}")
