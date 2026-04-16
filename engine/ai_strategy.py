@@ -526,8 +526,9 @@ class AIStrategy:
         quantity = decision.quantity
 
         # Cap to available cash (Claude decides how much to use)
+        # Reserve 0.26% for taker fee so we don't overshoot available funds
         if self.paper_trader:
-            max_qty = self.paper_trader.balance.cash_usd / price
+            max_qty = self.paper_trader.balance.cash_usd / (price * 1.0026)
             quantity = min(quantity, max_qty)
 
         if quantity < 0.0001:
@@ -595,9 +596,9 @@ class AIStrategy:
         """Add to an existing position (scale in / average down/up)."""
         quantity = decision.quantity
 
-        # Cap to available cash
+        # Cap to available cash (reserve 0.26% for taker fee)
         if self.paper_trader:
-            max_qty = self.paper_trader.balance.cash_usd / price
+            max_qty = self.paper_trader.balance.cash_usd / (price * 1.0026)
             quantity = min(quantity, max_qty)
 
         if quantity < 0.0001:
