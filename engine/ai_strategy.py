@@ -330,18 +330,19 @@ class AIStrategy:
             parts.append(f"Composite indicator score: {signals.composite_score:+.3f}")
 
         # Sentiment
-        parts.append(f"\n## MARKET SENTIMENT")
-        parts.append(f"Fear & Greed Index: {sentiment.fear_greed_value} ({sentiment.fear_greed_label})")
-        parts.append(f"Yesterday: {sentiment.fear_greed_yesterday} | Week ago: {sentiment.fear_greed_week_ago}")
-        parts.append(f"Volume trend: {sentiment.volume_trend} ({sentiment.volume_24h_change_pct:+.1f}%)")
-        parts.append(f"1h momentum: {sentiment.price_momentum_1h:+.2f}%")
-        parts.append(f"24h momentum: {sentiment.price_momentum_24h:+.2f}%")
-        parts.append(f"News sentiment: {sentiment.news_sentiment_summary}")
+        if sentiment:
+            parts.append(f"\n## MARKET SENTIMENT")
+            parts.append(f"Fear & Greed Index: {sentiment.fear_greed_value} ({sentiment.fear_greed_label})")
+            parts.append(f"Yesterday: {sentiment.fear_greed_yesterday} | Week ago: {sentiment.fear_greed_week_ago}")
+            parts.append(f"Volume trend: {sentiment.volume_trend} ({sentiment.volume_24h_change_pct:+.1f}%)")
+            parts.append(f"1h momentum: {sentiment.price_momentum_1h:+.2f}%")
+            parts.append(f"24h momentum: {sentiment.price_momentum_24h:+.2f}%")
+            parts.append(f"News sentiment: {sentiment.news_sentiment_summary}")
 
-        if sentiment.news_headlines:
-            parts.append(f"\nRecent headlines:")
-            for h in sentiment.news_headlines[:5]:
-                parts.append(f"  - {h}")
+            if sentiment.news_headlines:
+                parts.append(f"\nRecent headlines:")
+                for h in sentiment.news_headlines[:5]:
+                    parts.append(f"  - {h}")
 
         # Multi-coin market overview
         if market_overview and market_overview.coin_snapshots:
