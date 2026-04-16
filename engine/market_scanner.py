@@ -1,6 +1,7 @@
 """
 Market Scanner: fetches live crypto data from Kraken public API
 and computes cross-market analysis for AI-driven trading decisions.
+Full technical indicators (EMA, RSI, Bollinger Bands) for all coins.
 """
 
 import asyncio
@@ -10,6 +11,8 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import httpx
+
+from indicators import generate_signals, Signals
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +30,18 @@ class CoinSnapshot:
     rsi: Optional[float]
     momentum_score: float  # -1 to +1
     relative_strength: float  # vs BTC
+    # Full technical indicators (computed from OHLCV)
+    ema_fast: Optional[float] = None
+    ema_slow: Optional[float] = None
+    ema_crossover: Optional[str] = None  # "bullish" / "bearish" / "neutral"
+    bb_upper: Optional[float] = None
+    bb_middle: Optional[float] = None
+    bb_lower: Optional[float] = None
+    bb_position: Optional[float] = None  # 0.0 = at lower, 1.0 = at upper
+    bb_bandwidth: Optional[float] = None
+    rsi_signal: Optional[str] = None  # "oversold" / "overbought" / "neutral"
+    composite_score: Optional[float] = None  # -1.0 to +1.0
+    recommendation: Optional[str] = None  # "STRONG_BUY" / "BUY" / "HOLD" / "SELL" / "STRONG_SELL"
 
 
 @dataclass
@@ -159,21 +174,36 @@ class MarketScanner:
                 "Top movers      : " + ", ".join(overview.top_movers)
             )
         lines.append("")
-        lines.append("--- Per-coin snapshots ---")
+        lines.append("--- Per-coin snapshots (full technicals) ---")
 
         for snap in overview.coin_snapshots:
             rsi_str = f"{snap.rsi:.1f}" if snap.rsi is not None else "n/a"
+            rsi_sig = f" ({snap.rsi_signal})" if snap.rsi_signal else ""
             lines.append(
-                f"  {snap.symbol:6s}  "
-                f"price={snap.price:<12.6g}  "
-                f"1h={snap.change_1h:+.2f}%  "
-                f"24h={snap.change_24h:+.2f}%  "
-                f"vol24h={snap.volume_24h:<14.2f}  "
-                f"vol_chg={snap.volume_change_pct:+.1f}%  "
-                f"RSI={rsi_str}  "
-                f"mom={snap.momentum_score:+.3f}  "
-                f"relstr={snap.relative_strength:+.3f}"
+                f"\n  {snap.symbol} — ${snap.price:,.4f}  "
+                f"1h={snap.change_1h:+.2f}%  24h={snap.change_24h:+.2f}%  "
+                f"mom={snap.momentum_score:+.3f}  relstr={snap.relative_strength:+.3f}"
             )
+            lines.append(
+                f"    Vol 24h: {snap.volume_24h:,.0f}  Vol change: {snap.volume_change_pct:+.1f}%"
+            )
+            lines.append(
+                f"    RSI: {rsi_str}{rsi_sig}"
+            )
+            if snap.ema_fast is not None:
+                ema_dir = "▲" if snap.ema_crossover == "bullish" else "▼" if snap.ema_crossover == "bearish" else "—"
+                lines.append(
+                    f"    EMA(9/21): ${snap.ema_fast:,.4f} / ${snap.ema_slow:,.4f}  Crossover: {snap.ema_crossover} {ema_dir}"
+                )
+            if snap.bb_upper is not None:
+                lines.append(
+                    f"    Bollinger: ${snap.bb_lower:,.4f} — ${snap.bb_middle:,.4f} — ${snap.bb_upper:,.4f}  "
+                    f"Position: {snap.bb_position:.1%}  BW: {snap.bb_bandwidth:.4f}"
+                )
+            if snap.composite_score is not None:
+                lines.append(
+                    f"    Composite: {snap.composite_score:+.3f}  Signal: {snap.recommendation}"
+                )
 
         if overview.correlations:
             lines.append("")
@@ -235,15 +265,23 @@ class MarketScanner:
             if prior_vol > 0:
                 volume_change_pct = ((recent_vol - prior_vol) / prior_vol) * 100.0
 
-        # RSI
+        # RSI (basic)
         rsi = _compute_rsi(closes, period=14)
+
+        # Full technical indicators from generate_signals
+        signals: Optional[Signals] = None
+        try:
+            if len(closes) >= 21:  # need at least ema_slow_period bars
+                signals = generate_signals(closes)
+        except Exception as e:
+            logger.debug(f"Full indicators failed for {pair}: {e}")
 
         # Momentum score
         momentum_score = self._calc_momentum(
             change_1h, change_24h, volume_change_pct, rsi
         )
 
-        return CoinSnapshot(
+        snap = CoinSnapshot(
             symbol=symbol,
             price=price,
             change_1h=round(change_1h, 4),
@@ -254,6 +292,23 @@ class MarketScanner:
             momentum_score=round(momentum_score, 4),
             relative_strength=0.0,  # filled in later
         )
+
+        # Attach full technicals if computed
+        if signals:
+            snap.ema_fast = round(signals.ema.fast_ema, 4)
+            snap.ema_slow = round(signals.ema.slow_ema, 4)
+            snap.ema_crossover = signals.ema.crossover
+            snap.bb_upper = round(signals.bollinger.upper, 4)
+            snap.bb_middle = round(signals.bollinger.middle, 4)
+            snap.bb_lower = round(signals.bollinger.lower, 4)
+            snap.bb_position = round(signals.bollinger.price_position, 4)
+            snap.bb_bandwidth = round(signals.bollinger.bandwidth, 6)
+            snap.rsi_signal = signals.rsi.signal
+            snap.rsi = round(signals.rsi.rsi, 2)  # use the full RSI calc
+            snap.composite_score = round(signals.composite_score, 4)
+            snap.recommendation = signals.recommendation
+
+        return snap
 
     async def _get_ticker(self, pair: str) -> Optional[dict]:
         url = f"{KRAKEN_BASE}/Ticker"

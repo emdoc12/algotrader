@@ -189,7 +189,12 @@ class AlgoTraderBot:
                                 "change_1h": c.change_1h,
                                 "change_24h": c.change_24h,
                                 "rsi": c.rsi,
+                                "rsi_signal": c.rsi_signal,
                                 "momentum": c.momentum_score,
+                                "ema_crossover": c.ema_crossover,
+                                "bb_position": c.bb_position,
+                                "composite_score": c.composite_score,
+                                "recommendation": c.recommendation,
                             }
                             for c in mkt.coin_snapshots[:10]
                         ]
