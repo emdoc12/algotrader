@@ -34,43 +34,42 @@ from sentiment import SentimentFetcher, SentimentData
 logger = logging.getLogger(__name__)
 
 
-SYSTEM_PROMPT = """You are an expert cryptocurrency trader managing a BTC/USD portfolio on Kraken.
+SYSTEM_PROMPT = """You are an expert cryptocurrency trader with FULL CONTROL over a BTC/USD portfolio on Kraken.
 You run 24/7 and make decisions every scan cycle based on technical analysis, market sentiment, and news.
+You are the decision engine. You decide EVERYTHING — position sizing, entries, exits, scaling in/out, risk management.
 
 ## YOUR DUAL OBJECTIVE
 1. **Grow the USD cash balance** — take profits when conditions warrant
 2. **Accumulate more Bitcoin** — buy dips, stack sats when the price is favorable
 
-You must balance these objectives. Don't be all-in or all-out. Think in terms of portfolio allocation.
+You must balance these objectives dynamically based on market conditions.
 
 ## RISK PROFILE: AGGRESSIVE
-- You are willing to take larger positions (up to 50% of equity)
-- You use wider stops to ride volatility
-- You look for asymmetric risk/reward opportunities
-- You are comfortable with drawdowns if the thesis is intact
-- You actively look for momentum trades and mean reversion opportunities
+- You control your own position sizing — go big on high-conviction setups
+- You can scale into positions (buy more to average down or add to winners)
+- You can partially sell to lock in profits while keeping exposure
+- You use stops and targets flexibly based on your conviction and market structure
+- You actively look for momentum trades, mean reversion, and accumulation opportunities
+- You manage your own cash reserves — allocate as you see fit
 
-## CRITICAL: FEE AWARENESS
+## CRITICAL: FEE AWARENESS (ONE HARD RULE)
 Kraken charges a 0.26% taker fee per trade. A full round trip (buy + sell) costs 0.52% in fees.
-This means:
-- **NEVER enter a trade where your take-profit target is less than 1.0% above entry** — anything below ~0.6% is a guaranteed loss after fees
-- **Ideal minimum take-profit: 1.5%+** to ensure a meaningful gain after the 0.52% round-trip cost
-- **For scalp/momentum trades**: target at least 2-3% moves to justify the fees
-- **For accumulation buys**: fees matter less since you're holding long-term, but still factor them into your entry timing
-- **When evaluating a SELL**: if current profit is under 0.6%, it's usually better to HOLD and wait unless stop-loss is about to hit
-- **Quick in-and-out trades are fee destroyers** — prefer higher-conviction, larger-move setups over frequent small trades
-- At current BTC prices (~$70-85k), 0.26% fee = roughly $180-220 per BTC traded
+**THE ONLY HARD CONSTRAINT: sells where profit is under 0.6% will be blocked by the system (except stop-losses).**
+Everything else is your call. Factor fees into your decisions:
+- Round-trip cost is 0.52%, so any take-profit below that is a net loss
+- Quick in-and-out scalps are fee destroyers — make sure the move justifies the cost
+- For long-term accumulation buys, fees matter less
+- At current BTC prices, 0.26% fee = roughly $180-220 per BTC traded
 
-## RULES
-- You can only trade BTC/USD (spot, not futures)
+## YOUR CAPABILITIES
+- You can BUY any amount of BTC (limited by available cash)
+- You can SELL any amount of BTC you're holding (full or partial sells)
+- You can scale into positions — buy more when already holding
+- You can average down on dips or add to winning positions
+- You can adjust your stop-loss and take-profit levels every scan
+- You can hold through volatility or cut losses fast — YOUR CALL
 - Minimum order size: 0.0001 BTC
-- You can hold ONE position at a time (long only — no shorting on spot)
-- Always set a stop-loss and take-profit for risk management
-- Take-profit MUST be at least 1.5% above entry price to clear fees with profit
-- Stop-loss should reflect your conviction — tighter for weaker signals, wider for strong ones
-- NEVER go all-in. Keep at least 20% cash reserve
-- When in doubt, HOLD — don't force trades
-- Patience is profitable. Waiting for a strong setup beats overtrading.
+- Only BTC/USD spot (no shorting, no futures)
 
 ## RESPONSE FORMAT
 You MUST respond with valid JSON only, no other text. Use this exact structure:
@@ -82,11 +81,12 @@ You MUST respond with valid JSON only, no other text. Use this exact structure:
   "confidence": 0.0,
   "reasoning": "2-3 sentence explanation",
   "market_outlook": "bullish" | "bearish" | "neutral",
-  "strategy_used": "momentum" | "mean_reversion" | "trend_following" | "sentiment" | "accumulation"
+  "strategy_used": "momentum" | "mean_reversion" | "trend_following" | "sentiment" | "accumulation" | "scaling" | "profit_taking" | "stop_loss"
 }
 
 For HOLD actions, quantity/stop_loss/take_profit can be 0.
-For SELL actions, quantity is how much BTC to sell (can be partial).
+For BUY when already holding: this ADDS to your position (scaling in). Set updated stop/target for the full position.
+For SELL: quantity is how much BTC to sell. Can be partial — sell some, keep some.
 Confidence is 0.0 to 1.0 — only act on confidence >= 0.6.
 """
 
@@ -201,21 +201,16 @@ class AIStrategy:
 
         action_taken = "hold"
         if decision.confidence >= 0.6:
-            if decision.action == "BUY" and position is None:
-                # Validate take-profit covers fees
-                if decision.take_profit > 0 and current_price > 0:
-                    tp_gain_pct = (decision.take_profit - current_price) / current_price * 100
-                    if tp_gain_pct < ROUND_TRIP_FEE_PCT + 0.5:
-                        logger.warning(
-                            f"AI take-profit too close to entry ({tp_gain_pct:.2f}%), "
-                            f"bumping to {ROUND_TRIP_FEE_PCT + 1.0:.1f}% minimum"
-                        )
-                        decision.take_profit = current_price * (1 + (ROUND_TRIP_FEE_PCT + 1.0) / 100)
-
-                action_taken = await self._execute_buy(decision, current_price)
+            if decision.action == "BUY":
+                if position is not None:
+                    # Scaling in — add to existing position
+                    action_taken = await self._execute_scale_in(decision, position, current_price)
+                else:
+                    # New position
+                    action_taken = await self._execute_buy(decision, current_price)
 
             elif decision.action == "SELL" and position is not None:
-                # Fee guard: block signal-based sells that don't cover fees
+                # Fee guard: the ONE hard rule — block sells that don't cover fees
                 profit_pct = (current_price - position.entry_price) / position.entry_price * 100
                 if 0 < profit_pct < MIN_PROFIT_PCT and decision.strategy_used not in ("stop_loss",):
                     logger.info(
@@ -233,7 +228,14 @@ class AIStrategy:
             action_taken = f"low_confidence_{decision.action.lower()}"
 
         # --- 9. Check stop-loss / take-profit on existing position ---
+        # Claude sets these each scan, so respect them — but Claude can also update them
         if position and action_taken == "hold":
+            # Update stop/target if Claude provided new ones (even on HOLD)
+            if decision.stop_loss > 0 and decision.action == "HOLD":
+                position.stop_loss = decision.stop_loss
+            if decision.take_profit > 0 and decision.action == "HOLD":
+                position.take_profit = decision.take_profit
+
             if current_price <= position.stop_loss:
                 action_taken = await self._execute_stop_loss(position, current_price)
             elif current_price >= position.take_profit:
@@ -478,10 +480,9 @@ class AIStrategy:
         """Execute a buy based on AI decision."""
         quantity = decision.quantity
 
-        # Validate and cap quantity
+        # Cap to available cash (Claude decides how much to use)
         if self.paper_trader:
-            max_spend = self.paper_trader.balance.cash_usd * 0.80  # keep 20% reserve
-            max_qty = max_spend / price
+            max_qty = self.paper_trader.balance.cash_usd / price
             quantity = min(quantity, max_qty)
 
         if quantity < 0.0001:
@@ -541,6 +542,75 @@ class AIStrategy:
             logger.error(f"Buy execution failed: {e}")
             return f"error: {e}"
 
+    async def _execute_scale_in(self, decision: AIDecision, position: Position, price: float) -> str:
+        """Add to an existing position (scale in / average down/up)."""
+        quantity = decision.quantity
+
+        # Cap to available cash
+        if self.paper_trader:
+            max_qty = self.paper_trader.balance.cash_usd / price
+            quantity = min(quantity, max_qty)
+
+        if quantity < 0.0001:
+            logger.info("Scale-in quantity too small, skipping")
+            return "skip_too_small"
+
+        signals_json = json.dumps({
+            "ai_action": "BUY (scale-in)",
+            "ai_confidence": decision.confidence,
+            "ai_reasoning": decision.reasoning,
+            "ai_outlook": decision.market_outlook,
+            "ai_strategy": decision.strategy_used,
+        })
+
+        try:
+            if self.is_paper and self.paper_trader:
+                self.paper_trader.execute_buy(
+                    price=price, quantity=quantity,
+                    strategy=f"ai_{decision.strategy_used}_scalein",
+                    signals_json=signals_json,
+                )
+            else:
+                result = await self.kraken.place_market_order(
+                    side="buy", volume=Decimal(str(round(quantity, 8))),
+                    validate=(self.config.mode != "live"),
+                )
+                self.db.record_trade(Trade(
+                    timestamp=time.time(), side="buy", price=price,
+                    quantity=quantity, value=price * quantity,
+                    order_id=result.order_id, mode="live",
+                    strategy=f"ai_{decision.strategy_used}_scalein",
+                    signals=signals_json, status=result.status,
+                ))
+
+            # Update position with weighted average entry
+            old_cost = position.entry_price * position.quantity
+            new_cost = price * quantity
+            total_qty = position.quantity + quantity
+            avg_entry = (old_cost + new_cost) / total_qty
+
+            position.entry_price = avg_entry
+            position.quantity = total_qty
+            position.stop_loss = decision.stop_loss if decision.stop_loss > 0 else position.stop_loss
+            position.take_profit = decision.take_profit if decision.take_profit > 0 else position.take_profit
+            self.db.save_position(position)
+
+            self.db.log("TRADE",
+                f"AI SCALE-IN: +{quantity:.6f} BTC @ ${price:,.2f} | "
+                f"Total: {total_qty:.6f} BTC | Avg entry: ${avg_entry:,.2f} | "
+                f"{decision.reasoning}", signals_json)
+
+            logger.info(
+                f"SCALED IN: +{quantity:.6f} BTC @ ${price:,.2f} | "
+                f"Total: {total_qty:.6f} @ ${avg_entry:,.2f} avg | "
+                f"SL: ${position.stop_loss:,.2f} | TP: ${position.take_profit:,.2f}"
+            )
+            return "scale_in"
+
+        except Exception as e:
+            logger.error(f"Scale-in execution failed: {e}")
+            return f"error: {e}"
+
     async def _execute_sell(self, decision: AIDecision, position: Position, price: float) -> str:
         """Execute a sell based on AI decision."""
         # AI can suggest partial sells
@@ -577,17 +647,41 @@ class AIStrategy:
             pnl = (price - position.entry_price) * quantity
             pnl_pct = (price - position.entry_price) / position.entry_price * 100
 
-            self.db.close_position(position.id)
+            remaining = position.quantity - quantity
+            if remaining >= 0.0001:
+                # Partial sell — keep position open with reduced quantity
+                position.quantity = remaining
+                position.unrealized_pnl = (price - position.entry_price) * remaining
+                if decision.stop_loss > 0:
+                    position.stop_loss = decision.stop_loss
+                if decision.take_profit > 0:
+                    position.take_profit = decision.take_profit
+                self.db.save_position(position)
+                sell_type = "PARTIAL SELL"
+            else:
+                # Full close
+                self.db.close_position(position.id)
+                sell_type = "SELL"
+
             self.db.log("TRADE",
-                f"AI SELL: {quantity:.6f} BTC @ ${price:,.2f} | "
-                f"P&L: ${pnl:,.2f} ({pnl_pct:+.2f}%) | {decision.reasoning}",
+                f"AI {sell_type}: {quantity:.6f} BTC @ ${price:,.2f} | "
+                f"P&L: ${pnl:,.2f} ({pnl_pct:+.2f}%) | "
+                f"{'Remaining: ' + f'{remaining:.6f} BTC' if remaining >= 0.0001 else 'Position closed'} | "
+                f"{decision.reasoning}",
                 signals_json)
 
-            logger.info(
-                f"CLOSED LONG: {quantity:.6f} BTC @ ${price:,.2f} | "
-                f"P&L: ${pnl:,.2f} ({pnl_pct:+.2f}%)"
-            )
-            return f"sell (ai_{decision.strategy_used})"
+            if remaining >= 0.0001:
+                logger.info(
+                    f"PARTIAL SELL: {quantity:.6f} BTC @ ${price:,.2f} | "
+                    f"P&L: ${pnl:,.2f} ({pnl_pct:+.2f}%) | Keeping {remaining:.6f} BTC"
+                )
+                return f"partial_sell (ai_{decision.strategy_used})"
+            else:
+                logger.info(
+                    f"CLOSED LONG: {quantity:.6f} BTC @ ${price:,.2f} | "
+                    f"P&L: ${pnl:,.2f} ({pnl_pct:+.2f}%)"
+                )
+                return f"sell (ai_{decision.strategy_used})"
 
         except Exception as e:
             logger.error(f"Sell execution failed: {e}")
