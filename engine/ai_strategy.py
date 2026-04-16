@@ -578,11 +578,21 @@ class AIStrategy:
             # Extract text from response
             content = result["content"][0]["text"]
 
-            # Parse JSON from response (handle markdown code blocks)
+            # Parse JSON from response — robust extraction
             json_str = content.strip()
+            # Strip markdown code blocks
             if json_str.startswith("```"):
                 json_str = json_str.split("\n", 1)[1]
-                json_str = json_str.rsplit("```", 1)[0]
+                json_str = json_str.rsplit("```", 1)[0].strip()
+            # If still not valid JSON, try to find JSON object in the text
+            if not json_str.startswith("{"):
+                import re as _re
+                match = _re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', json_str)
+                if match:
+                    json_str = match.group(0)
+                else:
+                    logger.error(f"No JSON found in AI response: {content[:200]}")
+                    return AIDecision(action="HOLD", reasoning="No JSON in response")
 
             decision_data = json.loads(json_str)
 
@@ -613,7 +623,7 @@ class AIStrategy:
             )
 
             logger.info(
-                f"AI Decision: {decision.action} | Confidence: {decision.confidence:.2f} | "
+                f"AI Decision: {decision.action} {decision.symbol} | Confidence: {decision.confidence:.2f} | "
                 f"Outlook: {decision.market_outlook} | Strategy: {decision.strategy_used}"
             )
             logger.info(f"AI Reasoning: {decision.reasoning}")
