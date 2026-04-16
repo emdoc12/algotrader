@@ -266,8 +266,8 @@ class AIStrategy:
             prices = {"BTC": current_price}
             if market_overview:
                 for snap in market_overview.coin_snapshots:
-                    base = self._scanner.SYMBOL_MAP.get(snap.symbol, snap.symbol.replace("USD", ""))
-                    prices[base] = snap.price
+                    # snap.symbol is already the friendly name (e.g. "DOT", "ETH")
+                    prices[snap.symbol] = snap.price
             self.paper_trader.update_equity(prices)
 
         # --- 6. Get current state (all positions) ---
@@ -334,12 +334,14 @@ class AIStrategy:
         if target_symbol == "BTC/USD" or target_symbol == self.config.kraken.display_symbol:
             target_price = current_price
         elif market_overview:
-            # Look up price from market scanner
-            kraken_pair = sym_info["kraken"]
+            # Look up price from market scanner — scanner stores friendly name (e.g. "DOT")
             target_price = next(
-                (s.price for s in market_overview.coin_snapshots if s.symbol == kraken_pair),
-                current_price  # fallback
+                (s.price for s in market_overview.coin_snapshots if s.symbol == base_coin),
+                0  # no fallback to BTC price!
             )
+            if target_price <= 0:
+                logger.error(f"Could not find price for {base_coin} in market scanner — skipping trade")
+                target_price = current_price  # last resort, but log the error
         else:
             target_price = current_price
 
@@ -380,12 +382,13 @@ class AIStrategy:
         for pos in positions:
             # Get current price for this position's coin
             pos_sym_info = SYMBOL_MAP.get(pos.symbol, {})
-            pos_kraken = pos_sym_info.get("kraken", "XBTUSD")
+            pos_base = pos_sym_info.get("base", "BTC")
             if pos.symbol == "BTC/USD":
                 pos_price = current_price
             elif market_overview:
+                # Match on friendly name (e.g. "DOT"), not Kraken pair ("DOTUSD")
                 pos_price = next(
-                    (s.price for s in market_overview.coin_snapshots if s.symbol == pos_kraken),
+                    (s.price for s in market_overview.coin_snapshots if s.symbol == pos_base),
                     0
                 )
             else:
@@ -517,10 +520,9 @@ class AIStrategy:
                 # Get current price for this position's coin
                 pos_price = price  # default to BTC price
                 if market_overview and position.symbol != "BTC/USD":
-                    sym_info = SYMBOL_MAP.get(position.symbol, {})
-                    kraken_pair = sym_info.get("kraken", "")
+                    pos_base = SYMBOL_MAP.get(position.symbol, {}).get("base", "")
                     for snap in (market_overview.coin_snapshots if market_overview else []):
-                        if snap.symbol == kraken_pair:
+                        if snap.symbol == pos_base:
                             pos_price = snap.price
                             break
 
