@@ -387,6 +387,20 @@ class AIStrategy:
             parts.append(f"\nThis week: {weekly_pnl['trade_count']} trades | This month: {monthly_pnl['trade_count']} trades")
             parts.append(f"Adjust your aggressiveness based on whether you're ahead or behind on these goals.")
 
+        # Include recent operator chat messages so trading AI sees instructions
+        try:
+            recent_chat = self.db.get_chat_history(limit=6)
+            operator_msgs = [m for m in recent_chat if m["role"] == "user"]
+            if operator_msgs:
+                parts.append(f"\n## RECENT OPERATOR INSTRUCTIONS (from chat)")
+                parts.append(f"Your operator has been talking to you via the dashboard chat.")
+                parts.append(f"Consider their instructions when making decisions:")
+                for msg in operator_msgs[-3:]:  # Last 3 operator messages
+                    ts = time.strftime('%m/%d %H:%M', time.gmtime(msg.get("timestamp", 0)))
+                    parts.append(f"  [{ts}] Operator: {msg['message'][:200]}")
+        except Exception as e:
+            logger.debug(f"Could not load chat history for context: {e}")
+
         return "\n".join(parts)
 
     async def _call_claude(self, context: str) -> AIDecision:
