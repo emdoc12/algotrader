@@ -45,6 +45,17 @@ class CoinSnapshot:
 
 
 @dataclass
+class GlobalMarketData:
+    """Global crypto market data from CoinGecko."""
+    btc_dominance: float = 0.0           # e.g. 54.3 (percent)
+    eth_dominance: float = 0.0
+    total_market_cap_usd: float = 0.0
+    total_volume_24h_usd: float = 0.0
+    market_cap_change_24h_pct: float = 0.0
+    active_coins: int = 0
+
+
+@dataclass
 class MarketOverview:
     coin_snapshots: List[CoinSnapshot]
     btc_dominance_trend: str
@@ -53,6 +64,7 @@ class MarketOverview:
     top_movers: List[str]
     correlations: Dict[str, List[str]]
     timestamp: float
+    global_data: Optional[GlobalMarketData] = None
 
 
 def _compute_rsi(closes: List[float], period: int = 14) -> Optional[float]:
@@ -113,9 +125,15 @@ class MarketScanner:
     # ------------------------------------------------------------------
 
     async def scan_all(self) -> MarketOverview:
-        """Concurrently fetch ticker + OHLCV for every coin, return full overview."""
+        """Concurrently fetch ticker + OHLCV for every coin + global data, return full overview."""
         tasks = [self._fetch_coin_data(pair) for pair in self.WATCHLIST]
+        tasks.append(self._fetch_global_market_data())
         results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Last result is global market data
+        global_data_result = results[-1]
+        global_data = global_data_result if isinstance(global_data_result, GlobalMarketData) else None
+        results = results[:-1]  # coin results only
 
         snapshots: List[CoinSnapshot] = []
         for pair, result in zip(self.WATCHLIST, results):
@@ -153,6 +171,7 @@ class MarketScanner:
             top_movers=top_movers,
             correlations=correlations,
             timestamp=time.time(),
+            global_data=global_data,
         )
 
     def format_for_ai(self, overview: MarketOverview) -> str:
@@ -210,6 +229,19 @@ class MarketScanner:
             lines.append("--- Correlation signals ---")
             for label, members in overview.correlations.items():
                 lines.append(f"  {label}: {', '.join(members)}")
+
+        # Global market data
+        if overview.global_data:
+            g = overview.global_data
+            lines.append("")
+            lines.append("--- Global crypto market ---")
+            lines.append(f"  BTC dominance: {g.btc_dominance:.1f}%  |  ETH dominance: {g.eth_dominance:.1f}%")
+            lines.append(f"  Total market cap: ${g.total_market_cap_usd/1e9:,.1f}B  (24h: {g.market_cap_change_24h_pct:+.2f}%)")
+            lines.append(f"  Total 24h volume: ${g.total_volume_24h_usd/1e9:,.1f}B")
+            if g.btc_dominance > 55:
+                lines.append(f"  ⚠ BTC dominance HIGH ({g.btc_dominance:.1f}%) — alts may underperform")
+            elif g.btc_dominance < 45:
+                lines.append(f"  ⚠ BTC dominance LOW ({g.btc_dominance:.1f}%) — alt season potential")
 
         lines.append("")
         lines.append("=== END MARKET SCANNER ===")
@@ -343,6 +375,32 @@ class MarketScanner:
                 # Return last 100 bars
                 return value[-100:]
         return None
+
+    async def _fetch_global_market_data(self) -> Optional[GlobalMarketData]:
+        """Fetch global crypto market data (BTC dominance, total market cap) from CoinGecko."""
+        try:
+            resp = await self._client.get(
+                "https://api.coingecko.com/api/v3/global",
+                headers={"User-Agent": "AlgoTrader/2.8"},
+                timeout=10.0,
+            )
+            if resp.status_code != 200:
+                return None
+
+            data = resp.json().get("data", {})
+            market_cap_pct = data.get("market_cap_percentage", {})
+
+            return GlobalMarketData(
+                btc_dominance=round(market_cap_pct.get("btc", 0), 2),
+                eth_dominance=round(market_cap_pct.get("eth", 0), 2),
+                total_market_cap_usd=data.get("total_market_cap", {}).get("usd", 0),
+                total_volume_24h_usd=data.get("total_volume", {}).get("usd", 0),
+                market_cap_change_24h_pct=round(data.get("market_cap_change_percentage_24h_usd", 0), 2),
+                active_coins=data.get("active_cryptocurrencies", 0),
+            )
+        except Exception as e:
+            logger.warning(f"CoinGecko global data fetch failed: {e}")
+            return None
 
     # ------------------------------------------------------------------
     # Analysis helpers

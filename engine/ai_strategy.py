@@ -32,6 +32,7 @@ from paper_trader import PaperTrader
 from market_scanner import MarketScanner
 from sentiment import SentimentFetcher, SentimentData
 from web_research import WebResearcher, ResearchResult
+from whale_monitor import WhaleMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,19 @@ BTC/USD, ETH/USD, SOL/USD, DOGE/USD, ADA/USD, AVAX/USD, LINK/USD, DOT/USD, POL/U
 
 Choose the best opportunity each cycle. You can hold multiple positions across different coins simultaneously.
 
-## RISK PROFILE: AGGRESSIVE
+## YOUR DATA EDGE
+You have access to data most traders don't see together:
+- Multi-timeframe analysis: 15m, 1h, and 4h indicators for BTC — confirm signals across timeframes
+- Order book depth: see where buy/sell walls are, spread, and order imbalance
+- Whale monitoring: large BTC transactions and exchange inflow/outflow signals
+- BTC dominance: real-time from CoinGecko — know when alts will outperform vs underperform
+- ATR (Average True Range): volatility measurement for each timeframe — use for position sizing
+- Full technicals on all 10 coins: EMA, RSI, Bollinger, composite scores
+
+USE the multi-timeframe data: a bullish 15m signal aligned with bullish 1h and 4h = high conviction.
+A bullish 15m fighting a bearish 4h = low conviction trap. The order book shows real support/resistance.
+
+## RISK PROFILE: AGGRESSIVE (WITH GUARDRAILS)
 - You control your own position sizing — go big on high-conviction setups
 - You can scale into positions (buy more to average down or add to winners)
 - You can partially sell to lock in profits while keeping exposure
@@ -60,6 +73,8 @@ Choose the best opportunity each cycle. You can hold multiple positions across d
 - You actively look for momentum trades, mean reversion, and accumulation opportunities
 - You manage your own cash reserves — allocate as you see fit
 - You can hold positions in multiple coins at the same time
+- DRAWDOWN BREAKER: When equity drops 5%+ from peak, the system halves your position sizes automatically
+- Use ATR for smarter sizing: volatile coins (high ATR%) get smaller positions, calm coins get bigger ones
 
 ## CRITICAL: FEE AWARENESS (ONE HARD RULE)
 Kraken charges a 0.26% taker fee per trade. A full round trip (buy + sell) costs 0.52% in fees.
@@ -193,6 +208,7 @@ class AIStrategy:
         self._http = httpx.AsyncClient(timeout=60.0)
         self._scanner = MarketScanner(self._http)
         self._researcher = WebResearcher(self._http)
+        self._whale_monitor = WhaleMonitor(self._http)
         self._last_market_overview = None
         self._last_decision = None
         self._last_context = ""  # Full context string from last scan — reused by chat
@@ -200,6 +216,14 @@ class AIStrategy:
         self._pending_research_query: str = ""  # Query to run on next scan cycle
         # Per-symbol trailing stop tracking: {symbol: {highest_price, trailing_pct}}
         self._trailing_stops = {}
+        # Drawdown circuit breaker tracking
+        self._peak_equity: float = config.paper.starting_capital if config.mode == "paper" else 0
+        self._drawdown_pct: float = 0.0
+        self._drawdown_active: bool = False
+        # Cached data for context
+        self._last_order_book: dict = {}
+        self._last_whale_data = None
+        self._last_mtf_signals: dict = {}  # multi-timeframe signals
 
     async def run_scan(self) -> dict:
         """Run one AI-powered scan cycle."""
@@ -215,8 +239,10 @@ class AIStrategy:
             logger.error(f"Failed to fetch OHLCV: {e}")
             return {"error": str(e), "action": "none"}
 
-        # --- 2. Compute technical indicators ---
+        # --- 2. Compute technical indicators (with ATR) ---
         closes = [bar.close for bar in bars]
+        highs = [bar.high for bar in bars]
+        lows = [bar.low for bar in bars]
         signals = None
         if len(closes) >= max(sc.ema_slow_period, sc.bb_period, sc.rsi_period + 1):
             try:
@@ -229,9 +255,37 @@ class AIStrategy:
                     rsi_oversold=sc.rsi_oversold,
                     bb_period=sc.bb_period,
                     bb_std_dev=sc.bb_std_dev,
+                    highs=highs,
+                    lows=lows,
                 )
             except Exception as e:
                 logger.warning(f"Indicator computation failed: {e}")
+
+        # --- 2b. Multi-timeframe analysis (1h and 4h) ---
+        mtf_signals = {}
+        for tf_label, tf_interval in [("1h", 60), ("4h", 240)]:
+            try:
+                tf_bars = await self.kraken.get_ohlcv(interval=tf_interval, count=100)
+                tf_closes = [b.close for b in tf_bars]
+                tf_highs = [b.high for b in tf_bars]
+                tf_lows = [b.low for b in tf_bars]
+                if len(tf_closes) >= max(sc.ema_slow_period, sc.bb_period, sc.rsi_period + 1):
+                    tf_sig = generate_signals(
+                        prices=tf_closes,
+                        ema_fast_period=sc.ema_fast_period,
+                        ema_slow_period=sc.ema_slow_period,
+                        rsi_period=sc.rsi_period,
+                        rsi_overbought=sc.rsi_overbought,
+                        rsi_oversold=sc.rsi_oversold,
+                        bb_period=sc.bb_period,
+                        bb_std_dev=sc.bb_std_dev,
+                        highs=tf_highs,
+                        lows=tf_lows,
+                    )
+                    mtf_signals[tf_label] = tf_sig
+            except Exception as e:
+                logger.debug(f"Multi-timeframe {tf_label} fetch failed: {e}")
+        self._last_mtf_signals = mtf_signals
 
         # --- 3. Get current price ---
         try:
@@ -241,7 +295,7 @@ class AIStrategy:
             logger.error(f"Failed to fetch ticker: {e}")
             current_price = closes[-1] if closes else 0
 
-        # --- 4. Fetch sentiment and multi-coin market data ---
+        # --- 4. Fetch sentiment, market data, order book, and whale activity ---
         try:
             sentiment_data = await self.sentiment.fetch_all(ohlcv_bars=bars)
         except Exception as e:
@@ -251,24 +305,57 @@ class AIStrategy:
         try:
             market_overview = await self._scanner.scan_all()
             self._last_market_overview = market_overview
+            dom_str = ""
+            if market_overview.global_data:
+                dom_str = f" | BTC dom: {market_overview.global_data.btc_dominance:.1f}%"
             logger.info(
                 f"Market scan: {len(market_overview.coin_snapshots)} coins | "
                 f"Momentum: {market_overview.market_momentum} | "
-                f"Rotation: {market_overview.sector_rotation_signal}"
+                f"Rotation: {market_overview.sector_rotation_signal}{dom_str}"
             )
         except Exception as e:
             logger.warning(f"Market scan failed: {e}")
             market_overview = None
 
-        # --- 5. Update equity with prices for all held coins ---
+        # Order book depth (BTC — primary pair)
+        try:
+            self._last_order_book = await self.kraken.get_order_book(depth=15)
+        except Exception as e:
+            logger.debug(f"Order book fetch failed: {e}")
+
+        # Whale activity
+        try:
+            self._last_whale_data = await self._whale_monitor.get_whale_activity()
+        except Exception as e:
+            logger.debug(f"Whale monitor failed: {e}")
+
+        # --- 5. Update equity and drawdown tracking ---
         if self.is_paper and self.paper_trader:
             # Build price map from market scanner data
             prices = {"BTC": current_price}
             if market_overview:
                 for snap in market_overview.coin_snapshots:
-                    # snap.symbol is already the friendly name (e.g. "DOT", "ETH")
                     prices[snap.symbol] = snap.price
             self.paper_trader.update_equity(prices)
+
+            # Drawdown circuit breaker
+            equity = self.paper_trader.balance.total_equity
+            if equity > self._peak_equity:
+                self._peak_equity = equity
+            if self._peak_equity > 0:
+                self._drawdown_pct = ((self._peak_equity - equity) / self._peak_equity) * 100
+            was_active = self._drawdown_active
+            self._drawdown_active = self._drawdown_pct >= 5.0  # 5% drawdown threshold
+            if self._drawdown_active and not was_active:
+                logger.warning(
+                    f"DRAWDOWN CIRCUIT BREAKER ACTIVE: {self._drawdown_pct:.1f}% drawdown "
+                    f"(peak: ${self._peak_equity:,.2f}, current: ${equity:,.2f}). "
+                    f"Position sizes will be halved."
+                )
+                self.db.log("WARNING", f"Drawdown breaker active: {self._drawdown_pct:.1f}%")
+            elif not self._drawdown_active and was_active:
+                logger.info(f"Drawdown circuit breaker cleared. Equity recovered to ${equity:,.2f}")
+                self.db.log("INFO", "Drawdown breaker cleared — back to full sizing")
 
         # --- 6. Get current state (all positions) ---
         positions = self.db.get_open_positions()
@@ -481,6 +568,51 @@ class AIStrategy:
             parts.append(f"Price position in BB: {signals.bollinger.price_position:.2%}")
             parts.append(f"BB Bandwidth: {signals.bollinger.bandwidth:.4f}")
             parts.append(f"Composite indicator score: {signals.composite_score:+.3f}")
+            if signals.atr:
+                parts.append(f"ATR (14): ${signals.atr.atr:,.2f} ({signals.atr.atr_pct:.2f}% of price)")
+                parts.append(f"Volatility: {signals.atr.volatility}")
+
+        # Multi-timeframe analysis
+        if self._last_mtf_signals:
+            parts.append(f"\n## MULTI-TIMEFRAME ANALYSIS")
+            for tf, tf_sig in self._last_mtf_signals.items():
+                parts.append(f"\n### {tf.upper()} Timeframe:")
+                parts.append(f"  EMA Crossover: {tf_sig.ema.crossover} | Fast > Slow: {tf_sig.ema.fast_above_slow}")
+                parts.append(f"  RSI: {tf_sig.rsi.rsi:.1f} ({tf_sig.rsi.signal})")
+                parts.append(f"  BB Position: {tf_sig.bollinger.price_position:.2%}")
+                parts.append(f"  Composite: {tf_sig.composite_score:+.3f} → {tf_sig.recommendation}")
+                if tf_sig.atr:
+                    parts.append(f"  ATR: ${tf_sig.atr.atr:,.2f} ({tf_sig.atr.volatility})")
+
+            # Alignment check
+            if signals and "1h" in self._last_mtf_signals:
+                tf_1h = self._last_mtf_signals["1h"]
+                both_bullish = signals.composite_score > 0.1 and tf_1h.composite_score > 0.1
+                both_bearish = signals.composite_score < -0.1 and tf_1h.composite_score < -0.1
+                if both_bullish:
+                    parts.append(f"  ✓ 15m and 1h ALIGNED BULLISH — higher conviction setup")
+                elif both_bearish:
+                    parts.append(f"  ✓ 15m and 1h ALIGNED BEARISH — higher conviction setup")
+                else:
+                    parts.append(f"  ⚠ Timeframes CONFLICTING — lower conviction, reduce size or hold")
+
+        # Order book depth
+        if self._last_order_book:
+            ob = self._last_order_book
+            parts.append(f"\n## ORDER BOOK (BTC/USD)")
+            parts.append(f"Spread: ${ob.get('spread', 0):,.2f} ({ob.get('spread_pct', 0):.4f}%)")
+            parts.append(f"Bid depth: ${ob.get('bid_depth_usd', 0):,.0f} | Ask depth: ${ob.get('ask_depth_usd', 0):,.0f}")
+            imb = ob.get('imbalance', 0)
+            imb_label = "buyers dominant" if imb > 0.1 else "sellers dominant" if imb < -0.1 else "balanced"
+            parts.append(f"Imbalance: {imb:+.3f} ({imb_label})")
+            parts.append(f"Bid wall: ${ob.get('bid_wall_price', 0):,.2f} ({ob.get('bid_wall_volume', 0):.4f} BTC)")
+            parts.append(f"Ask wall: ${ob.get('ask_wall_price', 0):,.2f} ({ob.get('ask_wall_volume', 0):.4f} BTC)")
+
+        # Whale activity
+        if self._last_whale_data:
+            whale_ctx = self._whale_monitor.format_for_context(self._last_whale_data)
+            if whale_ctx:
+                parts.append(whale_ctx)
 
         # Sentiment
         if sentiment:
@@ -512,6 +644,11 @@ class AIStrategy:
             starting = self.config.paper.starting_capital
             pnl = balance.total_equity - starting
             parts.append(f"Total P&L: ${pnl:,.2f} ({pnl/starting*100:+.2f}%)")
+            parts.append(f"Peak equity: ${self._peak_equity:,.2f}")
+            parts.append(f"Current drawdown: {self._drawdown_pct:.1f}%")
+            if self._drawdown_active:
+                parts.append(f"⚠ DRAWDOWN CIRCUIT BREAKER ACTIVE — position sizes halved until recovery")
+                parts.append(f"  Reduce risk. Focus on high-conviction setups only.")
 
         # All open positions with fee analysis
         if positions:
@@ -770,6 +907,11 @@ class AIStrategy:
         min_size = MIN_ORDER_SIZE.get(base_coin, 0.0001)
         quantity = decision.quantity
 
+        # Drawdown circuit breaker — halve position size when in drawdown
+        if self._drawdown_active:
+            quantity = quantity * 0.5
+            logger.info(f"Drawdown breaker: halving buy size to {quantity:.6f} {base_coin}")
+
         # Cap to available cash (reserve 0.26% for taker fee)
         if self.paper_trader:
             max_qty = self.paper_trader.balance.cash_usd / (price * 1.0026)
@@ -852,6 +994,11 @@ class AIStrategy:
         base_coin = sym_info["base"]
         min_size = MIN_ORDER_SIZE.get(base_coin, 0.0001)
         quantity = decision.quantity
+
+        # Drawdown circuit breaker — halve position size
+        if self._drawdown_active:
+            quantity = quantity * 0.5
+            logger.info(f"Drawdown breaker: halving scale-in size to {quantity:.6f} {base_coin}")
 
         # Cap to available cash (reserve 0.26% for taker fee)
         if self.paper_trader:

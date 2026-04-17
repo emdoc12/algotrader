@@ -147,6 +147,67 @@ class KrakenClient:
         # Return only the last `count` bars
         return bars[-count:]
 
+    async def get_order_book(self, pair: str = "", depth: int = 10) -> dict:
+        """
+        Fetch order book depth from Kraken public API.
+
+        Returns dict with:
+            bids: list of [price, volume] (highest first)
+            asks: list of [price, volume] (lowest first)
+            bid_wall: largest bid volume and its price
+            ask_wall: largest ask volume and its price
+            spread: ask - bid as dollar amount
+            spread_pct: spread as percentage of mid price
+            bid_depth_usd: total USD value on bid side
+            ask_depth_usd: total USD value on ask side
+            imbalance: (bid_depth - ask_depth) / (bid_depth + ask_depth), -1 to +1
+        """
+        url = f"{self.BASE_URL}/0/public/Depth"
+        target_pair = pair or self.symbol
+        resp = await self._http.get(url, params={"pair": target_pair, "count": depth})
+        resp.raise_for_status()
+        data = resp.json()
+
+        if data.get("error"):
+            raise RuntimeError(f"Kraken Depth error: {data['error']}")
+
+        pair_data = list(data["result"].values())[0]
+        raw_bids = pair_data.get("bids", [])
+        raw_asks = pair_data.get("asks", [])
+
+        bids = [[float(b[0]), float(b[1])] for b in raw_bids]
+        asks = [[float(a[0]), float(a[1])] for a in raw_asks]
+
+        # Compute depth metrics
+        bid_depth_usd = sum(p * v for p, v in bids)
+        ask_depth_usd = sum(p * v for p, v in asks)
+        total_depth = bid_depth_usd + ask_depth_usd
+
+        bid_wall = max(bids, key=lambda x: x[1]) if bids else [0, 0]
+        ask_wall = max(asks, key=lambda x: x[1]) if asks else [0, 0]
+
+        best_bid = bids[0][0] if bids else 0
+        best_ask = asks[0][0] if asks else 0
+        mid = (best_bid + best_ask) / 2 if (best_bid + best_ask) > 0 else 1
+        spread = best_ask - best_bid
+        spread_pct = (spread / mid) * 100
+
+        imbalance = (bid_depth_usd - ask_depth_usd) / total_depth if total_depth > 0 else 0
+
+        return {
+            "bids": bids[:depth],
+            "asks": asks[:depth],
+            "bid_wall_price": bid_wall[0],
+            "bid_wall_volume": bid_wall[1],
+            "ask_wall_price": ask_wall[0],
+            "ask_wall_volume": ask_wall[1],
+            "spread": round(spread, 4),
+            "spread_pct": round(spread_pct, 4),
+            "bid_depth_usd": round(bid_depth_usd, 2),
+            "ask_depth_usd": round(ask_depth_usd, 2),
+            "imbalance": round(imbalance, 4),
+        }
+
     # ------------------------------------------------------------------
     # Private endpoints (requires API key)
     # ------------------------------------------------------------------

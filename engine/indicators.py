@@ -35,15 +35,24 @@ class BollingerResult:
 
 
 @dataclass
+class ATRResult:
+    """Average True Range — measures volatility."""
+    atr: float            # current ATR value in USD
+    atr_pct: float        # ATR as % of current price
+    volatility: str       # "low", "medium", "high", "extreme"
+
+
+@dataclass
 class Signals:
     """Combined indicator signals for a single point in time."""
     price: float
     ema: EMAResult
     rsi: RSIResult
     bollinger: BollingerResult
+    atr: ATRResult = None
     # Composite signal: -1.0 (strong sell) to +1.0 (strong buy)
-    composite_score: float
-    recommendation: str  # "STRONG_BUY", "BUY", "HOLD", "SELL", "STRONG_SELL"
+    composite_score: float = 0.0
+    recommendation: str = "HOLD"  # "STRONG_BUY", "BUY", "HOLD", "SELL", "STRONG_SELL"
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +156,42 @@ def compute_bollinger_bands(
     return upper, middle, lower
 
 
+def compute_atr(highs: list[float], lows: list[float], closes: list[float],
+                period: int = 14) -> list[float]:
+    """
+    Compute Average True Range (ATR) using Wilder's smoothing.
+
+    True Range = max(high - low, |high - prev_close|, |low - prev_close|)
+    ATR = smoothed average of True Range over `period`.
+
+    Requires highs, lows, closes of equal length with at least period+1 bars.
+    Returns list same length as inputs (first `period` values are NaN).
+    """
+    n = len(closes)
+    if n < period + 1:
+        return [float("nan")] * n
+
+    atr_values = [float("nan")] * n
+
+    # Compute True Range series
+    tr = [float("nan")]  # first bar has no prev close
+    for i in range(1, n):
+        high_low = highs[i] - lows[i]
+        high_prev_close = abs(highs[i] - closes[i - 1])
+        low_prev_close = abs(lows[i] - closes[i - 1])
+        tr.append(max(high_low, high_prev_close, low_prev_close))
+
+    # Seed: simple average of first `period` true ranges
+    first_atr = sum(tr[1:period + 1]) / period
+    atr_values[period] = first_atr
+
+    # Wilder's smoothing: ATR = (prev_ATR * (period-1) + current_TR) / period
+    for i in range(period + 1, n):
+        atr_values[i] = (atr_values[i - 1] * (period - 1) + tr[i]) / period
+
+    return atr_values
+
+
 # ---------------------------------------------------------------------------
 # Signal generation
 # ---------------------------------------------------------------------------
@@ -160,6 +205,9 @@ def generate_signals(
     rsi_oversold: float = 30.0,
     bb_period: int = 20,
     bb_std_dev: float = 2.0,
+    highs: list[float] = None,
+    lows: list[float] = None,
+    atr_period: int = 14,
 ) -> Signals:
     """
     Generate combined trading signals from the latest candle data.
@@ -274,11 +322,33 @@ def generate_signals(
     else:
         rec = "HOLD"
 
+    # --- ATR (if OHLCV data provided) ---
+    atr_result = None
+    if highs is not None and lows is not None and len(highs) == len(prices):
+        atr_series = compute_atr(highs, lows, prices, atr_period)
+        atr_val = atr_series[-1]
+        if not math.isnan(atr_val) and current_price > 0:
+            atr_pct = (atr_val / current_price) * 100
+            if atr_pct < 1.5:
+                vol_label = "low"
+            elif atr_pct < 3.0:
+                vol_label = "medium"
+            elif atr_pct < 6.0:
+                vol_label = "high"
+            else:
+                vol_label = "extreme"
+            atr_result = ATRResult(
+                atr=round(atr_val, 4),
+                atr_pct=round(atr_pct, 3),
+                volatility=vol_label,
+            )
+
     return Signals(
         price=current_price,
         ema=ema_result,
         rsi=rsi_result,
         bollinger=bb_result,
+        atr=atr_result,
         composite_score=round(composite, 4),
         recommendation=rec,
     )
