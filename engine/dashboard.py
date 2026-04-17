@@ -31,7 +31,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AlgoTrader v2.9.0</title>
+<title>AlgoTrader v2.9.1</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4" async></script>
 <style>
   :root {
@@ -147,7 +147,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="header">
-  <h1>AlgoTrader v2.9.0</h1>
+  <h1>AlgoTrader v2.9.1</h1>
   <div class="badges">
     <span class="badge badge-ai" id="aiLabel">AI</span>
     <div class="toggle-wrap">
@@ -387,7 +387,7 @@ async function fetchData() {
     document.getElementById('aiStrategy').textContent = sig.ai_strategy || '--';
     const reasonEl = document.getElementById('aiReasoning');
     const reasonText = sig.ai_reasoning || 'Waiting for scan...';
-    reasonEl.innerHTML = reasonText.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\\n/g,'<br>').replace(/\n/g,'<br>');
+    reasonEl.innerHTML = reasonText.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\\n/g,'<br>');
 
     // Sentiment
     const fg = sig.fear_greed;
@@ -668,8 +668,7 @@ function appendChatMsg(role, text, ts) {
   let html = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   html = html.replace(/[*][*](.*?)[*][*]/g, '<strong>$1</strong>');
   html = html.replace(/[*](.*?)[*]/g, '<em>$1</em>');
-  html = html.replace(/\\n/g, '\n');
-  html = html.replace(/\n/g, '<br>');
+  html = html.replace(/\\n/g, '<br>');
   html = html.replace(/(<br>)\s*[-•]\s+/g, '$1&#8226; ');
   html = html.replace(/^[-•]\s+/, '&#8226; ');
   if (ts) {
