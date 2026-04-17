@@ -31,7 +31,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AlgoTrader v2.9.1</title>
+<title>AlgoTrader v2.10.0</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4" async></script>
 <style>
   :root {
@@ -85,7 +85,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .signal-buy { background: rgba(34,197,94,0.15); color: var(--green); }
   .signal-sell { background: rgba(239,68,68,0.15); color: var(--red); }
   .signal-hold { background: rgba(139,143,163,0.15); color: var(--muted); }
-  .ai-reasoning { background: rgba(168,85,247,0.08); border: 1px solid rgba(168,85,247,0.2); border-radius: 8px; padding: 12px; margin-top: 8px; font-size: 14px; line-height: 1.6; white-space: pre-line; }
+  .ai-reasoning { background: rgba(168,85,247,0.08); border: 1px solid rgba(168,85,247,0.2); border-radius: 8px; padding: 12px; margin-top: 6px; font-size: 14px; line-height: 1.6; white-space: pre-line; max-height: 300px; overflow-y: auto; }
   .confidence-bar { height: 6px; background: var(--border); border-radius: 3px; margin-top: 8px; overflow: hidden; }
   .confidence-fill { height: 100%; border-radius: 3px; transition: width 0.5s; }
   .fear-greed-bar { height: 8px; background: linear-gradient(to right, #ef4444, #f97316, #eab308, #22c55e, #22c55e); border-radius: 4px; position: relative; margin: 8px 0; }
@@ -147,7 +147,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="header">
-  <h1>AlgoTrader v2.9.1</h1>
+  <h1>AlgoTrader v2.10.0</h1>
   <div class="badges">
     <span class="badge badge-ai" id="aiLabel">AI</span>
     <div class="toggle-wrap">
@@ -232,6 +232,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </div>
     <div class="confidence-bar"><div class="confidence-fill" id="confFill" style="width:0;background:var(--muted)"></div></div>
+    <h3 style="margin-top:12px;font-size:14px;color:var(--purple)">Current Thinking</h3>
     <div class="ai-reasoning" id="aiReasoning">Waiting for first scan...</div>
   </div>
   <div class="card">
@@ -1035,28 +1036,11 @@ class Dashboard:
             system_prompt = TRADING_PROMPT + """
 
 ## CHAT MODE
-Your operator is talking to you via the dashboard chat. Respond conversationally — do NOT respond in JSON format.
-You ARE the trading engine — the SAME agent that makes every buy/sell decision. This is not a separate system.
-When you say "I'll do X", you WILL do it — your next scan cycle sees this conversation and acts on it.
-
-Talk like a real person having a conversation. Be warm, direct, and specific. Use plain English.
-BAD: "Current market microstructure indicates consolidation phase with elevated funding suggesting overleveraged long positioning."
-GOOD: "Market's been chopping sideways — funding rates are pretty hot which tells me too many people are leveraged long. I'm staying patient."
-
-Reference specific numbers when relevant ($83K, up 2.3%, etc.) but don't drown the operator in data.
-Keep responses concise (2-4 paragraphs). Break up thoughts with line breaks so it's easy to read.
-
-## SAVING INSTRUCTIONS FROM YOUR OPERATOR
-If the operator gives you a standing instruction (e.g. "stop buying DOT", "be more aggressive", "focus on BTC"),
-save it as a directive using [DIRECTIVE: instruction here]. Directives persist across scans until cancelled.
-This is how you remember and follow through on what your operator tells you.
-
-## RESEARCH & JOURNAL IN CHAT
-To request research, include [RESEARCH: your query here] anywhere in your response.
-To save a lesson to your journal, include [JOURNAL: your note here] anywhere in your response.
-To save a research note, include [NOTE: title | body text here] in your response.
-The operator won't see the raw tags — they'll be processed and you'll see the results next cycle.
-Use research when the operator asks about strategies, market events, or anything you'd benefit from looking up."""
+Your operator is talking to you right now. This is a conversation, not a scan cycle.
+Do NOT include [BUY:] or [SELL:] tags in chat — you only trade during scan cycles.
+Keep responses to 2-4 paragraphs. Be warm and direct. Reference actual numbers when relevant.
+You can still use [JOURNAL:], [NOTE:], [RESEARCH:], [DIRECTIVE:], and [ALERT:] tags in chat —
+they'll be processed silently and the operator won't see the raw tags."""
 
             # Build the SAME rich context the trading engine sees
             context = self._build_full_trading_context()
@@ -1173,9 +1157,37 @@ Use research when the operator asks about strategies, market events, or anything
                 except Exception as e:
                     logger.warning(f"Failed to save chat research note: {e}")
 
+            # Process alert tags from chat
+            alert_match = _re.search(r'\[ALERT:\s*(.*?)\]', ai_reply)
+            if alert_match and self.bot and hasattr(self.bot, 'strategy'):
+                aparams = {}
+                for pair in _re.findall(r'(\w+)\s*=\s*([^,\]]+)', alert_match.group(1)):
+                    aparams[pair[0].lower().strip()] = pair[1].strip()
+                if aparams.get("coin") and aparams.get("condition") and aparams.get("threshold"):
+                    try:
+                        self.bot.strategy._alert_manager.create_alert(
+                            coin=aparams["coin"].upper(),
+                            condition=aparams["condition"],
+                            threshold=float(aparams["threshold"]),
+                            reason=aparams.get("reason", ""),
+                            action_plan=aparams.get("plan", ""),
+                        )
+                    except Exception as e:
+                        logger.warning(f"Chat alert creation failed: {e}")
+
+            cancel_match = _re.search(r'\[CANCEL_ALERT:\s*([\d,\s]+)\]', ai_reply)
+            if cancel_match and self.bot and hasattr(self.bot, 'strategy'):
+                for aid in cancel_match.group(1).split(","):
+                    aid = aid.strip()
+                    if aid.isdigit():
+                        try:
+                            self.bot.strategy._alert_manager.cancel_alert(int(aid))
+                        except Exception:
+                            pass
+
             # Clean all tags from response before showing to user
             clean_reply = ai_reply
-            for tag in ["RESEARCH", "JOURNAL", "DIRECTIVE", "NOTE"]:
+            for tag in ["RESEARCH", "JOURNAL", "DIRECTIVE", "NOTE", "STALE", "ALERT", "CANCEL_ALERT"]:
                 clean_reply = _re.sub(rf'\[{tag}:\s*.+?\]', '', clean_reply)
             clean_reply = clean_reply.strip()
 

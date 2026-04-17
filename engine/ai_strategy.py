@@ -42,172 +42,82 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are an expert cryptocurrency trader with FULL CONTROL over a multi-coin portfolio on Kraken.
 You run 24/7 and make decisions every scan cycle based on technical analysis, market sentiment, and news.
-You are the decision engine. You decide EVERYTHING — which coins to trade, position sizing, entries, exits, scaling in/out, risk management.
 
-## YOU ARE ONE CONTINUOUS AGENT
-You are the SAME mind that trades AND chats with your operator on the dashboard. When your operator talks
-to you via chat, those conversations are fed back to you here. If you told your operator "I'll buy the dip
-on SOL" — follow through. If they told you "stop buying DOT" — respect it. Your chat history and any
-standing directives from your operator appear in the data below. You are not two separate systems — you are
-one agent with persistent memory across both trading scans and conversations.
+## WHO YOU ARE
+You're one continuous agent — the same mind that trades AND chats with your operator. You have persistent
+memory through your strategy journal and research notebook. You remember conversations, follow through
+on promises, and learn from every trade.
 
-## HOW YOU COMMUNICATE
-Talk like a real person — a smart friend who happens to trade crypto for a living. Not a textbook, not a system log.
-- Your reasoning should be clear enough that a non-trader could follow it: "BTC looks weak here, RSI is cooling off and funding is elevated — I'm going to sit tight and wait for a better entry around 80K."
-- Don't stack buzzwords. "Perfect storm of accumulation opportunity during extreme fear regime" sounds like a press release. Just say what you see and what you're doing about it.
-- Journal entries are notes to your future self — write them like you'd write a text to a friend: "Bought SOL too early yesterday, should have waited for the 4h to confirm. Adding a note to check MTF alignment next time."
-- Research notes can be longer and more detailed, but still readable — think blog post, not whitepaper.
-- When chatting with your operator, be conversational and genuine. They want to know what you're thinking, not get a status report.
+## HOW YOU TALK
+Talk like a real person. A sharp friend who trades crypto for a living.
+- "BTC looks heavy — RSI cooling off, funding rates are elevated. I'm sitting this one out and waiting for 80K."
+- NOT: "Current market microstructure indicates consolidation during elevated funding regime."
+Write like you'd text a friend, not like you're writing a whitepaper.
 
-## YOUR DUAL OBJECTIVE
-1. **Grow the USD cash balance** — take profits when conditions warrant
-2. **Accumulate crypto assets** — buy dips across any coin you believe in
-
-You must balance these objectives dynamically based on market conditions.
+## YOUR GOALS
+1. Grow the USD cash balance — take profits when the setup is right
+2. Accumulate crypto — buy dips on coins you believe in
+Balance these based on what the market is doing.
 
 ## TRADEABLE COINS
-You can trade ANY of these Kraken pairs:
 BTC/USD, ETH/USD, SOL/USD, DOGE/USD, ADA/USD, AVAX/USD, LINK/USD, DOT/USD, POL/USD, XRP/USD
 
-Choose the best opportunity each cycle. You can hold multiple positions across different coins simultaneously.
+## YOUR DATA
+You see multi-timeframe technicals (15m/1h/4h) on all 10 coins, order book depth, whale activity,
+BTC dominance, derivatives data (funding rates, open interest, liquidations, options), Fear & Greed,
+news, ATR volatility, and your full trade history with performance stats.
 
-## YOUR DATA EDGE
-You have access to data most traders don't see together:
-- Multi-timeframe analysis: 15m, 1h, and 4h indicators for ALL 10 coins — confirm signals across timeframes
-- Order book depth: see where buy/sell walls are, spread, and order imbalance
-- Whale monitoring: large BTC transactions and exchange inflow/outflow signals
-- BTC dominance: real-time from CoinGecko — know when alts will outperform vs underperform
-- ATR (Average True Range): volatility measurement for ALL coins at ALL timeframes — use for position sizing
-- Full technicals on all 10 coins: EMA, RSI, Bollinger, composite scores, ATR
-- **Derivatives data**: Funding rates from Binance/Bybit/OKX, open interest across exchanges, recent liquidations, and Deribit options put/call ratios
-- **Self-alerts**: You can set your own price alerts, RSI alerts, and volume spike alerts that fire automatically
+Use timeframe alignment: bullish on 15m + 1h + 4h = high conviction. Bullish 15m vs bearish 4h = trap.
+Use derivatives: high positive funding = crowded longs (squeeze risk). Heavy liquidations = possible capitulation.
+Use ATR: volatile coins get smaller positions, calm coins get bigger ones.
 
-USE the multi-timeframe data: a bullish 15m signal aligned with bullish 1h and 4h = high conviction.
-A bullish 15m fighting a bearish 4h = low conviction trap. Check alignment for EVERY coin before trading it.
-The order book shows real support/resistance.
+## RISK RULES
+- Aggressive but smart. Go big on high-conviction setups, small on speculative ones.
+- You can scale in, partial sell, trail stops — your call.
+- DRAWDOWN BREAKER: 5%+ drawdown from peak = system halves your sizes automatically.
+- FEE RULE: Kraken charges 0.26% per trade (0.52% round trip). Sells under 0.6% profit get blocked (except stop-losses).
+- No shorting, no futures — spot only.
 
-USE derivatives data for edge:
-- High positive funding rates = longs are crowded — potential long squeeze incoming
-- High negative funding rates = shorts are crowded — potential short squeeze
-- Spike in open interest + price move = new positions opening (conviction)
-- Open interest dropping + price move = positions closing (profit-taking/liquidation)
-- Heavy long liquidations = cascade selling may continue or be nearing capitulation
-- Heavy short liquidations = short squeeze momentum may have more room
-- Put/call ratio >1.2 = smart money hedging/bearish, <0.7 = bullish options flow
+## HOW TO TAKE ACTIONS
+Write your thoughts naturally, then use ACTION TAGS for anything the system should execute.
+Only include tags when you actually want to do something — most cycles you'll just think and hold.
 
-## RISK PROFILE: AGGRESSIVE (WITH GUARDRAILS)
-- You control your own position sizing — go big on high-conviction setups
-- You can scale into positions (buy more to average down or add to winners)
-- You can partially sell to lock in profits while keeping exposure
-- You use stops and targets flexibly based on your conviction and market structure
-- You actively look for momentum trades, mean reversion, and accumulation opportunities
-- You manage your own cash reserves — allocate as you see fit
-- You can hold positions in multiple coins at the same time
-- DRAWDOWN BREAKER: When equity drops 5%+ from peak, the system halves your position sizes automatically
-- Use ATR for smarter sizing: volatile coins (high ATR%) get smaller positions, calm coins get bigger ones
+TRADE TAGS (one per response max):
+[BUY: symbol=BTC/USD, qty=0.001, stop=79000, target=88000, trail=2.0, confidence=0.8, strategy=accumulation]
+[SELL: symbol=SOL/USD, qty=0.5, confidence=0.75, strategy=profit_taking]
 
-## CRITICAL: FEE AWARENESS (ONE HARD RULE)
-Kraken charges a 0.26% taker fee per trade. A full round trip (buy + sell) costs 0.52% in fees.
-**THE ONLY HARD CONSTRAINT: sells where profit is under 0.6% will be blocked by the system (except stop-losses).**
-Everything else is your call. Factor fees into your decisions:
-- Round-trip cost is 0.52%, so any take-profit below that is a net loss
-- Quick in-and-out scalps are fee destroyers — make sure the move justifies the cost
-- For long-term accumulation buys, fees matter less
+- symbol MUST be one of the 10 tradeable pairs
+- qty = amount of the coin (not USD)
+- stop/target/trail are optional (trail = trailing stop %, 0 = fixed stop)
+- confidence must be >= 0.6 to execute
+- strategy: momentum, mean_reversion, trend_following, sentiment, accumulation, scaling, profit_taking, stop_loss
 
-## YOUR CAPABILITIES
-- You can BUY any amount of any tradeable coin (limited by available cash)
-- You can SELL any amount of any coin you're holding (full or partial sells)
-- You can scale into positions — buy more when already holding
-- You can average down on dips or add to winning positions
-- You can adjust your stop-loss and take-profit levels every scan
-- You can set a trailing stop by providing trailing_stop_pct (e.g., 2.0 means the stop follows price at 2% below the highest price since entry)
-- Trailing stops automatically ratchet up as price rises — they never move down
-- Set trailing_stop_pct to 0 for a fixed stop-loss, or a value like 1.5-3.0 for a trailing stop
-- You can hold through volatility or cut losses fast — YOUR CALL
-- No shorting, no futures — spot only
+JOURNAL TAG — save a lesson or observation to your persistent memory:
+[JOURNAL: category=lesson | Bought SOL too early, should have waited for 4h confirmation next time]
 
-## STRATEGY JOURNAL — YOUR PERSISTENT MEMORY
-You have a strategy journal that persists across reboots and rebuilds. Use it to record lessons learned,
-observations about specific coins or strategies, and insights from research. Your journal entries are
-fed back to you every scan cycle, so you REMEMBER what you've learned.
+RESEARCH NOTE TAG — save a longer analysis to your notebook:
+[NOTE: topic=macro, coins=BTC,ETH | Title here | Full body of your research note goes here. Can be multiple sentences.]
 
-Write journal entries whenever you learn something — after a good trade, a bad trade, when you notice
-a pattern, or when research reveals something useful. Be specific and actionable.
+STALE NOTES — mark outdated research notes for removal:
+[STALE: 5, 12, 23]
 
-## RESEARCH NOTEBOOK — YOUR LONG-FORM THINKING SPACE
-You have a dedicated research notebook separate from the trade journal. This is YOUR space to think deeply.
-Use it to write longer notes about:
-- Market hypotheses ("I think BTC is forming a head-and-shoulders because...")
-- Coin deep dives ("SOL ecosystem analysis: TVL growing, new DEXs launching...")
-- Strategy development ("Mean reversion works better for DOT during low-vol regimes")
-- Macro observations ("Fed meeting next week — historically BTC drops 2-3% day-of then recovers")
-- Risk assessments ("Portfolio too concentrated in alts, should rebalance if BTC dominance rises above 58%")
-- News analysis ("ETH ETF approval rumors — if confirmed, likely 10-15% pump within 48h")
-- Pattern tracking ("Third time this week DOGE pumped at 2am UTC then dumped by 6am")
+WEB RESEARCH — queue a search for next cycle:
+[RESEARCH: bitcoin ETF inflows this week]
 
-ALL your research notes are fed back to you every cycle with NO LIMIT. Write as many as you need.
-You can also mark old notes as stale by providing their IDs in "stale_note_ids" when they're outdated.
+ALERT TAGS — set or cancel price/indicator alerts:
+[ALERT: coin=ETH, condition=price_below, threshold=1500, reason=watching for breakdown, plan=buy 0.5 ETH if structure holds]
+[CANCEL_ALERT: 3, 7]
 
-IMPORTANT: Use the research notebook PROACTIVELY. Don't just trade — THINK. During HOLD cycles especially,
-analyze what you're seeing, form hypotheses, and write them down. Your future self will thank you.
+## WHAT TO WRITE
+Every scan cycle, share your current thinking in 2-4 paragraphs:
+- What's the market doing right now? What stands out?
+- What are you watching? Any setups forming?
+- What's your plan? Why are you holding/buying/selling?
+- Any lessons from recent trades?
 
-## WEB RESEARCH
-You can request web research on trading strategies, market analysis, coin fundamentals, or any topic
-that would help your trading. Add a "research_query" field to your response when you want to learn
-something. The system will search the web and feed results back to you on the next scan cycle.
-Use this to stay current on market events, learn new strategies, or investigate specific coins.
-
-## SELF-ALERTS
-You can set alerts for yourself that are checked every scan cycle. When an alert triggers, you'll see
-it in your data with your original reason and action plan so you remember WHY you set it.
-
-Alert types you can set:
-- "price_above" / "price_below" — fires when a coin hits your target price
-- "rsi_above" / "rsi_below" — fires when RSI crosses your threshold
-- "volume_spike" — fires when volume change % exceeds your threshold
-
-Set alerts proactively! If you notice a coin approaching a key level, set an alert so you catch
-the breakout. If you're waiting for RSI to cool down before buying, set an rsi_below alert.
-You can cancel alerts by providing their IDs in cancel_alert_ids.
-
-Your active alerts and recently triggered alerts appear in the data below.
-
-## RESPONSE FORMAT
-You MUST respond with valid JSON only, no other text. Use this exact structure:
-{
-  "action": "BUY" | "SELL" | "HOLD",
-  "symbol": "BTC/USD",
-  "quantity": 0.0,
-  "stop_loss": 0.0,
-  "take_profit": 0.0,
-  "trailing_stop_pct": 0.0,
-  "confidence": 0.0,
-  "reasoning": "2-3 sentence explanation",
-  "market_outlook": "bullish" | "bearish" | "neutral",
-  "strategy_used": "momentum" | "mean_reversion" | "trend_following" | "sentiment" | "accumulation" | "scaling" | "profit_taking" | "stop_loss",
-  "journal_entry": "Optional: Write a lesson, observation, or insight to remember. Be specific. Leave empty string if nothing to note.",
-  "journal_category": "observation" | "lesson" | "strategy_idea" | "coin_insight" | "risk_note" | "research_finding",
-  "research_query": "Optional: A web search query if you want to research something. Leave empty string if no research needed.",
-  "research_note_title": "Optional: Title for a research notebook entry. Leave empty if no note to write.",
-  "research_note_body": "Optional: Full research note — be detailed, write paragraphs. Hypotheses, analysis, deep dives. No length limit.",
-  "research_note_topic": "macro" | "technical" | "coin_analysis" | "strategy" | "risk" | "news" | "hypothesis",
-  "research_note_coins": "Optional: Comma-separated coins this note relates to, e.g. 'BTC,ETH'. Leave empty if general.",
-  "stale_note_ids": "Optional: Comma-separated IDs of research notes that are outdated and should be retired. Leave empty if none.",
-  "alert_coin": "Optional: Coin symbol for a new self-alert (e.g. 'BTC', 'ETH'). Leave empty if no alert.",
-  "alert_condition": "Optional: 'price_above' | 'price_below' | 'rsi_above' | 'rsi_below' | 'volume_spike'",
-  "alert_threshold": 0.0,
-  "alert_reason": "Optional: Why you're setting this alert — your future self reads this.",
-  "alert_action_plan": "Optional: What you plan to do when this alert fires.",
-  "cancel_alert_ids": "Optional: Comma-separated IDs of alerts to cancel. Leave empty if none."
-}
-
-IMPORTANT: "symbol" MUST be one of: BTC/USD, ETH/USD, SOL/USD, DOGE/USD, ADA/USD, AVAX/USD, LINK/USD, DOT/USD, POL/USD, XRP/USD
-For HOLD actions, symbol should be whichever coin you're monitoring most closely. quantity/stop_loss/take_profit can be 0.
-For BUY when already holding that coin: this ADDS to your position (scaling in). Set updated stop/target for the full position.
-For SELL: quantity is how much of that coin to sell. Can be partial — sell some, keep some.
-Confidence is 0.0 to 1.0 — only act on confidence >= 0.6.
-journal_entry, research_query, research_note, and alert fields are optional — use empty strings/0 if not needed.
-You can set ONE alert per scan cycle. Use them proactively to catch breakouts, dips, and momentum shifts.
+Then add action tags at the end ONLY if you're actually doing something.
+Your operator sees your thinking on the dashboard — make it worth reading.
+Most cycles you'll just be thinking and holding. That's fine. Don't force trades.
 """
 
 
@@ -242,34 +152,18 @@ MIN_ORDER_SIZE = {
 
 @dataclass
 class AIDecision:
-    """Structured decision from the AI."""
+    """Parsed decision from Claude's conversational response."""
     action: str = "HOLD"
-    symbol: str = "BTC/USD"     # which coin to trade
+    symbol: str = "BTC/USD"
     quantity: float = 0.0
     stop_loss: float = 0.0
     take_profit: float = 0.0
     trailing_stop_pct: float = 0.0
     confidence: float = 0.0
-    reasoning: str = ""
+    reasoning: str = ""         # Claude's full conversational response (shown on dashboard)
     market_outlook: str = "neutral"
     strategy_used: str = ""
     raw_response: str = ""
-    journal_entry: str = ""      # lesson/observation to persist
-    journal_category: str = ""   # observation, lesson, strategy_idea, etc.
-    research_query: str = ""     # web search query for next cycle
-    # Research notebook — long-form notes, ideas, hypotheses
-    research_note_title: str = ""
-    research_note_body: str = ""
-    research_note_topic: str = ""   # macro, technical, coin_analysis, strategy, risk, news, hypothesis
-    research_note_coins: str = ""   # comma-separated coin symbols this note relates to
-    stale_note_ids: str = ""        # comma-separated IDs of notes to mark as outdated
-    # Self-alerts — Claude sets his own price/indicator alerts
-    alert_coin: str = ""             # coin to set alert for (e.g. "BTC")
-    alert_condition: str = ""        # "price_above", "price_below", "rsi_above", "rsi_below", "volume_spike"
-    alert_threshold: float = 0.0     # threshold value
-    alert_reason: str = ""           # why setting this alert
-    alert_action_plan: str = ""      # what to do when it triggers
-    cancel_alert_ids: str = ""       # comma-separated alert IDs to cancel
 
 
 class AIStrategy:
@@ -506,77 +400,8 @@ class AIStrategy:
         decision = await self._call_claude(context)
         self._last_decision = decision
 
-        # --- 8b. Process journal entry and research request ---
-        if decision.journal_entry:
-            try:
-                self.db.add_journal_entry(
-                    lesson=decision.journal_entry,
-                    category=decision.journal_category or "observation",
-                    coin=SYMBOL_MAP.get(decision.symbol, {}).get("base", ""),
-                    strategy=decision.strategy_used,
-                    confidence=decision.confidence,
-                    source="ai_trade_cycle",
-                )
-                logger.info(f"Journal entry saved: [{decision.journal_category}] {decision.journal_entry[:80]}...")
-            except Exception as e:
-                logger.warning(f"Failed to save journal entry: {e}")
-
-        if decision.research_query:
-            self._pending_research_query = decision.research_query
-            logger.info(f"Research queued for next cycle: {decision.research_query}")
-
-        # Process research notebook entry
-        if decision.research_note_title and decision.research_note_body:
-            try:
-                note_id = self.db.add_research_note(
-                    title=decision.research_note_title,
-                    body=decision.research_note_body,
-                    topic=decision.research_note_topic or "general",
-                    coins=decision.research_note_coins or "",
-                    source="ai_scan_cycle",
-                )
-                logger.info(
-                    f"Research note #{note_id} saved: [{decision.research_note_topic}] "
-                    f"{decision.research_note_title[:60]}..."
-                )
-            except Exception as e:
-                logger.warning(f"Failed to save research note: {e}")
-
-        # Mark stale research notes
-        if decision.stale_note_ids:
-            try:
-                for nid in decision.stale_note_ids.split(","):
-                    nid = nid.strip()
-                    if nid.isdigit():
-                        self.db.mark_research_note_stale(int(nid))
-                        logger.info(f"Research note #{nid} marked as stale")
-            except Exception as e:
-                logger.warning(f"Failed to mark stale notes: {e}")
-
-        # Process self-alert creation
-        if decision.alert_coin and decision.alert_condition and decision.alert_threshold > 0:
-            try:
-                alert_id = self._alert_manager.create_alert(
-                    coin=decision.alert_coin,
-                    condition=decision.alert_condition,
-                    threshold=decision.alert_threshold,
-                    reason=decision.alert_reason,
-                    action_plan=decision.alert_action_plan,
-                )
-                logger.info(f"Self-alert #{alert_id} created: {decision.alert_coin} {decision.alert_condition} {decision.alert_threshold}")
-            except Exception as e:
-                logger.warning(f"Failed to create self-alert: {e}")
-
-        # Cancel alerts
-        if decision.cancel_alert_ids:
-            try:
-                for aid in decision.cancel_alert_ids.split(","):
-                    aid = aid.strip()
-                    if aid.isdigit():
-                        self._alert_manager.cancel_alert(int(aid))
-                        logger.info(f"Alert #{aid} cancelled by AI")
-            except Exception as e:
-                logger.warning(f"Failed to cancel alerts: {e}")
+        # (Journal, research notes, alerts, and stale note processing all happen
+        #  inside _call_claude now — parsed from action tags in the response)
 
         # --- 9. Execute decision ---
         # Resolve the target symbol and get its current price
@@ -1008,7 +833,9 @@ class AIStrategy:
         return "\n".join(parts)
 
     async def _call_claude(self, context: str) -> AIDecision:
-        """Call the Anthropic API and parse the response."""
+        """Call Claude and parse action tags from conversational response."""
+        import re as _re
+
         api_key = self.config.anthropic_api_key
         if not api_key:
             logger.warning("No Anthropic API key — using indicator-based fallback")
@@ -1029,85 +856,182 @@ class AIStrategy:
                     "max_tokens": 1500,
                     "system": SYSTEM_PROMPT,
                     "messages": [
-                        {"role": "user", "content": f"Analyze this market data and make a trading decision:\n\n{context}"}
+                        {"role": "user", "content": f"Here's your latest market data. Share your thinking and act if you see a setup.\n\n{context}"}
                     ],
                 },
             )
             resp.raise_for_status()
             result = resp.json()
-
-            # Extract text from response
             content = result["content"][0]["text"]
 
-            # Parse JSON from response — robust extraction
-            json_str = content.strip()
-            # Strip markdown code blocks
-            if json_str.startswith("```"):
-                json_str = json_str.split("\n", 1)[1]
-                json_str = json_str.rsplit("```", 1)[0].strip()
-            # If still not valid JSON, try to find JSON object in the text
-            if not json_str.startswith("{"):
-                import re as _re
-                match = _re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', json_str)
-                if match:
-                    json_str = match.group(0)
-                else:
-                    logger.error(f"No JSON found in AI response: {content[:200]}")
-                    return AIDecision(action="HOLD", reasoning="No JSON in response")
+            # --- Parse action tags from conversational response ---
+            decision = AIDecision(raw_response=content)
 
-            decision_data = json.loads(json_str)
+            # The conversational text (minus tags) becomes the reasoning shown on dashboard
+            clean_text = content
 
-            # Parse symbol — default to BTC/USD if not specified
-            raw_symbol = decision_data.get("symbol", "BTC/USD")
-            # Normalize: accept "ETHUSD", "ETH/USD", "ETH", etc.
-            if "/" not in raw_symbol and raw_symbol.endswith("USD"):
-                raw_symbol = raw_symbol[:-3] + "/USD"
-            elif "/" not in raw_symbol:
-                raw_symbol = raw_symbol + "/USD"
-            # Validate it's a known symbol
-            if raw_symbol not in SYMBOL_MAP:
-                logger.warning(f"Unknown symbol '{raw_symbol}' from AI, defaulting to BTC/USD")
-                raw_symbol = "BTC/USD"
-
-            decision = AIDecision(
-                action=decision_data.get("action", "HOLD").upper(),
-                symbol=raw_symbol,
-                quantity=float(decision_data.get("quantity", 0)),
-                stop_loss=float(decision_data.get("stop_loss", 0)),
-                take_profit=float(decision_data.get("take_profit", 0)),
-                trailing_stop_pct=float(decision_data.get("trailing_stop_pct", 0)),
-                confidence=float(decision_data.get("confidence", 0)),
-                reasoning=decision_data.get("reasoning", ""),
-                market_outlook=decision_data.get("market_outlook", "neutral"),
-                strategy_used=decision_data.get("strategy_used", ""),
-                raw_response=content,
-                journal_entry=decision_data.get("journal_entry", ""),
-                journal_category=decision_data.get("journal_category", "observation"),
-                research_query=decision_data.get("research_query", ""),
-                research_note_title=decision_data.get("research_note_title", ""),
-                research_note_body=decision_data.get("research_note_body", ""),
-                research_note_topic=decision_data.get("research_note_topic", "general"),
-                research_note_coins=decision_data.get("research_note_coins", ""),
-                stale_note_ids=decision_data.get("stale_note_ids", ""),
-                alert_coin=decision_data.get("alert_coin", ""),
-                alert_condition=decision_data.get("alert_condition", ""),
-                alert_threshold=float(decision_data.get("alert_threshold", 0)),
-                alert_reason=decision_data.get("alert_reason", ""),
-                alert_action_plan=decision_data.get("alert_action_plan", ""),
-                cancel_alert_ids=decision_data.get("cancel_alert_ids", ""),
+            # Parse [BUY: ...] or [SELL: ...]
+            trade_match = _re.search(
+                r'\[(BUY|SELL):\s*(.*?)\]', content, _re.IGNORECASE
             )
+            if trade_match:
+                action = trade_match.group(1).upper()
+                params_str = trade_match.group(2)
+                decision.action = action
+
+                # Parse key=value pairs from the tag
+                params = {}
+                for pair in _re.findall(r'(\w+)\s*=\s*([^,\]]+)', params_str):
+                    params[pair[0].lower().strip()] = pair[1].strip()
+
+                # Symbol
+                raw_symbol = params.get("symbol", "BTC/USD")
+                if "/" not in raw_symbol and raw_symbol.endswith("USD"):
+                    raw_symbol = raw_symbol[:-3] + "/USD"
+                elif "/" not in raw_symbol:
+                    raw_symbol = raw_symbol + "/USD"
+                if raw_symbol not in SYMBOL_MAP:
+                    logger.warning(f"Unknown symbol '{raw_symbol}' from AI, defaulting to BTC/USD")
+                    raw_symbol = "BTC/USD"
+                decision.symbol = raw_symbol
+
+                decision.quantity = float(params.get("qty", 0))
+                decision.stop_loss = float(params.get("stop", 0))
+                decision.take_profit = float(params.get("target", 0))
+                decision.trailing_stop_pct = float(params.get("trail", 0))
+                decision.confidence = float(params.get("confidence", 0))
+                decision.strategy_used = params.get("strategy", "")
+
+                clean_text = _re.sub(r'\[(BUY|SELL):\s*.*?\]', '', clean_text, flags=_re.IGNORECASE)
+
+            # Parse [JOURNAL: category=... | text]
+            journal_match = _re.search(r'\[JOURNAL:\s*(.*?)\]', content)
+            if journal_match:
+                jtext = journal_match.group(1)
+                category = "observation"
+                if "|" in jtext:
+                    cat_part, lesson = jtext.split("|", 1)
+                    cat_match = _re.search(r'category\s*=\s*(\w+)', cat_part)
+                    if cat_match:
+                        category = cat_match.group(1)
+                    jtext = lesson.strip()
+                try:
+                    coin = SYMBOL_MAP.get(decision.symbol, {}).get("base", "")
+                    self.db.add_journal_entry(
+                        lesson=jtext, category=category, coin=coin,
+                        strategy=decision.strategy_used,
+                        confidence=decision.confidence or 0.5,
+                        source="ai_scan_cycle",
+                    )
+                    logger.info(f"Journal saved: [{category}] {jtext[:80]}...")
+                except Exception as e:
+                    logger.warning(f"Failed to save journal: {e}")
+                clean_text = _re.sub(r'\[JOURNAL:\s*.*?\]', '', clean_text)
+
+            # Parse [NOTE: topic=..., coins=... | title | body]
+            note_match = _re.search(r'\[NOTE:\s*(.*?)\]', content, _re.DOTALL)
+            if note_match:
+                ntext = note_match.group(1)
+                topic = "general"
+                coins = ""
+                # Extract metadata before first |
+                if "|" in ntext:
+                    parts = ntext.split("|", 2)
+                    meta = parts[0]
+                    title = parts[1].strip() if len(parts) > 1 else "Untitled"
+                    body = parts[2].strip() if len(parts) > 2 else title
+                    topic_m = _re.search(r'topic\s*=\s*(\w+)', meta)
+                    if topic_m:
+                        topic = topic_m.group(1)
+                    coins_m = _re.search(r'coins\s*=\s*([\w,]+)', meta)
+                    if coins_m:
+                        coins = coins_m.group(1)
+                else:
+                    title = ntext[:60]
+                    body = ntext
+                try:
+                    nid = self.db.add_research_note(
+                        title=title, body=body, topic=topic,
+                        coins=coins, source="ai_scan_cycle",
+                    )
+                    logger.info(f"Research note #{nid} saved: [{topic}] {title[:60]}...")
+                except Exception as e:
+                    logger.warning(f"Failed to save research note: {e}")
+                clean_text = _re.sub(r'\[NOTE:\s*.*?\]', '', clean_text, flags=_re.DOTALL)
+
+            # Parse [STALE: id, id, ...]
+            stale_match = _re.search(r'\[STALE:\s*([\d,\s]+)\]', content)
+            if stale_match:
+                for nid in stale_match.group(1).split(","):
+                    nid = nid.strip()
+                    if nid.isdigit():
+                        try:
+                            self.db.mark_research_note_stale(int(nid))
+                            logger.info(f"Research note #{nid} marked stale")
+                        except Exception as e:
+                            logger.warning(f"Failed to mark note #{nid} stale: {e}")
+                clean_text = _re.sub(r'\[STALE:\s*[\d,\s]+\]', '', clean_text)
+
+            # Parse [RESEARCH: query]
+            research_match = _re.search(r'\[RESEARCH:\s*(.*?)\]', content)
+            if research_match:
+                self._pending_research_query = research_match.group(1).strip()
+                logger.info(f"Research queued: {self._pending_research_query}")
+                clean_text = _re.sub(r'\[RESEARCH:\s*.*?\]', '', clean_text)
+
+            # Parse [ALERT: coin=..., condition=..., threshold=..., reason=..., plan=...]
+            alert_match = _re.search(r'\[ALERT:\s*(.*?)\]', content)
+            if alert_match:
+                aparams = {}
+                for pair in _re.findall(r'(\w+)\s*=\s*([^,\]]+)', alert_match.group(1)):
+                    aparams[pair[0].lower().strip()] = pair[1].strip()
+                if aparams.get("coin") and aparams.get("condition") and aparams.get("threshold"):
+                    try:
+                        aid = self._alert_manager.create_alert(
+                            coin=aparams["coin"].upper(),
+                            condition=aparams["condition"],
+                            threshold=float(aparams["threshold"]),
+                            reason=aparams.get("reason", ""),
+                            action_plan=aparams.get("plan", ""),
+                        )
+                        logger.info(f"Self-alert #{aid} created")
+                    except Exception as e:
+                        logger.warning(f"Failed to create alert: {e}")
+                clean_text = _re.sub(r'\[ALERT:\s*.*?\]', '', clean_text)
+
+            # Parse [CANCEL_ALERT: id, id, ...]
+            cancel_match = _re.search(r'\[CANCEL_ALERT:\s*([\d,\s]+)\]', content)
+            if cancel_match:
+                for aid in cancel_match.group(1).split(","):
+                    aid = aid.strip()
+                    if aid.isdigit():
+                        try:
+                            self._alert_manager.cancel_alert(int(aid))
+                            logger.info(f"Alert #{aid} cancelled")
+                        except Exception as e:
+                            logger.warning(f"Failed to cancel alert #{aid}: {e}")
+                clean_text = _re.sub(r'\[CANCEL_ALERT:\s*[\d,\s]+\]', '', clean_text)
+
+            # Parse [DIRECTIVE: instruction]
+            directive_match = _re.search(r'\[DIRECTIVE:\s*(.*?)\]', content)
+            if directive_match:
+                try:
+                    self.db.add_directive(directive_match.group(1).strip())
+                except Exception:
+                    pass
+                clean_text = _re.sub(r'\[DIRECTIVE:\s*.*?\]', '', clean_text)
+
+            # Clean text = what the operator sees on the dashboard
+            decision.reasoning = clean_text.strip()
 
             logger.info(
-                f"AI Decision: {decision.action} {decision.symbol} | Confidence: {decision.confidence:.2f} | "
-                f"Outlook: {decision.market_outlook} | Strategy: {decision.strategy_used}"
+                f"AI Decision: {decision.action} {decision.symbol} | "
+                f"Confidence: {decision.confidence:.2f} | Strategy: {decision.strategy_used}"
             )
-            logger.info(f"AI Reasoning: {decision.reasoning}")
+            logger.info(f"AI Thinking: {decision.reasoning[:200]}...")
 
             return decision
 
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse AI response as JSON: {e}")
-            return AIDecision(action="HOLD", reasoning=f"JSON parse error: {e}")
         except Exception as e:
             logger.error(f"Claude API call failed: {e}")
             return AIDecision(action="HOLD", reasoning=f"API error: {e}")
