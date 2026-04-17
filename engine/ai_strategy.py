@@ -33,6 +33,7 @@ from market_scanner import MarketScanner
 from sentiment import SentimentFetcher, SentimentData
 from web_research import WebResearcher, ResearchResult
 from whale_monitor import WhaleMonitor
+from discord_notifier import DiscordNotifier
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +210,7 @@ class AIStrategy:
         self._scanner = MarketScanner(self._http)
         self._researcher = WebResearcher(self._http)
         self._whale_monitor = WhaleMonitor(self._http)
+        self.discord = DiscordNotifier(http_client=self._http)
         self._last_market_overview = None
         self._last_decision = None
         self._last_context = ""  # Full context string from last scan — reused by chat
@@ -353,9 +355,21 @@ class AIStrategy:
                     f"Position sizes will be halved."
                 )
                 self.db.log("WARNING", f"Drawdown breaker active: {self._drawdown_pct:.1f}%")
+                await self.discord.send_drawdown_alert(self._drawdown_pct, equity, self._peak_equity)
             elif not self._drawdown_active and was_active:
                 logger.info(f"Drawdown circuit breaker cleared. Equity recovered to ${equity:,.2f}")
                 self.db.log("INFO", "Drawdown breaker cleared — back to full sizing")
+
+            # --- 5b. Periodic equity snapshot to Discord (throttled hourly) ---
+            holdings = {sym: qty for sym, qty in (self.paper_trader.balance.holdings or {}).items()}
+            await self.discord.send_equity_update(
+                cash_usd=self.paper_trader.balance.cash_usd,
+                total_equity=equity,
+                starting_capital=self.config.paper.starting_capital,
+                holdings=holdings,
+                positions=self.db.get_open_positions(),
+                drawdown_pct=self._drawdown_pct,
+            )
 
         # --- 6. Get current state (all positions) ---
         positions = self.db.get_open_positions()
@@ -982,6 +996,20 @@ class AIStrategy:
                 f"OPENED LONG {decision.symbol}: {quantity:.6f} {base_coin} @ ${price:,.2f} | "
                 f"SL: ${position.stop_loss:,.2f} | TP: ${position.take_profit:,.2f}"
             )
+
+            # Discord alert
+            bal = self.paper_trader.get_balance() if self.paper_trader else None
+            await self.discord.send_trade_alert(
+                side="buy", symbol=decision.symbol, quantity=quantity,
+                price=price, value=price * quantity,
+                fee=price * quantity * 0.0026,
+                strategy=decision.strategy_used, reasoning=decision.reasoning,
+                confidence=decision.confidence,
+                cash_usd=bal.cash_usd if bal else 0,
+                total_equity=bal.total_equity if bal else 0,
+                holdings=bal.holdings if bal else None,
+            )
+
             return "buy"
 
         except Exception as e:
@@ -1071,6 +1099,19 @@ class AIStrategy:
                 f"SCALED IN {decision.symbol}: +{quantity:.6f} {base_coin} @ ${price:,.2f} | "
                 f"Total: {total_qty:.6f} @ ${avg_entry:,.2f} avg"
             )
+
+            bal = self.paper_trader.get_balance() if self.paper_trader else None
+            await self.discord.send_trade_alert(
+                side="buy", symbol=decision.symbol, quantity=quantity,
+                price=price, value=price * quantity,
+                fee=price * quantity * 0.0026,
+                strategy=f"{decision.strategy_used} (scale-in)",
+                reasoning=decision.reasoning, confidence=decision.confidence,
+                cash_usd=bal.cash_usd if bal else 0,
+                total_equity=bal.total_equity if bal else 0,
+                holdings=bal.holdings if bal else None,
+            )
+
             return "scale_in"
 
         except Exception as e:
@@ -1147,6 +1188,33 @@ class AIStrategy:
                 f"{decision.reasoning}",
                 signals_json)
 
+            # Discord alert
+            bal = self.paper_trader.get_balance() if self.paper_trader else None
+            if decision.strategy_used == "stop_loss":
+                await self.discord.send_stop_loss_alert(
+                    symbol=decision.symbol, quantity=quantity,
+                    entry_price=position.entry_price, stop_price=price,
+                    pnl=pnl, pnl_pct=pnl_pct,
+                )
+            elif decision.strategy_used == "profit_taking" and pnl > 0:
+                await self.discord.send_take_profit_alert(
+                    symbol=decision.symbol, quantity=quantity,
+                    entry_price=position.entry_price, exit_price=price,
+                    pnl=pnl, pnl_pct=pnl_pct,
+                )
+            else:
+                await self.discord.send_trade_alert(
+                    side="sell", symbol=decision.symbol, quantity=quantity,
+                    price=price, value=price * quantity,
+                    fee=price * quantity * 0.0026,
+                    strategy=decision.strategy_used, reasoning=decision.reasoning,
+                    confidence=decision.confidence,
+                    pnl=pnl, pnl_pct=pnl_pct,
+                    cash_usd=bal.cash_usd if bal else 0,
+                    total_equity=bal.total_equity if bal else 0,
+                    holdings=bal.holdings if bal else None,
+                )
+
             if remaining >= min_size:
                 logger.info(
                     f"PARTIAL SELL {decision.symbol}: {quantity:.6f} {base_coin} @ ${price:,.2f} | "
@@ -1166,5 +1234,6 @@ class AIStrategy:
 
     async def close(self):
         """Clean up."""
+        await self.discord.close()
         await self.sentiment.close()
         await self._http.aclose()

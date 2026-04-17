@@ -115,6 +115,15 @@ class AlgoTraderBot:
             bot=self,
         )
 
+    def _version(self) -> str:
+        """Read version from VERSION file."""
+        try:
+            version_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "VERSION")
+            with open(version_path) as f:
+                return f.read().strip()
+        except Exception:
+            return "2.8.1"
+
     async def start(self):
         """Start the bot and run until shutdown."""
         self.running = True
@@ -130,6 +139,10 @@ class AlgoTraderBot:
         # Start web dashboard
         dashboard_port = int(os.getenv("DASHBOARD_PORT", "3737"))
         self._dashboard_runner = await self.dashboard.start(port=dashboard_port)
+
+        # Send Discord startup notification
+        if self._using_ai and hasattr(self.strategy, 'discord'):
+            await self.strategy.discord.send_startup(mode=self.config.mode, version=self._version())
 
         # Print initial state
         await self._print_status()
@@ -240,7 +253,7 @@ class AlgoTraderBot:
         mode_label = "PAPER TRADING" if c.mode == "paper" else "LIVE TRADING"
         logger.info("=" * 60)
         ai_label = "AI-Powered (Claude)" if self._using_ai else "Indicator-Based"
-        logger.info(f"  AlgoTrader v2.0.0 — Kraken BTC Bot")
+        logger.info(f"  AlgoTrader v{self._version()} — Kraken Crypto Bot")
         logger.info(f"  Strategy: {ai_label}")
         logger.info(f"  Mode: {mode_label}")
         logger.info(f"  Symbol: {c.kraken.display_symbol}")
