@@ -31,7 +31,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AlgoTrader v2.8.5</title>
+<title>AlgoTrader v2.8.6</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4" async></script>
 <style>
   :root {
@@ -147,7 +147,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="header">
-  <h1>AlgoTrader v2.8.5</h1>
+  <h1>AlgoTrader v2.8.6</h1>
   <div class="badges">
     <span class="badge badge-ai" id="aiLabel">AI</span>
     <div class="toggle-wrap">
@@ -1031,33 +1031,56 @@ class Dashboard:
 
 ## CHAT MODE
 Your operator is talking to you via the dashboard chat. Respond conversationally — do NOT respond in JSON format.
+You ARE the trading engine — the SAME agent that makes every buy/sell decision. This is not a separate system.
+When you say "I'll do X", you WILL do it — your next scan cycle sees this conversation and acts on it.
 Be direct and data-driven. Reference specific numbers from the market data below.
-You ARE the trading engine — when you say "I'll do X", you mean it. Your next scan cycle will reflect your thinking here.
 Keep responses concise (2-4 paragraphs). Use $ and % formatting for financial data.
-If the operator gives you instructions, acknowledge them — they will be fed into your next trading scan.
+
+## SAVING INSTRUCTIONS FROM YOUR OPERATOR
+If the operator gives you a standing instruction (e.g. "stop buying DOT", "be more aggressive", "focus on BTC"),
+save it as a directive using [DIRECTIVE: instruction here]. Directives persist across scans until cancelled.
+This is how you remember and follow through on what your operator tells you.
 
 ## RESEARCH & JOURNAL IN CHAT
-You can research topics and write to your strategy journal during chat too.
 To request research, include [RESEARCH: your query here] anywhere in your response.
 To save a lesson to your journal, include [JOURNAL: your note here] anywhere in your response.
+To save a research note, include [NOTE: title | body text here] in your response.
 The operator won't see the raw tags — they'll be processed and you'll see the results next cycle.
 Use research when the operator asks about strategies, market events, or anything you'd benefit from looking up."""
 
             # Build the SAME rich context the trading engine sees
             context = self._build_full_trading_context()
 
-            # Build conversation history (last 10 messages)
-            history = self.db.get_chat_history(limit=10)
+            # Include last AI trading decision so chat Claude knows what he just did
+            last_decision_ctx = ""
+            if self.bot and hasattr(self.bot, 'strategy'):
+                strategy = self.bot.strategy
+                last_dec = getattr(strategy, '_last_decision', None)
+                if last_dec:
+                    last_decision_ctx = (
+                        f"\n\n[YOUR LAST TRADING DECISION]\n"
+                        f"Action: {last_dec.action} {last_dec.symbol}\n"
+                        f"Confidence: {last_dec.confidence:.2f}\n"
+                        f"Strategy: {last_dec.strategy_used}\n"
+                        f"Reasoning: {last_dec.reasoning}\n"
+                        f"Outlook: {last_dec.market_outlook}\n"
+                    )
+
+            # Build conversation history (last 20 messages for continuity)
+            history = self.db.get_chat_history(limit=20)
             messages = []
 
-            # First message: full market context
+            # First message: full market context + last decision
             messages.append({
                 "role": "user",
-                "content": f"[LIVE MARKET DATA - SAME DATA YOU USE FOR TRADING]\n{context}\n[END MARKET DATA]",
+                "content": (
+                    f"[LIVE MARKET DATA - THIS IS YOUR TRADING DATA]\n{context}\n"
+                    f"{last_decision_ctx}\n[END MARKET DATA]"
+                ),
             })
             messages.append({
                 "role": "assistant",
-                "content": "I have the full market picture. What would you like to discuss?",
+                "content": "I have the full market picture and I remember our previous conversations. What's on your mind?",
             })
 
             # Add conversation history
@@ -1078,7 +1101,7 @@ Use research when the operator asks about strategies, market events, or anything
                 },
                 json={
                     "model": model,
-                    "max_tokens": 800,
+                    "max_tokens": 1200,
                     "system": system_prompt,
                     "messages": messages,
                 },
@@ -1087,10 +1110,12 @@ Use research when the operator asks about strategies, market events, or anything
             result = resp.json()
             ai_reply = result["content"][0]["text"]
 
-            # Process research requests and journal entries from chat
+            # Process all tags from chat response
             import re as _re
             research_matches = _re.findall(r'\[RESEARCH:\s*(.+?)\]', ai_reply)
             journal_matches = _re.findall(r'\[JOURNAL:\s*(.+?)\]', ai_reply)
+            directive_matches = _re.findall(r'\[DIRECTIVE:\s*(.+?)\]', ai_reply)
+            note_matches = _re.findall(r'\[NOTE:\s*(.+?)\]', ai_reply)
 
             # Queue research for next scan cycle
             if research_matches and self.bot and hasattr(self.bot, 'strategy'):
@@ -1112,9 +1137,37 @@ Use research when the operator asks about strategies, market events, or anything
                 except Exception as e:
                     logger.warning(f"Failed to save chat journal entry: {e}")
 
-            # Clean tags from response before showing to user
-            clean_reply = _re.sub(r'\[RESEARCH:\s*.+?\]', '', ai_reply).strip()
-            clean_reply = _re.sub(r'\[JOURNAL:\s*.+?\]', '', clean_reply).strip()
+            # Save operator directives
+            for directive in directive_matches:
+                try:
+                    did = self.db.add_directive(directive, source="chat")
+                    logger.info(f"Operator directive #{did} saved: {directive[:60]}...")
+                except Exception as e:
+                    logger.warning(f"Failed to save directive: {e}")
+
+            # Save research notes from chat
+            for note_text in note_matches:
+                try:
+                    if "|" in note_text:
+                        title, body = note_text.split("|", 1)
+                    else:
+                        title = note_text[:60]
+                        body = note_text
+                    self.db.add_research_note(
+                        title=title.strip(),
+                        body=body.strip(),
+                        topic="general",
+                        source="chat",
+                    )
+                    logger.info(f"Chat research note saved: {title.strip()[:60]}...")
+                except Exception as e:
+                    logger.warning(f"Failed to save chat research note: {e}")
+
+            # Clean all tags from response before showing to user
+            clean_reply = ai_reply
+            for tag in ["RESEARCH", "JOURNAL", "DIRECTIVE", "NOTE"]:
+                clean_reply = _re.sub(rf'\[{tag}:\s*.+?\]', '', clean_reply)
+            clean_reply = clean_reply.strip()
 
             # Save AI response (clean version)
             self.db.add_chat_message("assistant", clean_reply)

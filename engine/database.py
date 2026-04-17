@@ -162,6 +162,14 @@ class Database:
                 source TEXT DEFAULT 'trade'
             );
 
+            CREATE TABLE IF NOT EXISTS operator_directives (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                directive TEXT NOT NULL,
+                source TEXT DEFAULT 'chat',
+                active INTEGER DEFAULT 1
+            );
+
             CREATE TABLE IF NOT EXISTS research_notebook (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp REAL NOT NULL,
@@ -522,6 +530,38 @@ class Database:
     def clear_chat_history(self):
         """Clear all chat messages."""
         self.conn.execute("DELETE FROM chat_history")
+        self.conn.commit()
+
+    # ------------------------------------------------------------------
+    # Operator directives — persistent instructions from chat
+    # ------------------------------------------------------------------
+
+    def add_directive(self, directive: str, source: str = "chat") -> int:
+        """Save a standing instruction from the operator."""
+        cursor = self.conn.execute(
+            "INSERT INTO operator_directives (timestamp, directive, source, active) VALUES (?, ?, ?, 1)",
+            (time.time(), directive, source),
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def get_active_directives(self) -> list[dict]:
+        """Get all active operator directives."""
+        rows = self.conn.execute(
+            "SELECT * FROM operator_directives WHERE active = 1 ORDER BY timestamp ASC"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def deactivate_directive(self, directive_id: int):
+        """Deactivate a directive (operator changed their mind)."""
+        self.conn.execute(
+            "UPDATE operator_directives SET active = 0 WHERE id = ?", (directive_id,)
+        )
+        self.conn.commit()
+
+    def clear_directives(self):
+        """Deactivate all directives."""
+        self.conn.execute("UPDATE operator_directives SET active = 0")
         self.conn.commit()
 
     # ------------------------------------------------------------------

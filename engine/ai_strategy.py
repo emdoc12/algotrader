@@ -42,6 +42,13 @@ SYSTEM_PROMPT = """You are an expert cryptocurrency trader with FULL CONTROL ove
 You run 24/7 and make decisions every scan cycle based on technical analysis, market sentiment, and news.
 You are the decision engine. You decide EVERYTHING — which coins to trade, position sizing, entries, exits, scaling in/out, risk management.
 
+## YOU ARE ONE CONTINUOUS AGENT
+You are the SAME mind that trades AND chats with your operator on the dashboard. When your operator talks
+to you via chat, those conversations are fed back to you here. If you told your operator "I'll buy the dip
+on SOL" — follow through. If they told you "stop buying DOT" — respect it. Your chat history and any
+standing directives from your operator appear in the data below. You are not two separate systems — you are
+one agent with persistent memory across both trading scans and conversations.
+
 ## YOUR DUAL OBJECTIVE
 1. **Grow the USD cash balance** — take profits when conditions warrant
 2. **Accumulate crypto assets** — buy dips across any coin you believe in
@@ -847,17 +854,35 @@ class AIStrategy:
             parts.append(f"\nThis week: {weekly_pnl['trade_count']} trades | This month: {monthly_pnl['trade_count']} trades")
             parts.append(f"Adjust your aggressiveness based on whether you're ahead or behind on these goals.")
 
-        # Include recent operator chat messages so trading AI sees instructions
+        # Operator directives — standing instructions from chat
         try:
-            recent_chat = self.db.get_chat_history(limit=6)
-            operator_msgs = [m for m in recent_chat if m["role"] == "user"]
-            if operator_msgs:
-                parts.append(f"\n## RECENT OPERATOR INSTRUCTIONS (from chat)")
-                parts.append(f"Your operator has been talking to you via the dashboard chat.")
-                parts.append(f"Consider their instructions when making decisions:")
-                for msg in operator_msgs[-3:]:  # Last 3 operator messages
+            directives = self.db.get_active_directives()
+            if directives:
+                parts.append(f"\n## STANDING OPERATOR DIRECTIVES")
+                parts.append("Your operator gave you these instructions via chat. Follow them until told otherwise.")
+                parts.append("You can mark a directive as completed by including its ID in your response.")
+                for d in directives:
+                    ts = time.strftime('%m/%d %H:%M', time.gmtime(d["timestamp"]))
+                    parts.append(f"  [#{d['id']} {ts}]: {d['directive']}")
+        except Exception as e:
+            logger.debug(f"Could not load directives: {e}")
+
+        # Recent chat conversation — full context (both sides) so you remember what was discussed
+        try:
+            recent_chat = self.db.get_chat_history(limit=20)
+            if recent_chat:
+                # Only show messages from last 24 hours
+                cutoff = time.time() - 86400
+                recent_chat = [m for m in recent_chat if m.get("timestamp", 0) >= cutoff]
+            if recent_chat:
+                parts.append(f"\n## RECENT CONVERSATION WITH OPERATOR")
+                parts.append("This is YOUR chat history with your operator. You said these things. Remember them.")
+                parts.append("If you made promises or acknowledged instructions, follow through.\n")
+                for msg in recent_chat:
                     ts = time.strftime('%m/%d %H:%M', time.gmtime(msg.get("timestamp", 0)))
-                    parts.append(f"  [{ts}] Operator: {msg['message'][:200]}")
+                    role = "Operator" if msg["role"] == "user" else "You"
+                    text = msg["message"][:300]
+                    parts.append(f"  [{ts}] {role}: {text}")
         except Exception as e:
             logger.debug(f"Could not load chat history for context: {e}")
 
