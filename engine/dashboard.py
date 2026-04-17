@@ -85,7 +85,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .signal-buy { background: rgba(34,197,94,0.15); color: var(--green); }
   .signal-sell { background: rgba(239,68,68,0.15); color: var(--red); }
   .signal-hold { background: rgba(139,143,163,0.15); color: var(--muted); }
-  .ai-reasoning { background: rgba(168,85,247,0.08); border: 1px solid rgba(168,85,247,0.2); border-radius: 8px; padding: 12px; margin-top: 8px; font-size: 14px; line-height: 1.5; }
+  .ai-reasoning { background: rgba(168,85,247,0.08); border: 1px solid rgba(168,85,247,0.2); border-radius: 8px; padding: 12px; margin-top: 8px; font-size: 14px; line-height: 1.6; white-space: pre-line; }
   .confidence-bar { height: 6px; background: var(--border); border-radius: 3px; margin-top: 8px; overflow: hidden; }
   .confidence-fill { height: 100%; border-radius: 3px; transition: width 0.5s; }
   .fear-greed-bar { height: 8px; background: linear-gradient(to right, #ef4444, #f97316, #eab308, #22c55e, #22c55e); border-radius: 4px; position: relative; margin: 8px 0; }
@@ -385,7 +385,9 @@ async function fetchData() {
     confFill.style.background = conf >= 0.6 ? (aiAction === 'BUY' ? 'var(--green)' : aiAction === 'SELL' ? 'var(--red)' : 'var(--muted)') : 'var(--muted)';
 
     document.getElementById('aiStrategy').textContent = sig.ai_strategy || '--';
-    document.getElementById('aiReasoning').textContent = sig.ai_reasoning || 'Waiting for scan...';
+    const reasonEl = document.getElementById('aiReasoning');
+    const reasonText = sig.ai_reasoning || 'Waiting for scan...';
+    reasonEl.innerHTML = reasonText.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\\n/g,'<br>').replace(/\n/g,'<br>');
 
     // Sentiment
     const fg = sig.fear_greed;
@@ -662,10 +664,14 @@ function appendChatMsg(role, text, ts) {
   const container = document.getElementById('chatMessages');
   const div = document.createElement('div');
   div.className = 'chat-msg ' + (role === 'user' ? 'chat-msg-user' : 'chat-msg-ai');
-  // Simple markdown-ish: bold, line breaks
+  // Simple markdown-ish: bold, italic, line breaks, bullets
   let html = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   html = html.replace(/[*][*](.*?)[*][*]/g, '<strong>$1</strong>');
-  html = html.replace(/\\n/g, '<br>');
+  html = html.replace(/[*](.*?)[*]/g, '<em>$1</em>');
+  html = html.replace(/\\n/g, '\n');
+  html = html.replace(/\n/g, '<br>');
+  html = html.replace(/(<br>)\s*[-•]\s+/g, '$1&#8226; ');
+  html = html.replace(/^[-•]\s+/, '&#8226; ');
   if (ts) {
     const dt = new Date(ts * 1000);
     html += '<div class="chat-msg-time">' + dt.toLocaleTimeString() + '</div>';
