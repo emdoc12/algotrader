@@ -69,6 +69,7 @@ class AlgoTraderBot:
         self.config = config
         self.running = False
         self._shutdown_event = asyncio.Event()
+        self._last_digest_week: int = 0  # ISO week number of last digest sent
 
         # Initialize components
         self.db = Database(config.db_path)
@@ -217,6 +218,9 @@ class AlgoTraderBot:
                 logger.error(f"Scan #{scan_count} failed: {e}")
                 self.db.log("ERROR", f"Scan failed: {e}")
 
+            # Monday morning weekly digest check
+            await self._check_weekly_digest()
+
             # Wait for next scan or shutdown
             try:
                 await asyncio.wait_for(
@@ -228,6 +232,30 @@ class AlgoTraderBot:
 
         # Shutdown
         await self._shutdown()
+
+    async def _check_weekly_digest(self):
+        """Send weekly digest on Monday mornings (7-8 AM Eastern)."""
+        if not self._using_ai or not hasattr(self.strategy, 'generate_weekly_digest'):
+            return
+
+        now = datetime.now(timezone.utc)
+        # Convert UTC to Eastern: UTC-5 (EST) or UTC-4 (EDT)
+        # Check both windows so it works year-round regardless of DST
+        utc_hour = now.hour
+        is_monday = now.weekday() == 0
+        # 7 AM EDT = 11 UTC, 7 AM EST = 12 UTC — cover both
+        is_digest_hour = 11 <= utc_hour < 13
+        current_week = now.isocalendar()[1]
+
+        if is_monday and is_digest_hour and current_week != self._last_digest_week:
+            try:
+                logger.info("Monday morning — generating weekly digest")
+                await self.strategy.generate_weekly_digest()
+                self._last_digest_week = current_week
+                self.db.log("INFO", f"Weekly digest sent (week {current_week})")
+            except Exception as e:
+                logger.error(f"Weekly digest failed: {e}")
+                self.db.log("ERROR", f"Weekly digest failed: {e}")
 
     def _request_shutdown(self):
         """Signal the bot to shut down gracefully."""

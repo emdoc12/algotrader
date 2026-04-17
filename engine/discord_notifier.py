@@ -306,6 +306,84 @@ class DiscordNotifier:
         }
         await self._send(embed)
 
+    async def send_weekly_digest(self, digest_text: str, week_stats: dict):
+        """Send the Monday morning weekly digest.
+
+        digest_text: Claude's written summary (can be long).
+        week_stats: dict with trade_count, realized_pnl, total_bought, total_sold,
+                    equity, starting_capital, win_rate, research_notes_count.
+        """
+        if not self.enabled:
+            return
+
+        pnl = week_stats.get("realized_pnl", 0)
+        pnl_emoji = "📈" if pnl >= 0 else "📉"
+        equity = week_stats.get("equity", 0)
+        starting = week_stats.get("starting_capital", 0)
+        total_pnl = equity - starting if starting > 0 else 0
+        total_pnl_pct = (total_pnl / starting * 100) if starting > 0 else 0
+
+        # Stats embed
+        fields = [
+            {"name": "Trades This Week", "value": str(week_stats.get("trade_count", 0)), "inline": True},
+            {"name": "Week P&L", "value": f"{pnl_emoji} ${pnl:,.2f}", "inline": True},
+            {"name": "Win Rate", "value": f"{week_stats.get('win_rate', 0):.0f}%", "inline": True},
+            {"name": "Current Equity", "value": f"${equity:,.2f}", "inline": True},
+            {"name": "All-Time P&L", "value": f"${total_pnl:,.2f} ({total_pnl_pct:+.1f}%)", "inline": True},
+            {"name": "Research Notes", "value": str(week_stats.get("research_notes_count", 0)), "inline": True},
+        ]
+
+        embed = {
+            "title": "📋 Weekly Digest — Monday Morning Briefing",
+            "color": COLOR_INFO,
+            "fields": fields,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "footer": {"text": "AlgoTrader — Weekly Digest"},
+        }
+
+        # Discord embed description maxes at 4096 chars. Send the AI's
+        # written digest as a plain message, then the stats embed separately.
+        try:
+            # First: the AI's written digest as a plain message
+            if len(digest_text) > 1900:
+                # Split into chunks for Discord's 2000-char message limit
+                chunks = []
+                while digest_text:
+                    if len(digest_text) <= 1900:
+                        chunks.append(digest_text)
+                        break
+                    # Find a good break point
+                    split_at = digest_text.rfind("\n", 0, 1900)
+                    if split_at == -1:
+                        split_at = 1900
+                    chunks.append(digest_text[:split_at])
+                    digest_text = digest_text[split_at:].lstrip("\n")
+
+                for i, chunk in enumerate(chunks):
+                    header = "**📋 Weekly Digest — Monday Morning Briefing**\n\n" if i == 0 else ""
+                    await self._send_message(f"{header}{chunk}")
+            else:
+                await self._send_message(
+                    f"**📋 Weekly Digest — Monday Morning Briefing**\n\n{digest_text}"
+                )
+
+            # Then: the stats embed
+            await self._send(embed)
+        except Exception as e:
+            logger.warning(f"Weekly digest send failed: {e}")
+
+    async def _send_message(self, content: str):
+        """Send a plain text message to the Discord webhook."""
+        try:
+            resp = await self._http.post(
+                self.webhook_url,
+                json={"username": "AlgoTrader", "content": content},
+            )
+            if resp.status_code >= 400:
+                logger.warning(f"Discord message error: {resp.status_code}")
+        except Exception as e:
+            logger.debug(f"Discord message failed: {e}")
+
     async def _send(self, embed: dict):
         """Send an embed to the Discord webhook."""
         try:

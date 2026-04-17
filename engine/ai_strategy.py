@@ -1280,6 +1280,173 @@ class AIStrategy:
             logger.error(f"Sell execution failed for {decision.symbol}: {e}")
             return f"error: {e}"
 
+    async def generate_weekly_digest(self):
+        """Generate and send the Monday morning weekly digest via Discord."""
+        logger.info("Generating weekly digest...")
+
+        # Gather the week's data
+        week_seconds = 7 * 86400
+        week_cutoff = time.time() - week_seconds
+
+        # Trades from this week
+        week_trades = self.db.get_trades_with_pnl(since_ts=week_cutoff)
+        week_pnl_data = self.db.get_period_pnl(week_seconds)
+
+        # Performance stats (all-time for context)
+        try:
+            perf = self.db.get_performance_stats()
+        except Exception:
+            perf = {}
+
+        # Research notes written this week
+        try:
+            all_notes = self.db.get_research_notes()
+            week_notes = [n for n in all_notes if n["timestamp"] >= week_cutoff]
+        except Exception:
+            all_notes = []
+            week_notes = []
+
+        # Journal entries from this week
+        try:
+            week_journal = self.db.get_journal_entries(limit=100)
+            week_journal = [j for j in week_journal if j["timestamp"] >= week_cutoff]
+        except Exception:
+            week_journal = []
+
+        # Current portfolio state
+        balance = self.paper_trader.get_balance() if self.paper_trader else None
+        positions = self.db.get_open_positions()
+
+        # Build the context for Claude to write the digest
+        digest_prompt_parts = [
+            "You are writing your WEEKLY DIGEST — a Monday morning briefing for your owner.",
+            "Write in first person. Be specific, reference actual trades and numbers.",
+            "Structure it as: 1) Week in Review, 2) Key Lessons, 3) Plan for This Week.",
+            "Be honest about what went wrong. Be specific about what you plan to do differently.",
+            "Keep it conversational but informative. Around 500-800 words.",
+            "",
+            "=== THIS WEEK'S DATA ===",
+            "",
+        ]
+
+        # Trade summary
+        trade_count = week_pnl_data.get("trade_count", 0)
+        realized_pnl = week_pnl_data.get("realized_pnl", 0)
+        digest_prompt_parts.append(f"Trades executed: {trade_count}")
+        digest_prompt_parts.append(f"Realized P&L: ${realized_pnl:,.2f}")
+
+        if week_trades:
+            digest_prompt_parts.append("\nTrade details:")
+            for t in week_trades[:30]:  # Cap to avoid context overflow
+                side = t["side"].upper()
+                sym = t.get("symbol", "BTC/USD")
+                price = t.get("price", 0)
+                qty = t.get("quantity", 0)
+                pnl = t.get("pnl_dollar")
+                pnl_str = f" | P&L: ${pnl:,.2f}" if pnl is not None else ""
+                ts = time.strftime('%m/%d %H:%M', time.gmtime(t["timestamp"]))
+                strat = t.get("strategy", "")
+                strat_str = f" ({strat})" if strat else ""
+                digest_prompt_parts.append(
+                    f"  [{ts}] {side} {sym} {qty:.6f} @ ${price:,.4f}{pnl_str}{strat_str}"
+                )
+
+        # Win rate this week
+        week_sells = [t for t in week_trades if t["side"] == "sell" and t.get("pnl_dollar") is not None]
+        week_wins = [t for t in week_sells if t["pnl_dollar"] > 0]
+        week_win_rate = (len(week_wins) / len(week_sells) * 100) if week_sells else 0
+        digest_prompt_parts.append(f"\nWeek win rate: {week_win_rate:.0f}% ({len(week_wins)}W/{len(week_sells) - len(week_wins)}L)")
+
+        # Portfolio state
+        if balance:
+            digest_prompt_parts.append(f"\nCurrent cash: ${balance.cash_usd:,.2f}")
+            digest_prompt_parts.append(f"Current equity: ${balance.total_equity:,.2f}")
+            starting = self.config.paper.starting_capital
+            total_pnl = balance.total_equity - starting
+            digest_prompt_parts.append(f"All-time P&L: ${total_pnl:,.2f} ({total_pnl/starting*100:+.1f}%)")
+            if balance.holdings:
+                held = ", ".join(f"{qty:.4f} {sym}" for sym, qty in balance.holdings.items() if qty > 0)
+                if held:
+                    digest_prompt_parts.append(f"Holdings: {held}")
+
+        if positions:
+            digest_prompt_parts.append(f"\nOpen positions: {len(positions)}")
+            for pos in positions:
+                upnl = pos.unrealized_pnl or 0
+                digest_prompt_parts.append(
+                    f"  {pos.symbol}: {pos.quantity:.6f} @ ${pos.entry_price:,.2f} (uPnL: ${upnl:,.2f})"
+                )
+
+        # Journal entries this week
+        if week_journal:
+            digest_prompt_parts.append(f"\nYour journal entries this week ({len(week_journal)}):")
+            for j in week_journal[:20]:
+                ts = time.strftime('%m/%d', time.gmtime(j["timestamp"]))
+                digest_prompt_parts.append(f"  [{ts}] ({j.get('category', 'note')}): {j['lesson']}")
+
+        # Research notes this week
+        if week_notes:
+            digest_prompt_parts.append(f"\nResearch notes written this week ({len(week_notes)}):")
+            for n in week_notes[:15]:
+                digest_prompt_parts.append(f"  [{n.get('topic', 'general')}] {n['title']}: {n['body'][:200]}")
+
+        # All-time performance context
+        if perf:
+            digest_prompt_parts.append(f"\nAll-time stats: {perf.get('total_trades', 0)} trades, "
+                                       f"{perf.get('win_rate', 0):.0f}% win rate, "
+                                       f"profit factor {perf.get('profit_factor', 0):.2f}")
+
+        digest_context = "\n".join(digest_prompt_parts)
+
+        # Call Claude to write the digest
+        try:
+            resp = await self._http.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": self.config.anthropic_api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": self.config.ai_model,
+                    "max_tokens": 2000,
+                    "system": (
+                        "You are an AI crypto trader writing your weekly digest for your owner. "
+                        "Write a thoughtful, specific Monday morning briefing. Use markdown formatting "
+                        "that works in Discord (bold, bullet points). Be honest and direct. "
+                        "No generic advice — reference YOUR actual trades, YOUR research notes, "
+                        "YOUR specific numbers. End with a clear plan for the week ahead."
+                    ),
+                    "messages": [{"role": "user", "content": digest_context}],
+                },
+                timeout=60.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            digest_text = data["content"][0]["text"]
+        except Exception as e:
+            logger.error(f"Failed to generate weekly digest: {e}")
+            digest_text = (
+                f"*Could not generate AI digest this week — error: {e}*\n\n"
+                f"Quick stats: {trade_count} trades, ${realized_pnl:,.2f} realized P&L, "
+                f"{week_win_rate:.0f}% win rate."
+            )
+
+        # Send to Discord
+        week_stats = {
+            "trade_count": trade_count,
+            "realized_pnl": realized_pnl,
+            "total_bought": week_pnl_data.get("total_bought", 0),
+            "total_sold": week_pnl_data.get("total_sold", 0),
+            "equity": balance.total_equity if balance else 0,
+            "starting_capital": self.config.paper.starting_capital if self.paper_trader else 0,
+            "win_rate": week_win_rate,
+            "research_notes_count": len(all_notes),
+        }
+
+        await self.discord.send_weekly_digest(digest_text, week_stats)
+        logger.info("Weekly digest sent to Discord")
+
     async def close(self):
         """Clean up."""
         await self.discord.close()
