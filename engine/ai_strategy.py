@@ -56,15 +56,16 @@ Choose the best opportunity each cycle. You can hold multiple positions across d
 
 ## YOUR DATA EDGE
 You have access to data most traders don't see together:
-- Multi-timeframe analysis: 15m, 1h, and 4h indicators for BTC — confirm signals across timeframes
+- Multi-timeframe analysis: 15m, 1h, and 4h indicators for ALL 10 coins — confirm signals across timeframes
 - Order book depth: see where buy/sell walls are, spread, and order imbalance
 - Whale monitoring: large BTC transactions and exchange inflow/outflow signals
 - BTC dominance: real-time from CoinGecko — know when alts will outperform vs underperform
-- ATR (Average True Range): volatility measurement for each timeframe — use for position sizing
-- Full technicals on all 10 coins: EMA, RSI, Bollinger, composite scores
+- ATR (Average True Range): volatility measurement for ALL coins at ALL timeframes — use for position sizing
+- Full technicals on all 10 coins: EMA, RSI, Bollinger, composite scores, ATR
 
 USE the multi-timeframe data: a bullish 15m signal aligned with bullish 1h and 4h = high conviction.
-A bullish 15m fighting a bearish 4h = low conviction trap. The order book shows real support/resistance.
+A bullish 15m fighting a bearish 4h = low conviction trap. Check alignment for EVERY coin before trading it.
+The order book shows real support/resistance.
 
 ## RISK PROFILE: AGGRESSIVE (WITH GUARDRAILS)
 - You control your own position sizing — go big on high-conviction setups
@@ -263,31 +264,12 @@ class AIStrategy:
             except Exception as e:
                 logger.warning(f"Indicator computation failed: {e}")
 
-        # --- 2b. Multi-timeframe analysis (1h and 4h) ---
-        mtf_signals = {}
-        for tf_label, tf_interval in [("1h", 60), ("4h", 240)]:
-            try:
-                tf_bars = await self.kraken.get_ohlcv(interval=tf_interval, count=100)
-                tf_closes = [b.close for b in tf_bars]
-                tf_highs = [b.high for b in tf_bars]
-                tf_lows = [b.low for b in tf_bars]
-                if len(tf_closes) >= max(sc.ema_slow_period, sc.bb_period, sc.rsi_period + 1):
-                    tf_sig = generate_signals(
-                        prices=tf_closes,
-                        ema_fast_period=sc.ema_fast_period,
-                        ema_slow_period=sc.ema_slow_period,
-                        rsi_period=sc.rsi_period,
-                        rsi_overbought=sc.rsi_overbought,
-                        rsi_oversold=sc.rsi_oversold,
-                        bb_period=sc.bb_period,
-                        bb_std_dev=sc.bb_std_dev,
-                        highs=tf_highs,
-                        lows=tf_lows,
-                    )
-                    mtf_signals[tf_label] = tf_sig
-            except Exception as e:
-                logger.debug(f"Multi-timeframe {tf_label} fetch failed: {e}")
-        self._last_mtf_signals = mtf_signals
+        # --- 2b. Multi-timeframe analysis (1h and 4h) for ALL coins ---
+        try:
+            self._last_mtf_signals = await self._scanner.scan_multi_timeframe()
+        except Exception as e:
+            logger.debug(f"Multi-timeframe scan failed: {e}")
+            self._last_mtf_signals = {}
 
         # --- 3. Get current price ---
         try:
@@ -586,29 +568,9 @@ class AIStrategy:
                 parts.append(f"ATR (14): ${signals.atr.atr:,.2f} ({signals.atr.atr_pct:.2f}% of price)")
                 parts.append(f"Volatility: {signals.atr.volatility}")
 
-        # Multi-timeframe analysis
+        # Multi-timeframe analysis (all coins)
         if self._last_mtf_signals:
-            parts.append(f"\n## MULTI-TIMEFRAME ANALYSIS")
-            for tf, tf_sig in self._last_mtf_signals.items():
-                parts.append(f"\n### {tf.upper()} Timeframe:")
-                parts.append(f"  EMA Crossover: {tf_sig.ema.crossover} | Fast > Slow: {tf_sig.ema.fast_above_slow}")
-                parts.append(f"  RSI: {tf_sig.rsi.rsi:.1f} ({tf_sig.rsi.signal})")
-                parts.append(f"  BB Position: {tf_sig.bollinger.price_position:.2%}")
-                parts.append(f"  Composite: {tf_sig.composite_score:+.3f} → {tf_sig.recommendation}")
-                if tf_sig.atr:
-                    parts.append(f"  ATR: ${tf_sig.atr.atr:,.2f} ({tf_sig.atr.volatility})")
-
-            # Alignment check
-            if signals and "1h" in self._last_mtf_signals:
-                tf_1h = self._last_mtf_signals["1h"]
-                both_bullish = signals.composite_score > 0.1 and tf_1h.composite_score > 0.1
-                both_bearish = signals.composite_score < -0.1 and tf_1h.composite_score < -0.1
-                if both_bullish:
-                    parts.append(f"  ✓ 15m and 1h ALIGNED BULLISH — higher conviction setup")
-                elif both_bearish:
-                    parts.append(f"  ✓ 15m and 1h ALIGNED BEARISH — higher conviction setup")
-                else:
-                    parts.append(f"  ⚠ Timeframes CONFLICTING — lower conviction, reduce size or hold")
+            parts.append(self._scanner.format_mtf_for_ai(self._last_mtf_signals))
 
         # Order book depth
         if self._last_order_book:

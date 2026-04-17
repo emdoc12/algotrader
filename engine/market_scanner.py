@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Tuple
 
 import httpx
 
-from indicators import generate_signals, Signals
+from indicators import generate_signals, Signals, ATRResult
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,37 @@ class CoinSnapshot:
     rsi_signal: Optional[str] = None  # "oversold" / "overbought" / "neutral"
     composite_score: Optional[float] = None  # -1.0 to +1.0
     recommendation: Optional[str] = None  # "STRONG_BUY" / "BUY" / "HOLD" / "SELL" / "STRONG_SELL"
+    # ATR (Average True Range)
+    atr: Optional[float] = None            # ATR in USD
+    atr_pct: Optional[float] = None        # ATR as % of price
+    volatility: Optional[str] = None       # "low" / "medium" / "high" / "extreme"
+
+
+@dataclass
+class MTFCoinData:
+    """Multi-timeframe indicator data for a single coin."""
+    symbol: str
+    timeframes: Dict[str, Optional[Signals]]  # e.g. {"1h": Signals, "4h": Signals}
+
+    def alignment(self) -> str:
+        """Check if all timeframes agree on direction."""
+        recs = []
+        for tf, sig in self.timeframes.items():
+            if sig and sig.recommendation:
+                recs.append(sig.recommendation)
+        if not recs:
+            return "no data"
+        bullish = sum(1 for r in recs if r in ("STRONG_BUY", "BUY"))
+        bearish = sum(1 for r in recs if r in ("STRONG_SELL", "SELL"))
+        if bullish == len(recs):
+            return "bullish"
+        elif bearish == len(recs):
+            return "bearish"
+        elif bullish > bearish:
+            return "leaning bullish"
+        elif bearish > bullish:
+            return "leaning bearish"
+        return "conflicting"
 
 
 @dataclass
@@ -174,6 +205,51 @@ class MarketScanner:
             global_data=global_data,
         )
 
+    async def scan_multi_timeframe(self, timeframes: List[Tuple[str, int]] = None) -> Dict[str, MTFCoinData]:
+        """
+        Fetch 1h and 4h candles for ALL watchlist coins and compute indicators.
+        Returns {symbol: MTFCoinData} with signals for each timeframe.
+        """
+        if timeframes is None:
+            timeframes = [("1h", 60), ("4h", 240)]
+
+        result: Dict[str, MTFCoinData] = {}
+
+        # Build all fetch tasks: (pair, symbol, tf_label, interval)
+        fetch_jobs = []
+        for pair in self.WATCHLIST:
+            symbol = self.SYMBOL_MAP.get(pair, pair)
+            for tf_label, interval in timeframes:
+                fetch_jobs.append((pair, symbol, tf_label, interval))
+
+        # Fetch all OHLCV data concurrently
+        tasks = [self._get_ohlcv_interval(pair, interval) for pair, _, _, interval in fetch_jobs]
+        ohlcv_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Group results by symbol
+        for (pair, symbol, tf_label, interval), ohlcv_data in zip(fetch_jobs, ohlcv_results):
+            if symbol not in result:
+                result[symbol] = MTFCoinData(symbol=symbol, timeframes={})
+
+            if isinstance(ohlcv_data, BaseException) or ohlcv_data is None:
+                result[symbol].timeframes[tf_label] = None
+                continue
+
+            try:
+                closes = [float(c[4]) for c in ohlcv_data]
+                highs = [float(c[2]) for c in ohlcv_data]
+                lows = [float(c[3]) for c in ohlcv_data]
+                if len(closes) >= 21:
+                    sig = generate_signals(closes, highs=highs, lows=lows)
+                    result[symbol].timeframes[tf_label] = sig
+                else:
+                    result[symbol].timeframes[tf_label] = None
+            except Exception as e:
+                logger.debug(f"MTF {tf_label} indicators failed for {symbol}: {e}")
+                result[symbol].timeframes[tf_label] = None
+
+        return result
+
     def format_for_ai(self, overview: MarketOverview) -> str:
         """Return a plain-text summary suitable for injection into an AI prompt."""
         lines: List[str] = []
@@ -219,6 +295,10 @@ class MarketScanner:
                     f"    Bollinger: ${snap.bb_lower:,.4f} — ${snap.bb_middle:,.4f} — ${snap.bb_upper:,.4f}  "
                     f"Position: {snap.bb_position:.1%}  BW: {snap.bb_bandwidth:.4f}"
                 )
+            if snap.atr is not None:
+                lines.append(
+                    f"    ATR: ${snap.atr:,.4f} ({snap.atr_pct:.2f}%)  Volatility: {snap.volatility}"
+                )
             if snap.composite_score is not None:
                 lines.append(
                     f"    Composite: {snap.composite_score:+.3f}  Signal: {snap.recommendation}"
@@ -245,6 +325,41 @@ class MarketScanner:
 
         lines.append("")
         lines.append("=== END MARKET SCANNER ===")
+        return "\n".join(lines)
+
+    @staticmethod
+    def format_mtf_for_ai(mtf_data: Dict[str, "MTFCoinData"]) -> str:
+        """Format multi-timeframe data for all coins into an AI prompt section."""
+        if not mtf_data:
+            return ""
+
+        lines = ["=== MULTI-TIMEFRAME ANALYSIS (ALL COINS) ==="]
+        lines.append("Timeframes: 1h, 4h — use to confirm or reject 15m signals")
+        lines.append("")
+
+        for symbol, coin_mtf in sorted(mtf_data.items()):
+            alignment = coin_mtf.alignment()
+            align_emoji = {"bullish": "🟢", "bearish": "🔴", "leaning bullish": "🟡↑",
+                          "leaning bearish": "🟡↓", "conflicting": "⚠️"}.get(alignment, "—")
+            lines.append(f"  {symbol} — Alignment: {align_emoji} {alignment}")
+
+            for tf_label, sig in coin_mtf.timeframes.items():
+                if sig is None:
+                    lines.append(f"    {tf_label}: no data")
+                    continue
+                parts = [f"    {tf_label}:"]
+                parts.append(f"EMA={sig.ema.crossover}")
+                parts.append(f"RSI={sig.rsi.rsi:.1f}({sig.rsi.signal})")
+                parts.append(f"BB={sig.bollinger.price_position:.1%}")
+                parts.append(f"Score={sig.composite_score:+.3f}")
+                parts.append(f"Signal={sig.recommendation}")
+                if sig.atr:
+                    parts.append(f"ATR={sig.atr.atr_pct:.2f}%({sig.atr.volatility})")
+                lines.append(" ".join(parts))
+
+            lines.append("")
+
+        lines.append("=== END MULTI-TIMEFRAME ===")
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
@@ -280,6 +395,8 @@ class MarketScanner:
 
         # --- Parse OHLCV candles ---
         closes = [float(c[4]) for c in ohlcv_data]
+        highs = [float(c[2]) for c in ohlcv_data]
+        lows = [float(c[3]) for c in ohlcv_data]
 
         # 1h change: roughly 4 x 15-min candles
         change_1h = 0.0
@@ -300,11 +417,11 @@ class MarketScanner:
         # RSI (basic)
         rsi = _compute_rsi(closes, period=14)
 
-        # Full technical indicators from generate_signals
+        # Full technical indicators from generate_signals (with ATR)
         signals: Optional[Signals] = None
         try:
             if len(closes) >= 21:  # need at least ema_slow_period bars
-                signals = generate_signals(closes)
+                signals = generate_signals(closes, highs=highs, lows=lows)
         except Exception as e:
             logger.debug(f"Full indicators failed for {pair}: {e}")
 
@@ -339,6 +456,11 @@ class MarketScanner:
             snap.rsi = round(signals.rsi.rsi, 2)  # use the full RSI calc
             snap.composite_score = round(signals.composite_score, 4)
             snap.recommendation = signals.recommendation
+            # ATR data
+            if signals.atr:
+                snap.atr = signals.atr.atr
+                snap.atr_pct = signals.atr.atr_pct
+                snap.volatility = signals.atr.volatility
 
         return snap
 
@@ -355,6 +477,24 @@ class MarketScanner:
         # Kraken may return the pair under a slightly different key
         for key in result:
             return result[key]
+        return None
+
+    async def _get_ohlcv_interval(self, pair: str, interval: int = 15) -> Optional[List[list]]:
+        """Fetch OHLCV for a pair at a specific interval (minutes)."""
+        url = f"{KRAKEN_BASE}/OHLC"
+        resp = await self._client.get(
+            url, params={"pair": pair, "interval": interval}, timeout=10.0
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        errors = body.get("error", [])
+        if errors:
+            logger.warning("Kraken OHLC errors for %s @%dm: %s", pair, interval, errors)
+            return None
+        result = body.get("result", {})
+        for key, value in result.items():
+            if isinstance(value, list):
+                return value[-100:]
         return None
 
     async def _get_ohlcv(self, pair: str) -> Optional[List[list]]:
