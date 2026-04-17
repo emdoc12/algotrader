@@ -159,6 +159,17 @@ class Database:
                 confidence REAL DEFAULT 0.5,
                 source TEXT DEFAULT 'trade'
             );
+
+            CREATE TABLE IF NOT EXISTS research_notebook (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                topic TEXT NOT NULL DEFAULT 'general',
+                coins TEXT DEFAULT '',
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                source TEXT DEFAULT 'ai',
+                still_relevant INTEGER DEFAULT 1
+            );
         """)
         # Add symbol column to trades if not present (migration)
         try:
@@ -515,6 +526,57 @@ class Database:
             (limit,),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # Research notebook — dedicated long-form AI memory
+    # ------------------------------------------------------------------
+
+    def add_research_note(self, title: str, body: str, topic: str = "general",
+                          coins: str = "", source: str = "ai") -> int:
+        """Write a research note to the notebook."""
+        cursor = self.conn.execute(
+            """INSERT INTO research_notebook
+               (timestamp, topic, coins, title, body, source, still_relevant)
+               VALUES (?, ?, ?, ?, ?, ?, 1)""",
+            (time.time(), topic, coins, title, body, source),
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def get_research_notes(self, topic: str = "", coins: str = "",
+                           only_relevant: bool = True) -> list[dict]:
+        """Get all research notes, newest first. No limit — Claude sees everything."""
+        query = "SELECT * FROM research_notebook"
+        params = []
+        conditions = []
+        if only_relevant:
+            conditions.append("still_relevant = 1")
+        if topic:
+            conditions.append("topic = ?")
+            params.append(topic)
+        if coins:
+            conditions.append("coins LIKE ?")
+            params.append(f"%{coins}%")
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY timestamp DESC"
+        rows = self.conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_research_note_stale(self, note_id: int):
+        """Mark a research note as no longer relevant (soft delete)."""
+        self.conn.execute(
+            "UPDATE research_notebook SET still_relevant = 0 WHERE id = ?",
+            (note_id,),
+        )
+        self.conn.commit()
+
+    def get_research_note_count(self) -> int:
+        """Count active research notes."""
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM research_notebook WHERE still_relevant = 1"
+        ).fetchone()
+        return row[0] if row else 0
 
     # ------------------------------------------------------------------
     # Performance stats for AI context

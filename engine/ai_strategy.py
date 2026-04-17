@@ -106,6 +106,23 @@ fed back to you every scan cycle, so you REMEMBER what you've learned.
 Write journal entries whenever you learn something — after a good trade, a bad trade, when you notice
 a pattern, or when research reveals something useful. Be specific and actionable.
 
+## RESEARCH NOTEBOOK — YOUR LONG-FORM THINKING SPACE
+You have a dedicated research notebook separate from the trade journal. This is YOUR space to think deeply.
+Use it to write longer notes about:
+- Market hypotheses ("I think BTC is forming a head-and-shoulders because...")
+- Coin deep dives ("SOL ecosystem analysis: TVL growing, new DEXs launching...")
+- Strategy development ("Mean reversion works better for DOT during low-vol regimes")
+- Macro observations ("Fed meeting next week — historically BTC drops 2-3% day-of then recovers")
+- Risk assessments ("Portfolio too concentrated in alts, should rebalance if BTC dominance rises above 58%")
+- News analysis ("ETH ETF approval rumors — if confirmed, likely 10-15% pump within 48h")
+- Pattern tracking ("Third time this week DOGE pumped at 2am UTC then dumped by 6am")
+
+ALL your research notes are fed back to you every cycle with NO LIMIT. Write as many as you need.
+You can also mark old notes as stale by providing their IDs in "stale_note_ids" when they're outdated.
+
+IMPORTANT: Use the research notebook PROACTIVELY. Don't just trade — THINK. During HOLD cycles especially,
+analyze what you're seeing, form hypotheses, and write them down. Your future self will thank you.
+
 ## WEB RESEARCH
 You can request web research on trading strategies, market analysis, coin fundamentals, or any topic
 that would help your trading. Add a "research_query" field to your response when you want to learn
@@ -127,7 +144,12 @@ You MUST respond with valid JSON only, no other text. Use this exact structure:
   "strategy_used": "momentum" | "mean_reversion" | "trend_following" | "sentiment" | "accumulation" | "scaling" | "profit_taking" | "stop_loss",
   "journal_entry": "Optional: Write a lesson, observation, or insight to remember. Be specific. Leave empty string if nothing to note.",
   "journal_category": "observation" | "lesson" | "strategy_idea" | "coin_insight" | "risk_note" | "research_finding",
-  "research_query": "Optional: A web search query if you want to research something. Leave empty string if no research needed."
+  "research_query": "Optional: A web search query if you want to research something. Leave empty string if no research needed.",
+  "research_note_title": "Optional: Title for a research notebook entry. Leave empty if no note to write.",
+  "research_note_body": "Optional: Full research note — be detailed, write paragraphs. Hypotheses, analysis, deep dives. No length limit.",
+  "research_note_topic": "macro" | "technical" | "coin_analysis" | "strategy" | "risk" | "news" | "hypothesis",
+  "research_note_coins": "Optional: Comma-separated coins this note relates to, e.g. 'BTC,ETH'. Leave empty if general.",
+  "stale_note_ids": "Optional: Comma-separated IDs of research notes that are outdated and should be retired. Leave empty if none."
 }
 
 IMPORTANT: "symbol" MUST be one of: BTC/USD, ETH/USD, SOL/USD, DOGE/USD, ADA/USD, AVAX/USD, LINK/USD, DOT/USD, POL/USD, XRP/USD
@@ -135,7 +157,7 @@ For HOLD actions, symbol should be whichever coin you're monitoring most closely
 For BUY when already holding that coin: this ADDS to your position (scaling in). Set updated stop/target for the full position.
 For SELL: quantity is how much of that coin to sell. Can be partial — sell some, keep some.
 Confidence is 0.0 to 1.0 — only act on confidence >= 0.6.
-journal_entry and research_query are optional — use empty strings if not needed.
+journal_entry, research_query, and research_note fields are optional — use empty strings if not needed.
 """
 
 
@@ -185,6 +207,12 @@ class AIDecision:
     journal_entry: str = ""      # lesson/observation to persist
     journal_category: str = ""   # observation, lesson, strategy_idea, etc.
     research_query: str = ""     # web search query for next cycle
+    # Research notebook — long-form notes, ideas, hypotheses
+    research_note_title: str = ""
+    research_note_body: str = ""
+    research_note_topic: str = ""   # macro, technical, coin_analysis, strategy, risk, news, hypothesis
+    research_note_coins: str = ""   # comma-separated coin symbols this note relates to
+    stale_note_ids: str = ""        # comma-separated IDs of notes to mark as outdated
 
 
 class AIStrategy:
@@ -406,6 +434,34 @@ class AIStrategy:
         if decision.research_query:
             self._pending_research_query = decision.research_query
             logger.info(f"Research queued for next cycle: {decision.research_query}")
+
+        # Process research notebook entry
+        if decision.research_note_title and decision.research_note_body:
+            try:
+                note_id = self.db.add_research_note(
+                    title=decision.research_note_title,
+                    body=decision.research_note_body,
+                    topic=decision.research_note_topic or "general",
+                    coins=decision.research_note_coins or "",
+                    source="ai_scan_cycle",
+                )
+                logger.info(
+                    f"Research note #{note_id} saved: [{decision.research_note_topic}] "
+                    f"{decision.research_note_title[:60]}..."
+                )
+            except Exception as e:
+                logger.warning(f"Failed to save research note: {e}")
+
+        # Mark stale research notes
+        if decision.stale_note_ids:
+            try:
+                for nid in decision.stale_note_ids.split(","):
+                    nid = nid.strip()
+                    if nid.isdigit():
+                        self.db.mark_research_note_stale(int(nid))
+                        logger.info(f"Research note #{nid} marked as stale")
+            except Exception as e:
+                logger.warning(f"Failed to mark stale notes: {e}")
 
         # --- 9. Execute decision ---
         # Resolve the target symbol and get its current price
@@ -721,6 +777,31 @@ class AIStrategy:
         except Exception as e:
             logger.debug(f"Could not load journal entries: {e}")
 
+        # Research notebook — long-form thinking (no limit)
+        try:
+            notes = self.db.get_research_notes()
+            if notes:
+                parts.append(f"\n## YOUR RESEARCH NOTEBOOK ({len(notes)} notes)")
+                parts.append("These are YOUR research notes — hypotheses, deep dives, analysis.")
+                parts.append("You wrote them. Reference them when making decisions.")
+                parts.append("Mark notes as stale via stale_note_ids when they're outdated.\n")
+                for note in notes:
+                    ts = time.strftime('%m/%d %H:%M', time.gmtime(note["timestamp"]))
+                    topic = note.get("topic", "general")
+                    coins = note.get("coins", "")
+                    coins_tag = f" [{coins}]" if coins else ""
+                    note_id = note["id"]
+                    parts.append(f"  --- Note #{note_id} [{ts}] ({topic}){coins_tag} ---")
+                    parts.append(f"  {note['title']}")
+                    parts.append(f"  {note['body']}")
+                    parts.append("")
+            else:
+                parts.append(f"\n## YOUR RESEARCH NOTEBOOK (empty)")
+                parts.append("You haven't written any research notes yet. Use HOLD cycles to analyze the market,")
+                parts.append("form hypotheses, and write detailed notes. They persist forever and help you trade smarter.")
+        except Exception as e:
+            logger.debug(f"Could not load research notebook: {e}")
+
         # Web research results from last cycle
         if self._last_research and self._last_research.results:
             parts.append(self._researcher.format_for_context(self._last_research))
@@ -797,7 +878,7 @@ class AIStrategy:
                 },
                 json={
                     "model": model,
-                    "max_tokens": 700,
+                    "max_tokens": 1500,
                     "system": SYSTEM_PROMPT,
                     "messages": [
                         {"role": "user", "content": f"Analyze this market data and make a trading decision:\n\n{context}"}
@@ -855,6 +936,11 @@ class AIStrategy:
                 journal_entry=decision_data.get("journal_entry", ""),
                 journal_category=decision_data.get("journal_category", "observation"),
                 research_query=decision_data.get("research_query", ""),
+                research_note_title=decision_data.get("research_note_title", ""),
+                research_note_body=decision_data.get("research_note_body", ""),
+                research_note_topic=decision_data.get("research_note_topic", "general"),
+                research_note_coins=decision_data.get("research_note_coins", ""),
+                stale_note_ids=decision_data.get("stale_note_ids", ""),
             )
 
             logger.info(
