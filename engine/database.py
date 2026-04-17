@@ -235,40 +235,42 @@ class Database:
         rows = self.conn.execute(query).fetchall()
         all_trades = [dict(row) for row in rows]
 
-        # FIFO matching: track buy lots as (price, qty, fee_per_unit)
-        buy_lots: list[dict] = []
+        # FIFO matching: per-coin buy lot queues
+        buy_lots_by_coin: dict[str, list[dict]] = {}
         results: list[dict] = []
         running_pnl = 0.0
 
         for t in all_trades:
             t["pnl_dollar"] = None
             t["pnl_pct"] = None
+            coin = (t.get("symbol") or "BTC/USD").replace("/USD", "")
 
             if t["side"] == "buy":
-                buy_lots.append({
+                if coin not in buy_lots_by_coin:
+                    buy_lots_by_coin[coin] = []
+                buy_lots_by_coin[coin].append({
                     "price": t["price"],
                     "qty": t["quantity"],
                     "fee_per_unit": t["fee"] / t["quantity"] if t["quantity"] > 0 else 0,
                 })
-            elif t["side"] == "sell" and buy_lots:
-                # Match sell against oldest buys (FIFO)
+            elif t["side"] == "sell" and buy_lots_by_coin.get(coin):
+                # Match sell against oldest buys for THIS coin (FIFO)
+                coin_lots = buy_lots_by_coin[coin]
                 sell_qty = t["quantity"]
                 sell_revenue = t["price"] * sell_qty
                 sell_fee = t["fee"]
                 cost_basis = 0.0
                 buy_fees = 0.0
-                qty_matched = 0.0
 
-                while sell_qty > 0 and buy_lots:
-                    lot = buy_lots[0]
+                while sell_qty > 0 and coin_lots:
+                    lot = coin_lots[0]
                     match_qty = min(sell_qty, lot["qty"])
                     cost_basis += lot["price"] * match_qty
                     buy_fees += lot["fee_per_unit"] * match_qty
                     lot["qty"] -= match_qty
                     sell_qty -= match_qty
-                    qty_matched += match_qty
                     if lot["qty"] <= 0.00000001:
-                        buy_lots.pop(0)
+                        coin_lots.pop(0)
 
                 total_fees = buy_fees + sell_fee
                 pnl = sell_revenue - cost_basis - total_fees
