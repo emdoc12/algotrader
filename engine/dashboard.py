@@ -420,42 +420,51 @@ async function fetchData() {
     pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
     pnlEl.className = pnl >= 0 ? 'positive' : 'negative';
 
-    // Holdings table — aggregate all positions per coin, use live prices
-    const allPos = d.positions || (d.position ? [d.position] : []);
+    // Holdings table — use balance.holdings (source of truth) + positions for cost basis
+    const holdings = (bal && bal.holdings) ? bal.holdings : {};
     const holdingsBody = document.getElementById('holdingsBody');
-    if (allPos.length > 0) {
+    const holdingCoins = Object.keys(holdings).filter(c => holdings[c] > 0.000001);
+    if (holdingCoins.length > 0) {
+      // Build live price map from market overview coin_data
       const coinPrices = {};
-      if (d.coins) d.coins.forEach(c => { coinPrices[c.symbol] = c.price; });
+      if (sig.coin_data) sig.coin_data.forEach(c => {
+        const name = c.symbol.replace('USD','').replace('XBT','BTC');
+        coinPrices[name] = c.price;
+      });
       coinPrices['BTC'] = d.price || 0;
 
-      // Aggregate positions by coin
-      const agg = {};
+      // Build cost basis from positions (aggregate all position rows per coin)
+      const costBasis = {};
+      const allPos = d.positions || [];
       allPos.forEach(pos => {
         const sym = pos.symbol || 'BTC/USD';
         const coin = sym.replace('/USD', '');
         const qty = pos.quantity || 0;
         const entry = pos.entry_price || 0;
-        if (!agg[coin]) agg[coin] = { qty: 0, totalCost: 0 };
-        agg[coin].qty += qty;
-        agg[coin].totalCost += entry * qty;
+        if (!costBasis[coin]) costBasis[coin] = { qty: 0, totalCost: 0 };
+        costBasis[coin].qty += qty;
+        costBasis[coin].totalCost += entry * qty;
       });
 
       let rows = '';
       let totalValue = 0, totalCost = 0, totalPnl = 0;
-      Object.keys(agg).sort().forEach(coin => {
-        const h = agg[coin];
-        const avgCost = h.qty > 0 ? h.totalCost / h.qty : 0;
+      holdingCoins.sort().forEach(coin => {
+        const qty = holdings[coin];
+        // Use position cost basis if available, otherwise estimate from last price
+        const cb = costBasis[coin];
+        const avgCost = (cb && cb.qty > 0) ? cb.totalCost / cb.qty : (coinPrices[coin] || 0);
+        const costTotal = avgCost * qty;
         const livePrice = coinPrices[coin] || avgCost;
-        const value = livePrice * h.qty;
-        const pnl = value - h.totalCost;
-        const pnlPct = h.totalCost > 0 ? (pnl / h.totalCost * 100) : 0;
+        const value = livePrice * qty;
+        const pnl = value - costTotal;
+        const pnlPct = costTotal > 0 ? (pnl / costTotal * 100) : 0;
         const pnlClass = pnl >= 0 ? 'positive' : 'negative';
-        totalValue += value; totalCost += h.totalCost; totalPnl += pnl;
+        totalValue += value; totalCost += costTotal; totalPnl += pnl;
         rows += '<tr>'
           + '<td style="font-weight:600;color:var(--blue)">' + coin + '</td>'
-          + '<td>' + h.qty.toFixed(6) + '</td>'
+          + '<td>' + qty.toFixed(6) + '</td>'
           + '<td>$' + avgCost.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}) + '</td>'
-          + '<td>$' + h.totalCost.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}) + '</td>'
+          + '<td>$' + costTotal.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}) + '</td>'
           + '<td>$' + value.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}) + '</td>'
           + '<td class="' + pnlClass + '">' + (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2) + ' (' + (pnl >= 0 ? '+' : '') + pnlPct.toFixed(1) + '%)</td>'
           + '</tr>';

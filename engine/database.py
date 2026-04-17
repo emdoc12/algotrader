@@ -357,6 +357,11 @@ class Database:
         self.conn.execute("DELETE FROM positions WHERE id=?", (position_id,))
         self.conn.commit()
 
+    def close_all_positions_for_symbol(self, symbol: str):
+        """Remove ALL position rows for a symbol (cleanup after full sell)."""
+        self.conn.execute("DELETE FROM positions WHERE symbol=?", (symbol,))
+        self.conn.commit()
+
     # ------------------------------------------------------------------
     # Holdings (multi-coin paper balances)
     # ------------------------------------------------------------------

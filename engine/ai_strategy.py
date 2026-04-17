@@ -1302,8 +1302,8 @@ class AIStrategy:
                 self.db.save_position(position)
                 sell_type = "PARTIAL SELL"
             else:
-                # Full close
-                self.db.close_position(position.id)
+                # Full close — remove ALL position rows for this symbol
+                self.db.close_all_positions_for_symbol(decision.symbol)
                 self._trailing_stops.pop(decision.symbol, None)
                 sell_type = "SELL"
 
