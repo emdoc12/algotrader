@@ -31,7 +31,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AlgoTrader v2.10.0</title>
+<title>AlgoTrader v2.10.1</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4" async></script>
 <style>
   :root {
@@ -147,7 +147,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="header">
-  <h1>AlgoTrader v2.10.0</h1>
+  <h1>AlgoTrader v2.10.1</h1>
   <div class="badges">
     <span class="badge badge-ai" id="aiLabel">AI</span>
     <div class="toggle-wrap">
@@ -188,25 +188,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
 <div class="grid">
   <div class="card">
-    <h2>BTC / USD</h2>
-    <div class="big-number" id="price">--</div>
-    <div style="margin-top:8px">
-      <span class="signal-badge signal-hold" id="signalBadge">--</span>
-      <span style="margin-left:8px;font-size:13px;color:var(--muted)" id="composite">--</span>
-    </div>
-  </div>
-  <div class="card">
     <h2>Account</h2>
     <div class="big-number" id="equity">--</div>
-    <div class="stat-row"><span class="stat-label">Cash</span><span id="cash">--</span></div>
-    <div class="stat-row"><span class="stat-label">BTC Holdings</span><span id="btcQty">--</span></div>
+    <div class="stat-row"><span class="stat-label">Cash Available</span><span id="cash">--</span></div>
     <div class="stat-row"><span class="stat-label">Total P&L</span><span id="totalPnl">--</span></div>
-  </div>
-  <div class="card">
-    <h2>Open Positions</h2>
-    <div id="positionInfo">
-      <div style="color:var(--muted);font-size:14px">No open positions</div>
-    </div>
   </div>
   <div class="card">
     <h2>Market Sentiment</h2>
@@ -215,34 +200,28 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="stat-row"><span class="stat-label">News Sentiment</span><span id="newsSentiment">--</span></div>
     <div class="stat-row"><span class="stat-label">AI Outlook</span><span id="aiOutlook">--</span></div>
   </div>
-</div>
-
-<div class="grid" style="grid-template-columns: 1fr 1fr;">
-  <div class="card">
-    <h2>AI Decision</h2>
-    <div style="display:flex;align-items:center;gap:12px">
-      <span class="signal-badge signal-hold" id="aiAction" style="font-size:16px;padding:6px 16px">--</span>
-      <div>
-        <div style="font-size:13px;color:var(--muted)">Confidence</div>
-        <div style="font-size:18px;font-weight:600" id="aiConfidence">--</div>
-      </div>
-      <div>
-        <div style="font-size:13px;color:var(--muted)">Strategy</div>
-        <div style="font-size:14px" id="aiStrategy">--</div>
-      </div>
-    </div>
-    <div class="confidence-bar"><div class="confidence-fill" id="confFill" style="width:0;background:var(--muted)"></div></div>
-    <h3 style="margin-top:12px;font-size:14px;color:var(--purple)">Current Thinking</h3>
-    <div class="ai-reasoning" id="aiReasoning">Waiting for first scan...</div>
-  </div>
-  <div class="card">
+  <div class="card" style="grid-column: span 2">
     <h2>Holdings</h2>
     <div style="overflow-x:auto">
       <table id="holdingsTable">
-        <thead><tr><th>Coin</th><th>Qty</th><th>Cost</th><th>Value</th><th>P&amp;L</th></tr></thead>
-        <tbody id="holdingsBody"><tr><td colspan="5" style="color:var(--muted);text-align:center">No holdings</td></tr></tbody>
+        <thead><tr><th>Coin</th><th>Qty</th><th>Avg Cost</th><th>Cost Basis</th><th>Value</th><th>Unrealized P&amp;L</th></tr></thead>
+        <tbody id="holdingsBody"><tr><td colspan="6" style="color:var(--muted);text-align:center">No holdings</td></tr></tbody>
       </table>
     </div>
+  </div>
+</div>
+
+<div class="grid" style="grid-template-columns: 1fr;">
+  <div class="card">
+    <div style="display:flex;align-items:center;gap:16px;margin-bottom:8px">
+      <h2 style="margin:0">AI Decision</h2>
+      <span class="signal-badge signal-hold" id="aiAction" style="font-size:14px;padding:4px 14px">--</span>
+      <div style="font-size:13px"><span style="color:var(--muted)">Confidence:</span> <span id="aiConfidence" style="font-weight:600">--</span></div>
+      <div style="font-size:13px"><span style="color:var(--muted)">Strategy:</span> <span id="aiStrategy">--</span></div>
+    </div>
+    <div class="confidence-bar" style="margin-bottom:8px"><div class="confidence-fill" id="confFill" style="width:0;background:var(--muted)"></div></div>
+    <h3 style="font-size:14px;color:var(--purple)">Current Thinking</h3>
+    <div class="ai-reasoning" id="aiReasoning">Waiting for first scan...</div>
   </div>
 </div>
 
@@ -364,16 +343,6 @@ async function fetchData() {
     // Mode — sync toggle
     document.getElementById('modeToggle').checked = (d.mode === 'live');
 
-    // Price
-    document.getElementById('price').textContent = d.price ? '$' + Number(d.price).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) : '--';
-
-    // Signal badge
-    const sb = document.getElementById('signalBadge');
-    const rec = sig.recommendation || sig.ai_action || '--';
-    sb.textContent = rec;
-    sb.className = 'signal-badge ' + (rec.includes('BUY') ? 'signal-buy' : rec.includes('SELL') ? 'signal-sell' : 'signal-hold');
-    document.getElementById('composite').textContent = sig.composite !== undefined ? 'Confidence: ' + (sig.composite * 100).toFixed(0) + '%' : '';
-
     // AI Decision panel
     const aiSymbol = sig.ai_symbol || 'BTC/USD';
     const aiAction = sig.ai_action ? sig.ai_action + ' ' + aiSymbol : '--';
@@ -444,7 +413,6 @@ async function fetchData() {
     const bal = d.balance || {};
     document.getElementById('equity').textContent = bal.total_equity ? '$' + Number(bal.total_equity).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) : '--';
     document.getElementById('cash').textContent = bal.cash_usd ? '$' + Number(bal.cash_usd).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) : '--';
-    document.getElementById('btcQty').textContent = bal.btc_quantity !== undefined ? Number(bal.btc_quantity).toFixed(6) + ' BTC' : '--';
 
     const startCap = d.starting_capital || 10000;
     const pnl = bal.total_equity ? bal.total_equity - startCap : 0;
@@ -452,54 +420,58 @@ async function fetchData() {
     pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
     pnlEl.className = pnl >= 0 ? 'positive' : 'negative';
 
-    // Holdings table
+    // Holdings table — aggregate all positions per coin, use live prices
     const allPos = d.positions || (d.position ? [d.position] : []);
     const holdingsBody = document.getElementById('holdingsBody');
     if (allPos.length > 0) {
       const coinPrices = {};
       if (d.coins) d.coins.forEach(c => { coinPrices[c.symbol] = c.price; });
-      coinPrices['BTC'] = sig.price || 0;
-      let rows = '';
+      coinPrices['BTC'] = d.price || 0;
+
+      // Aggregate positions by coin
+      const agg = {};
       allPos.forEach(pos => {
         const sym = pos.symbol || 'BTC/USD';
         const coin = sym.replace('/USD', '');
         const qty = pos.quantity || 0;
         const entry = pos.entry_price || 0;
-        const cost = entry * qty;
-        const livePrice = coinPrices[coin] || entry;
-        const value = livePrice * qty;
-        const pnl = value - cost;
-        const pnlPct = cost > 0 ? (pnl / cost * 100) : 0;
-        const pnlClass = pnl >= 0 ? 'positive' : 'negative';
-        rows += '<tr><td style="font-weight:600;color:var(--blue)">' + coin + '</td>'
-          + '<td>' + qty.toFixed(6) + '</td>'
-          + '<td>$' + cost.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}) + '</td>'
-          + '<td>$' + value.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}) + '</td>'
-          + '<td class="' + pnlClass + '">$' + pnl.toFixed(2) + ' (' + pnlPct.toFixed(1) + '%)</td></tr>';
+        if (!agg[coin]) agg[coin] = { qty: 0, totalCost: 0 };
+        agg[coin].qty += qty;
+        agg[coin].totalCost += entry * qty;
       });
+
+      let rows = '';
+      let totalValue = 0, totalCost = 0, totalPnl = 0;
+      Object.keys(agg).sort().forEach(coin => {
+        const h = agg[coin];
+        const avgCost = h.qty > 0 ? h.totalCost / h.qty : 0;
+        const livePrice = coinPrices[coin] || avgCost;
+        const value = livePrice * h.qty;
+        const pnl = value - h.totalCost;
+        const pnlPct = h.totalCost > 0 ? (pnl / h.totalCost * 100) : 0;
+        const pnlClass = pnl >= 0 ? 'positive' : 'negative';
+        totalValue += value; totalCost += h.totalCost; totalPnl += pnl;
+        rows += '<tr>'
+          + '<td style="font-weight:600;color:var(--blue)">' + coin + '</td>'
+          + '<td>' + h.qty.toFixed(6) + '</td>'
+          + '<td>$' + avgCost.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}) + '</td>'
+          + '<td>$' + h.totalCost.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}) + '</td>'
+          + '<td>$' + value.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}) + '</td>'
+          + '<td class="' + pnlClass + '">' + (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2) + ' (' + (pnl >= 0 ? '+' : '') + pnlPct.toFixed(1) + '%)</td>'
+          + '</tr>';
+      });
+      // Totals row
+      const totPnlClass = totalPnl >= 0 ? 'positive' : 'negative';
+      const totPnlPct = totalCost > 0 ? (totalPnl / totalCost * 100) : 0;
+      rows += '<tr style="border-top:1px solid var(--border);font-weight:600">'
+        + '<td>TOTAL</td><td></td><td></td>'
+        + '<td>$' + totalCost.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}) + '</td>'
+        + '<td>$' + totalValue.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}) + '</td>'
+        + '<td class="' + totPnlClass + '">' + (totalPnl >= 0 ? '+' : '') + '$' + totalPnl.toFixed(2) + ' (' + (totalPnl >= 0 ? '+' : '') + totPnlPct.toFixed(1) + '%)</td>'
+        + '</tr>';
       holdingsBody.innerHTML = rows;
     } else {
-      holdingsBody.innerHTML = '<tr><td colspan="5" style="color:var(--muted);text-align:center">No holdings</td></tr>';
-    }
-
-    // Positions detail (multi-coin)
-    const posDiv = document.getElementById('positionInfo');
-    if (allPos.length > 0) {
-      posDiv.innerHTML = allPos.map(pos => {
-        const upnl = pos.unrealized_pnl || 0;
-        const upnlPct = pos.entry_price > 0 ? ((upnl / (pos.entry_price * pos.quantity)) * 100) : 0;
-        const sym = pos.symbol || 'BTC/USD';
-        const coin = sym.replace('/USD', '');
-        return '<div style="margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid var(--border)">' +
-          '<div style="font-weight:600;margin-bottom:4px;color:var(--blue)">' + sym + '</div>' +
-          '<div class="stat-row"><span class="stat-label">Entry</span><span>$' + pos.entry_price.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:4}) + '</span></div>' +
-          '<div class="stat-row"><span class="stat-label">Quantity</span><span>' + pos.quantity.toFixed(6) + ' ' + coin + '</span></div>' +
-          '<div class="stat-row"><span class="stat-label">Stop / Target</span><span>$' + pos.stop_loss.toLocaleString(undefined,{maximumFractionDigits:2}) + ' / $' + pos.take_profit.toLocaleString(undefined,{maximumFractionDigits:2}) + '</span></div>' +
-          '<div class="stat-row"><span class="stat-label">Unrealized P&L</span><span class="' + (upnl >= 0 ? 'positive' : 'negative') + '">' + (upnl >= 0 ? '+' : '') + '$' + upnl.toFixed(2) + ' (' + upnlPct.toFixed(2) + '%)</span></div>' +
-          '</div>';
-      }).join('');
-    } else {
-      posDiv.innerHTML = '<div style="color:var(--muted);font-size:14px;padding:8px 0">No open positions</div>';
+      holdingsBody.innerHTML = '<tr><td colspan="6" style="color:var(--muted);text-align:center">No holdings</td></tr>';
     }
 
     // Trades (last 3 days with P&L)
