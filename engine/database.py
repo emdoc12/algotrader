@@ -127,6 +127,8 @@ class Database:
                 btc_price REAL NOT NULL
             );
 
+            CREATE INDEX IF NOT EXISTS idx_performance_ts ON performance(timestamp);
+
             CREATE TABLE IF NOT EXISTS goals (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 weekly_profit_target REAL DEFAULT 0,
@@ -395,6 +397,48 @@ class Database:
             (time.time(), equity, cash, btc_value, btc_price),
         )
         self.conn.commit()
+        # Prune old data periodically (every ~100 inserts)
+        count = self.conn.execute("SELECT COUNT(*) FROM performance").fetchone()[0]
+        if count > 10000 and count % 100 == 0:
+            self._prune_performance_history()
+
+    def _prune_performance_history(self):
+        """Thin out old performance rows to prevent unbounded table growth.
+
+        Keeps:
+        - All rows from last 7 days (full resolution)
+        - One row per hour for 7-30 days old
+        - One row per day for 30+ days old
+        """
+        now = time.time()
+        week_ago = now - 7 * 86400
+        month_ago = now - 30 * 86400
+
+        # Thin 7-30 day range: keep one per hour
+        self.conn.execute("""
+            DELETE FROM performance
+            WHERE timestamp < ? AND timestamp >= ?
+            AND id NOT IN (
+                SELECT MIN(id) FROM performance
+                WHERE timestamp < ? AND timestamp >= ?
+                GROUP BY CAST(timestamp / 3600 AS INTEGER)
+            )
+        """, (week_ago, month_ago, week_ago, month_ago))
+
+        # Thin 30+ day range: keep one per day
+        self.conn.execute("""
+            DELETE FROM performance
+            WHERE timestamp < ?
+            AND id NOT IN (
+                SELECT MIN(id) FROM performance
+                WHERE timestamp < ?
+                GROUP BY CAST(timestamp / 86400 AS INTEGER)
+            )
+        """, (month_ago, month_ago))
+
+        self.conn.commit()
+        remaining = self.conn.execute("SELECT COUNT(*) FROM performance").fetchone()[0]
+        logger.debug(f"Performance table pruned, {remaining} rows remaining")
 
     def get_equity_history(self, limit: int = 1000) -> list[dict]:
         """Get equity history for charting."""

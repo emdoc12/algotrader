@@ -480,8 +480,12 @@ class AIStrategy:
             )
             if target_price <= 0:
                 logger.error(f"Could not find price for {base_coin} in market scanner — skipping trade")
-                target_price = current_price  # last resort, but log the error
+                return {"action": "hold", "reason": f"no price for {base_coin}", "price": current_price}
         else:
+            # No market overview available — only safe for BTC since current_price IS BTC
+            if target_symbol != "BTC/USD":
+                logger.error(f"No market overview — cannot get price for {base_coin}, skipping trade")
+                return {"action": "hold", "reason": f"no market data for {base_coin}", "price": current_price}
             target_price = current_price
 
         # Find existing position for this specific coin
