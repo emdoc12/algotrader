@@ -236,11 +236,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="ai-reasoning" id="aiReasoning">Waiting for first scan...</div>
   </div>
   <div class="card">
-    <h2>Indicators</h2>
-    <div class="stat-row"><span class="stat-label">EMA Fast / Slow</span><span id="ema">--</span></div>
-    <div class="stat-row"><span class="stat-label">EMA Crossover</span><span id="emaCross">--</span></div>
-    <div class="stat-row"><span class="stat-label">RSI (14)</span><span id="rsi">--</span></div>
-    <div class="stat-row"><span class="stat-label">BB Position</span><span id="bbPos">--</span></div>
+    <h2>Holdings</h2>
+    <div style="overflow-x:auto">
+      <table id="holdingsTable">
+        <thead><tr><th>Coin</th><th>Qty</th><th>Cost</th><th>Value</th><th>P&amp;L</th></tr></thead>
+        <tbody id="holdingsBody"><tr><td colspan="5" style="color:var(--muted);text-align:center">No holdings</td></tr></tbody>
+      </table>
+    </div>
   </div>
 </div>
 
@@ -450,23 +452,38 @@ async function fetchData() {
     pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
     pnlEl.className = pnl >= 0 ? 'positive' : 'negative';
 
-    // Indicators
-    document.getElementById('ema').textContent = sig.ema_fast && sig.ema_slow ? '$' + sig.ema_fast.toLocaleString(undefined,{maximumFractionDigits:0}) + ' / $' + sig.ema_slow.toLocaleString(undefined,{maximumFractionDigits:0}) : '--';
-    const cross = sig.ema_crossover || '--';
-    const crossEl = document.getElementById('emaCross');
-    crossEl.textContent = cross;
-    crossEl.className = cross === 'bullish' ? 'positive' : cross === 'bearish' ? 'negative' : 'neutral';
-
-    const rsiEl = document.getElementById('rsi');
-    if (sig.rsi !== undefined) {
-      rsiEl.textContent = sig.rsi.toFixed(1) + ' (' + sig.rsi_signal + ')';
-      rsiEl.className = sig.rsi_signal === 'oversold' ? 'positive' : sig.rsi_signal === 'overbought' ? 'negative' : 'neutral';
-    }
-    document.getElementById('bbPos').textContent = sig.bb_position !== undefined ? (sig.bb_position * 100).toFixed(1) + '%' : '--';
-
-    // Positions (multi-coin)
-    const posDiv = document.getElementById('positionInfo');
+    // Holdings table
     const allPos = d.positions || (d.position ? [d.position] : []);
+    const holdingsBody = document.getElementById('holdingsBody');
+    if (allPos.length > 0) {
+      const coinPrices = {};
+      if (d.coins) d.coins.forEach(c => { coinPrices[c.symbol] = c.price; });
+      coinPrices['BTC'] = sig.price || 0;
+      let rows = '';
+      allPos.forEach(pos => {
+        const sym = pos.symbol || 'BTC/USD';
+        const coin = sym.replace('/USD', '');
+        const qty = pos.quantity || 0;
+        const entry = pos.entry_price || 0;
+        const cost = entry * qty;
+        const livePrice = coinPrices[coin] || entry;
+        const value = livePrice * qty;
+        const pnl = value - cost;
+        const pnlPct = cost > 0 ? (pnl / cost * 100) : 0;
+        const pnlClass = pnl >= 0 ? 'positive' : 'negative';
+        rows += '<tr><td style="font-weight:600;color:var(--blue)">' + coin + '</td>'
+          + '<td>' + qty.toFixed(6) + '</td>'
+          + '<td>$' + cost.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}) + '</td>'
+          + '<td>$' + value.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}) + '</td>'
+          + '<td class="' + pnlClass + '">$' + pnl.toFixed(2) + ' (' + pnlPct.toFixed(1) + '%)</td></tr>';
+      });
+      holdingsBody.innerHTML = rows;
+    } else {
+      holdingsBody.innerHTML = '<tr><td colspan="5" style="color:var(--muted);text-align:center">No holdings</td></tr>';
+    }
+
+    // Positions detail (multi-coin)
+    const posDiv = document.getElementById('positionInfo');
     if (allPos.length > 0) {
       posDiv.innerHTML = allPos.map(pos => {
         const upnl = pos.unrealized_pnl || 0;
