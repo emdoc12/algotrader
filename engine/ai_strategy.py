@@ -34,6 +34,8 @@ from sentiment import SentimentFetcher, SentimentData
 from web_research import WebResearcher, ResearchResult
 from whale_monitor import WhaleMonitor
 from discord_notifier import DiscordNotifier
+from alerts import AlertManager
+from derivatives_data import DerivativesDataFetcher
 
 logger = logging.getLogger(__name__)
 
@@ -69,10 +71,21 @@ You have access to data most traders don't see together:
 - BTC dominance: real-time from CoinGecko — know when alts will outperform vs underperform
 - ATR (Average True Range): volatility measurement for ALL coins at ALL timeframes — use for position sizing
 - Full technicals on all 10 coins: EMA, RSI, Bollinger, composite scores, ATR
+- **Derivatives data**: Funding rates from Binance/Bybit/OKX, open interest across exchanges, recent liquidations, and Deribit options put/call ratios
+- **Self-alerts**: You can set your own price alerts, RSI alerts, and volume spike alerts that fire automatically
 
 USE the multi-timeframe data: a bullish 15m signal aligned with bullish 1h and 4h = high conviction.
 A bullish 15m fighting a bearish 4h = low conviction trap. Check alignment for EVERY coin before trading it.
 The order book shows real support/resistance.
+
+USE derivatives data for edge:
+- High positive funding rates = longs are crowded — potential long squeeze incoming
+- High negative funding rates = shorts are crowded — potential short squeeze
+- Spike in open interest + price move = new positions opening (conviction)
+- Open interest dropping + price move = positions closing (profit-taking/liquidation)
+- Heavy long liquidations = cascade selling may continue or be nearing capitulation
+- Heavy short liquidations = short squeeze momentum may have more room
+- Put/call ratio >1.2 = smart money hedging/bearish, <0.7 = bullish options flow
 
 ## RISK PROFILE: AGGRESSIVE (WITH GUARDRAILS)
 - You control your own position sizing — go big on high-conviction setups
@@ -136,6 +149,21 @@ that would help your trading. Add a "research_query" field to your response when
 something. The system will search the web and feed results back to you on the next scan cycle.
 Use this to stay current on market events, learn new strategies, or investigate specific coins.
 
+## SELF-ALERTS
+You can set alerts for yourself that are checked every scan cycle. When an alert triggers, you'll see
+it in your data with your original reason and action plan so you remember WHY you set it.
+
+Alert types you can set:
+- "price_above" / "price_below" — fires when a coin hits your target price
+- "rsi_above" / "rsi_below" — fires when RSI crosses your threshold
+- "volume_spike" — fires when volume change % exceeds your threshold
+
+Set alerts proactively! If you notice a coin approaching a key level, set an alert so you catch
+the breakout. If you're waiting for RSI to cool down before buying, set an rsi_below alert.
+You can cancel alerts by providing their IDs in cancel_alert_ids.
+
+Your active alerts and recently triggered alerts appear in the data below.
+
 ## RESPONSE FORMAT
 You MUST respond with valid JSON only, no other text. Use this exact structure:
 {
@@ -156,7 +184,13 @@ You MUST respond with valid JSON only, no other text. Use this exact structure:
   "research_note_body": "Optional: Full research note — be detailed, write paragraphs. Hypotheses, analysis, deep dives. No length limit.",
   "research_note_topic": "macro" | "technical" | "coin_analysis" | "strategy" | "risk" | "news" | "hypothesis",
   "research_note_coins": "Optional: Comma-separated coins this note relates to, e.g. 'BTC,ETH'. Leave empty if general.",
-  "stale_note_ids": "Optional: Comma-separated IDs of research notes that are outdated and should be retired. Leave empty if none."
+  "stale_note_ids": "Optional: Comma-separated IDs of research notes that are outdated and should be retired. Leave empty if none.",
+  "alert_coin": "Optional: Coin symbol for a new self-alert (e.g. 'BTC', 'ETH'). Leave empty if no alert.",
+  "alert_condition": "Optional: 'price_above' | 'price_below' | 'rsi_above' | 'rsi_below' | 'volume_spike'",
+  "alert_threshold": 0.0,
+  "alert_reason": "Optional: Why you're setting this alert — your future self reads this.",
+  "alert_action_plan": "Optional: What you plan to do when this alert fires.",
+  "cancel_alert_ids": "Optional: Comma-separated IDs of alerts to cancel. Leave empty if none."
 }
 
 IMPORTANT: "symbol" MUST be one of: BTC/USD, ETH/USD, SOL/USD, DOGE/USD, ADA/USD, AVAX/USD, LINK/USD, DOT/USD, POL/USD, XRP/USD
@@ -164,7 +198,8 @@ For HOLD actions, symbol should be whichever coin you're monitoring most closely
 For BUY when already holding that coin: this ADDS to your position (scaling in). Set updated stop/target for the full position.
 For SELL: quantity is how much of that coin to sell. Can be partial — sell some, keep some.
 Confidence is 0.0 to 1.0 — only act on confidence >= 0.6.
-journal_entry, research_query, and research_note fields are optional — use empty strings if not needed.
+journal_entry, research_query, research_note, and alert fields are optional — use empty strings/0 if not needed.
+You can set ONE alert per scan cycle. Use them proactively to catch breakouts, dips, and momentum shifts.
 """
 
 
@@ -220,6 +255,13 @@ class AIDecision:
     research_note_topic: str = ""   # macro, technical, coin_analysis, strategy, risk, news, hypothesis
     research_note_coins: str = ""   # comma-separated coin symbols this note relates to
     stale_note_ids: str = ""        # comma-separated IDs of notes to mark as outdated
+    # Self-alerts — Claude sets his own price/indicator alerts
+    alert_coin: str = ""             # coin to set alert for (e.g. "BTC")
+    alert_condition: str = ""        # "price_above", "price_below", "rsi_above", "rsi_below", "volume_spike"
+    alert_threshold: float = 0.0     # threshold value
+    alert_reason: str = ""           # why setting this alert
+    alert_action_plan: str = ""      # what to do when it triggers
+    cancel_alert_ids: str = ""       # comma-separated alert IDs to cancel
 
 
 class AIStrategy:
@@ -262,6 +304,11 @@ class AIStrategy:
         self._last_order_book: dict = {}
         self._last_whale_data = None
         self._last_mtf_signals: dict = {}  # multi-timeframe signals
+        # Derivatives (funding rates, OI, liquidations, options)
+        self._derivatives = DerivativesDataFetcher(self._http)
+        self._last_derivatives = None
+        # Self-alert system
+        self._alert_manager = AlertManager(db)
 
     async def run_scan(self) -> dict:
         """Run one AI-powered scan cycle."""
@@ -347,6 +394,34 @@ class AIStrategy:
             self._last_whale_data = await self._whale_monitor.get_whale_activity()
         except Exception as e:
             logger.debug(f"Whale monitor failed: {e}")
+
+        # Derivatives data (funding rates, OI, liquidations, options)
+        try:
+            self._last_derivatives = await self._derivatives.fetch_all()
+            if self._last_derivatives.fetch_errors:
+                logger.debug(f"Derivatives partial errors: {len(self._last_derivatives.fetch_errors)}")
+        except Exception as e:
+            logger.debug(f"Derivatives fetch failed: {e}")
+
+        # Self-alerts — check against current market data
+        try:
+            coin_prices = {"BTC": current_price}
+            if market_overview:
+                for snap in market_overview.coin_snapshots:
+                    coin_prices[snap.symbol] = snap.price
+            coin_indicators = {}
+            if market_overview:
+                for snap in market_overview.coin_snapshots:
+                    coin_indicators[snap.symbol] = {
+                        "rsi": snap.rsi if hasattr(snap, 'rsi') else 0,
+                        "volume_change_pct": snap.volume_24h_change if hasattr(snap, 'volume_24h_change') else 0,
+                    }
+            triggered_alerts = self._alert_manager.check_alerts(coin_prices, coin_indicators)
+            if triggered_alerts:
+                for a in triggered_alerts:
+                    logger.info(f"ALERT TRIGGERED: #{a.id} {a.coin} {a.condition} {a.threshold} — {a.reason}")
+        except Exception as e:
+            logger.debug(f"Alert check failed: {e}")
 
         # --- 5. Update equity and drawdown tracking ---
         if self.is_paper and self.paper_trader:
@@ -469,6 +544,31 @@ class AIStrategy:
                         logger.info(f"Research note #{nid} marked as stale")
             except Exception as e:
                 logger.warning(f"Failed to mark stale notes: {e}")
+
+        # Process self-alert creation
+        if decision.alert_coin and decision.alert_condition and decision.alert_threshold > 0:
+            try:
+                alert_id = self._alert_manager.create_alert(
+                    coin=decision.alert_coin,
+                    condition=decision.alert_condition,
+                    threshold=decision.alert_threshold,
+                    reason=decision.alert_reason,
+                    action_plan=decision.alert_action_plan,
+                )
+                logger.info(f"Self-alert #{alert_id} created: {decision.alert_coin} {decision.alert_condition} {decision.alert_threshold}")
+            except Exception as e:
+                logger.warning(f"Failed to create self-alert: {e}")
+
+        # Cancel alerts
+        if decision.cancel_alert_ids:
+            try:
+                for aid in decision.cancel_alert_ids.split(","):
+                    aid = aid.strip()
+                    if aid.isdigit():
+                        self._alert_manager.cancel_alert(int(aid))
+                        logger.info(f"Alert #{aid} cancelled by AI")
+            except Exception as e:
+                logger.warning(f"Failed to cancel alerts: {e}")
 
         # --- 9. Execute decision ---
         # Resolve the target symbol and get its current price
@@ -656,6 +756,17 @@ class AIStrategy:
             whale_ctx = self._whale_monitor.format_for_context(self._last_whale_data)
             if whale_ctx:
                 parts.append(whale_ctx)
+
+        # Derivatives data (funding rates, OI, liquidations, options)
+        if self._last_derivatives:
+            deriv_ctx = self._derivatives.format_for_context(self._last_derivatives)
+            if deriv_ctx:
+                parts.append(deriv_ctx)
+
+        # Self-alerts (active + recently triggered)
+        alert_ctx = self._alert_manager.format_for_context()
+        if alert_ctx:
+            parts.append(alert_ctx)
 
         # Sentiment
         if sentiment:
@@ -970,6 +1081,12 @@ class AIStrategy:
                 research_note_topic=decision_data.get("research_note_topic", "general"),
                 research_note_coins=decision_data.get("research_note_coins", ""),
                 stale_note_ids=decision_data.get("stale_note_ids", ""),
+                alert_coin=decision_data.get("alert_coin", ""),
+                alert_condition=decision_data.get("alert_condition", ""),
+                alert_threshold=float(decision_data.get("alert_threshold", 0)),
+                alert_reason=decision_data.get("alert_reason", ""),
+                alert_action_plan=decision_data.get("alert_action_plan", ""),
+                cancel_alert_ids=decision_data.get("cancel_alert_ids", ""),
             )
 
             logger.info(

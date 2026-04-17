@@ -180,6 +180,18 @@ class Database:
                 source TEXT DEFAULT 'ai',
                 still_relevant INTEGER DEFAULT 1
             );
+
+            CREATE TABLE IF NOT EXISTS ai_alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                coin TEXT NOT NULL,
+                condition TEXT NOT NULL,
+                threshold REAL NOT NULL,
+                reason TEXT DEFAULT '',
+                action_plan TEXT DEFAULT '',
+                created_at REAL NOT NULL,
+                triggered_at REAL DEFAULT 0,
+                active INTEGER DEFAULT 1
+            );
         """)
         # Add symbol column to trades if not present (migration)
         try:

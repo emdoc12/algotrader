@@ -123,7 +123,7 @@ class AlgoTraderBot:
             with open(version_path) as f:
                 return f.read().strip()
         except Exception:
-            return "2.8.1"
+            return "2.9.0"
 
     async def start(self):
         """Start the bot and run until shutdown."""

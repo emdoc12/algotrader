@@ -31,7 +31,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AlgoTrader v2.8.6</title>
+<title>AlgoTrader v2.9.0</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4" async></script>
 <style>
   :root {
@@ -147,7 +147,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="header">
-  <h1>AlgoTrader v2.8.6</h1>
+  <h1>AlgoTrader v2.9.0</h1>
   <div class="badges">
     <span class="badge badge-ai" id="aiLabel">AI</span>
     <div class="toggle-wrap">

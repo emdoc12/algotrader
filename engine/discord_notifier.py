@@ -288,7 +288,7 @@ class DiscordNotifier:
         }
         await self._send(embed)
 
-    async def send_startup(self, mode: str, version: str = "2.8.0"):
+    async def send_startup(self, mode: str, version: str = "2.9.0"):
         """Send bot startup notification."""
         if not self.enabled:
             return
