@@ -36,6 +36,12 @@ from whale_monitor import WhaleMonitor
 from discord_notifier import DiscordNotifier
 from alerts import AlertManager
 from derivatives_data import DerivativesDataFetcher
+from onchain_data import OnChainDataFetcher
+from macro_data import MacroDataFetcher
+from social_sentiment import SocialSentimentFetcher
+from liquidation_data import LiquidationDataFetcher
+from volume_profile import VolumeProfileAnalyzer
+from backtester import Backtester, run_backtest_from_tag
 
 logger = logging.getLogger(__name__)
 
@@ -63,13 +69,26 @@ Balance these based on what the market is doing.
 BTC/USD, ETH/USD, SOL/USD, DOGE/USD, ADA/USD, AVAX/USD, LINK/USD, DOT/USD, POL/USD, XRP/USD
 
 ## YOUR DATA
-You see multi-timeframe technicals (15m/1h/4h) on all 10 coins, order book depth, whale activity,
-BTC dominance, derivatives data (funding rates, open interest, liquidations, options), Fear & Greed,
-news, ATR volatility, and your full trade history with performance stats.
+You have an extremely rich data feed. Use ALL of it — the edge comes from combining signals across domains.
 
-Use timeframe alignment: bullish on 15m + 1h + 4h = high conviction. Bullish 15m vs bearish 4h = trap.
-Use derivatives: high positive funding = crowded longs (squeeze risk). Heavy liquidations = possible capitulation.
-Use ATR: volatile coins get smaller positions, calm coins get bigger ones.
+TECHNICALS: Multi-timeframe (15m/1h/4h) on all 10 coins, EMA/RSI/BB/ATR, VWAP with bands, volume profile (POC, value area, HVN/LVN).
+ORDER FLOW: Order book depth/imbalance, whale transactions, volume climax detection, buy/sell volume ratio.
+DERIVATIVES: Funding rates, open interest trends, liquidation levels/magnets, long/short ratios (Binance+Bybit), options put/call.
+ON-CHAIN: Exchange inflows/outflows, mempool congestion, stablecoin supply changes (USDT/USDC), hash rate, network health.
+MACRO: S&P 500, DXY, 10Y yields, VIX, gold — plus macro regime classification (risk-on/risk-off/mixed). FOMC calendar with alerts.
+SENTIMENT: Fear & Greed index, Reddit sentiment scoring (with contrarian signals), CoinGecko trending coins, news headlines.
+LIQUIDATION MAP: Estimated liquidation clusters above/below price at 5x/10x/25x/50x/100x leverage. Liquidation magnets.
+BACKTESTING: Use [BACKTEST:] tags to test strategy ideas against historical data before deploying them.
+
+KEY PRINCIPLES:
+- Timeframe alignment: bullish on 15m + 1h + 4h = high conviction. Bullish 15m vs bearish 4h = trap.
+- Derivatives: high positive funding = crowded longs (squeeze risk). Heavy liquidations = possible capitulation.
+- On-chain: coins flowing INTO exchanges = selling pressure coming. Stablecoin supply expanding = fresh capital.
+- Macro: risk-off regime (high VIX, rising DXY, rising yields) = reduce position sizes. FOMC within 3 days = danger zone.
+- Social: extreme Reddit bullishness is a contrarian SELL signal. Extreme fear is often a BUY signal.
+- Liquidation magnets: price is drawn toward clusters of leveraged positions. Use this to predict short-term moves.
+- VWAP: price below VWAP with declining volume = bearish bias. POC and HVN are real support/resistance.
+- ATR: volatile coins get smaller positions, calm coins get bigger ones.
 
 ## RISK RULES
 - Aggressive but smart. Go big on high-conviction setups, small on speculative ones.
@@ -99,6 +118,11 @@ ADVANCED ORDER TAGS — place orders at specific prices/triggers:
 
 CANCEL PENDING ORDERS:
 [CANCEL_ORDER: 3, 7]
+
+BACKTEST TAG — test a strategy against historical data before using it:
+[BACKTEST: strategy=ema_crossover, pair=BTC/USD, interval=60, hours=168, fast=9, slow=21]
+Available strategies: ema_crossover (params: fast, slow), rsi_reversal (params: oversold, overbought), bollinger_bounce (params: period, std), vwap_reversion (params: deviation)
+interval = candle minutes (15, 60, 240, 1440). hours = lookback period. Results appear next scan cycle.
 
 - symbol MUST be one of the 10 tradeable pairs
 - qty = amount of the coin (not USD)
@@ -243,6 +267,24 @@ class AIStrategy:
         # Derivatives (funding rates, OI, liquidations, options)
         self._derivatives = DerivativesDataFetcher(self._http)
         self._last_derivatives = None
+        # On-chain data (exchange flows, mempool, stablecoin supply, network metrics)
+        self._onchain = OnChainDataFetcher(self._http)
+        self._last_onchain = None
+        # Macro/economic data (DXY, SPX, yields, FOMC calendar, regime)
+        self._macro = MacroDataFetcher(self._http)
+        self._last_macro = None
+        # Social sentiment (Reddit, CoinGecko trending)
+        self._social = SocialSentimentFetcher(self._http)
+        self._last_social = None
+        # Liquidation heatmap (long/short ratios, OI, liquidation levels)
+        self._liquidation = LiquidationDataFetcher(self._http)
+        self._last_liquidation = None
+        # Volume profile / VWAP analysis (computed from candles, no API)
+        self._volume_analyzer = VolumeProfileAnalyzer()
+        self._last_volume_analysis = None
+        # Backtester (on-demand historical strategy testing)
+        self._backtester = Backtester(self._http)
+        self._pending_backtest_result: str = ""
         # Self-alert system
         self._alert_manager = AlertManager(db)
 
@@ -338,6 +380,44 @@ class AIStrategy:
                 logger.debug(f"Derivatives partial errors: {len(self._last_derivatives.fetch_errors)}")
         except Exception as e:
             logger.debug(f"Derivatives fetch failed: {e}")
+
+        # --- Fetch all new data sources concurrently ---
+        async def _fetch_onchain():
+            try:
+                self._last_onchain = await self._onchain.fetch_all()
+            except Exception as e:
+                logger.debug(f"On-chain fetch failed: {e}")
+
+        async def _fetch_macro():
+            try:
+                self._last_macro = await self._macro.fetch_all()
+            except Exception as e:
+                logger.debug(f"Macro fetch failed: {e}")
+
+        async def _fetch_social():
+            try:
+                self._last_social = await self._social.fetch_all()
+            except Exception as e:
+                logger.debug(f"Social sentiment fetch failed: {e}")
+
+        async def _fetch_liquidation():
+            try:
+                self._last_liquidation = await self._liquidation.fetch_all(btc_price=current_price)
+            except Exception as e:
+                logger.debug(f"Liquidation data fetch failed: {e}")
+
+        import asyncio as _asyncio
+        await _asyncio.gather(
+            _fetch_onchain(), _fetch_macro(), _fetch_social(), _fetch_liquidation(),
+            return_exceptions=True,
+        )
+
+        # Volume profile / VWAP (computed from candle data, no API call)
+        try:
+            if bars and len(bars) >= 20:
+                self._last_volume_analysis = self._volume_analyzer.analyze(bars)
+        except Exception as e:
+            logger.debug(f"Volume analysis failed: {e}")
 
         # Self-alerts — check against current market data
         try:
@@ -637,10 +717,46 @@ class AIStrategy:
             if deriv_ctx:
                 parts.append(deriv_ctx)
 
+        # On-chain data (exchange flows, mempool, stablecoins, network metrics)
+        if self._last_onchain:
+            onchain_ctx = self._onchain.format_for_context(self._last_onchain)
+            if onchain_ctx:
+                parts.append(onchain_ctx)
+
+        # Macro/economic data (DXY, SPX, yields, FOMC, regime)
+        if self._last_macro:
+            macro_ctx = self._macro.format_for_context(self._last_macro)
+            if macro_ctx:
+                parts.append(macro_ctx)
+
+        # Social sentiment (Reddit, trending coins)
+        if self._last_social:
+            social_ctx = self._social.format_for_context(self._last_social)
+            if social_ctx:
+                parts.append(social_ctx)
+
+        # Liquidation heatmap (long/short ratios, OI, liquidation levels)
+        if self._last_liquidation:
+            liq_ctx = self._liquidation.format_for_context(self._last_liquidation)
+            if liq_ctx:
+                parts.append(liq_ctx)
+
+        # Volume profile / VWAP
+        if self._last_volume_analysis:
+            vol_ctx = self._volume_analyzer.format_for_context(self._last_volume_analysis, price)
+            if vol_ctx:
+                parts.append(vol_ctx)
+
         # Self-alerts (active + recently triggered)
         alert_ctx = self._alert_manager.format_for_context()
         if alert_ctx:
             parts.append(alert_ctx)
+
+        # Backtest results (from previous cycle's [BACKTEST:] tag)
+        if self._pending_backtest_result:
+            parts.append(f"\n## BACKTEST RESULTS")
+            parts.append(self._pending_backtest_result)
+            self._pending_backtest_result = ""  # Clear after showing once
 
         # Pending orders
         pending = self.db.get_pending_orders()
@@ -1122,6 +1238,20 @@ class AIStrategy:
                 except Exception:
                     pass
                 clean_text = _re.sub(r'\[DIRECTIVE:\s*.*?\]', '', clean_text)
+
+            # Parse [BACKTEST: strategy=..., pair=..., interval=..., hours=..., ...]
+            backtest_match = _re.search(r'\[BACKTEST:\s*(.*?)\]', content)
+            if backtest_match:
+                bt_tag = backtest_match.group(0)
+                try:
+                    import asyncio as _aio
+                    bt_result = await run_backtest_from_tag(bt_tag, self._http)
+                    if bt_result:
+                        self._pending_backtest_result = bt_result
+                        logger.info(f"Backtest queued: {bt_tag}")
+                except Exception as e:
+                    logger.warning(f"Backtest failed: {e}")
+                clean_text = _re.sub(r'\[BACKTEST:\s*.*?\]', '', clean_text)
 
             # Clean text = what the operator sees on the dashboard
             decision.reasoning = clean_text.strip()
