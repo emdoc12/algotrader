@@ -307,6 +307,88 @@ class KrakenClient:
             description=result.get("descr", {}).get("order", str(result)),
         )
 
+    async def place_order(
+        self,
+        side: str,
+        volume: Decimal,
+        ordertype: str = "market",
+        price: Decimal = None,
+        price2: Decimal = None,
+        validate: bool = False,
+        oflags: str = "",
+        timeinforce: str = "",
+        close_ordertype: str = "",
+        close_price: Decimal = None,
+        close_price2: Decimal = None,
+    ) -> OrderResult:
+        """Place any supported Kraken order type.
+
+        Supported ordertypes:
+            market, limit, stop-loss, take-profit,
+            stop-loss-limit, take-profit-limit,
+            trailing-stop, trailing-stop-limit, iceberg
+
+        Args:
+            side: "buy" or "sell"
+            volume: order volume
+            ordertype: Kraken order type string
+            price: primary price (limit price, stop trigger, or trailing offset)
+            price2: secondary price (limit price for stop-limit / tp-limit orders)
+            validate: if True, validate only without placing
+            oflags: order flags (comma-separated: post, fcib, fciq, nompp, viqc)
+            timeinforce: GTC, IOC, GTD
+            close_ordertype: conditional close order type
+            close_price: conditional close price
+            close_price2: conditional close secondary price
+        """
+        self._get_spot_client()
+        params = {
+            "ordertype": ordertype,
+            "type": side,
+            "pair": self.symbol,
+            "volume": str(volume),
+            "validate": validate,
+        }
+        if price is not None:
+            params["price"] = str(price)
+        if price2 is not None:
+            params["price2"] = str(price2)
+        if oflags:
+            params["oflags"] = oflags
+        if timeinforce:
+            params["timeinforce"] = timeinforce
+        if close_ordertype:
+            params["close"] = {
+                "ordertype": close_ordertype,
+            }
+            if close_price is not None:
+                params["close"]["price"] = str(close_price)
+            if close_price2 is not None:
+                params["close"]["price2"] = str(close_price2)
+
+        logger.info(
+            f"Placing {'VALIDATED ' if validate else ''}{ordertype} {side}: "
+            f"{volume} {self.symbol}"
+            f"{f' @ {price}' if price else ''}"
+            f"{f' / {price2}' if price2 else ''}"
+        )
+        result = await asyncio.to_thread(self._trade_client.create_order, **params)
+
+        if validate:
+            return OrderResult(
+                order_id="VALIDATED",
+                status="validated",
+                description=result.get("descr", {}).get("order", str(result)),
+            )
+
+        txids = result.get("txid", [])
+        order_id = txids[0] if txids else "UNKNOWN"
+        return OrderResult(
+            order_id=order_id,
+            status="pending",
+            description=result.get("descr", {}).get("order", str(result)),
+        )
+
     # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------

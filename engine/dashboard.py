@@ -31,7 +31,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AlgoTrader v2.10.3</title>
+<title>AlgoTrader v2.11.0</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4" async></script>
 <style>
   :root {
@@ -147,7 +147,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="header">
-  <h1>AlgoTrader v2.10.3</h1>
+  <h1>AlgoTrader v2.11.0</h1>
   <div class="badges">
     <span class="badge badge-ai" id="aiLabel">AI</span>
     <div class="toggle-wrap">
@@ -207,6 +207,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <thead><tr><th>Coin</th><th>Qty</th><th>Avg Cost</th><th>Cost Basis</th><th>Value</th><th>Unrealized P&amp;L</th></tr></thead>
         <tbody id="holdingsBody"><tr><td colspan="6" style="color:var(--muted);text-align:center">No holdings</td></tr></tbody>
       </table>
+    </div>
+    <div id="pendingOrdersWrap" style="display:none;margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
+      <h2>Pending Orders</h2>
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr><th>ID</th><th>Type</th><th>Side</th><th>Coin</th><th>Qty</th><th>Price</th><th>Age</th><th>Expires</th></tr></thead>
+          <tbody id="pendingOrdersBody"></tbody>
+        </table>
+      </div>
     </div>
   </div>
 </div>
@@ -481,6 +490,36 @@ async function fetchData() {
       holdingsBody.innerHTML = rows;
     } else {
       holdingsBody.innerHTML = '<tr><td colspan="6" style="color:var(--muted);text-align:center">No holdings</td></tr>';
+    }
+
+    // Pending orders
+    const pendingWrap = document.getElementById('pendingOrdersWrap');
+    const pendingBody = document.getElementById('pendingOrdersBody');
+    const pendingOrders = d.pending_orders || [];
+    if (pendingOrders.length > 0) {
+      pendingWrap.style.display = 'block';
+      pendingBody.innerHTML = pendingOrders.map(function(o) {
+        const coin = (o.symbol || 'BTC/USD').replace('/USD', '');
+        const sideClass = o.side === 'buy' ? 'positive' : 'negative';
+        const ageHrs = ((Date.now() / 1000) - o.created_at) / 3600;
+        let expStr = '--';
+        if (o.expires_at > 0) {
+          const remHrs = (o.expires_at - Date.now() / 1000) / 3600;
+          expStr = remHrs > 0 ? remHrs.toFixed(1) + 'h' : 'Expired';
+        }
+        return '<tr>'
+          + '<td>#' + o.id + '</td>'
+          + '<td style="text-transform:uppercase">' + (o.order_type || 'limit') + '</td>'
+          + '<td class="' + sideClass + '">' + o.side.toUpperCase() + '</td>'
+          + '<td style="font-weight:600">' + coin + '</td>'
+          + '<td>' + o.quantity.toFixed(6) + '</td>'
+          + '<td>$' + Number(o.price).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}) + '</td>'
+          + '<td>' + ageHrs.toFixed(1) + 'h</td>'
+          + '<td>' + expStr + '</td>'
+          + '</tr>';
+      }).join('');
+    } else {
+      pendingWrap.style.display = 'none';
     }
 
     // Trades (last 3 days with P&L)
@@ -892,6 +931,9 @@ class Dashboard:
         # Equity history
         equity_history = self.db.get_equity_history(limit=500)
 
+        # Pending orders
+        pending_orders = self.db.get_pending_orders()
+
         data = {
             "mode": self.config.mode if self.config else "paper",
             "price": self._last_price,
@@ -900,6 +942,7 @@ class Dashboard:
             "starting_capital": starting_capital,
             "position": position,
             "positions": positions_data,
+            "pending_orders": pending_orders,
             "trades": trades_data,
             "equity_history": equity_history,
             "has_kraken_keys": bool(self.config and self.config.kraken.api_key),

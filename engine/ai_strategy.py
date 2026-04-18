@@ -86,11 +86,38 @@ TRADE TAGS (one per response max):
 [BUY: symbol=BTC/USD, qty=0.001, stop=79000, target=88000, trail=2.0, confidence=0.8, strategy=accumulation]
 [SELL: symbol=SOL/USD, qty=0.5, confidence=0.75, strategy=profit_taking]
 
+ADVANCED ORDER TAGS — place orders at specific prices/triggers:
+[LIMIT_BUY: symbol=ETH/USD, qty=0.5, price=1800, stop=1700, target=2200, confidence=0.75, strategy=accumulation, expires=48]
+[LIMIT_SELL: symbol=BTC/USD, qty=0.01, price=90000, confidence=0.7, strategy=profit_taking, expires=24]
+[STOP_LOSS: symbol=BTC/USD, qty=0.05, trigger=75000, confidence=0.9, strategy=stop_loss]
+[STOP_LOSS_LIMIT: symbol=BTC/USD, qty=0.05, trigger=75000, price=74800, confidence=0.9, strategy=stop_loss]
+[TAKE_PROFIT: symbol=SOL/USD, qty=2.0, trigger=200, confidence=0.8, strategy=profit_taking]
+[TAKE_PROFIT_LIMIT: symbol=SOL/USD, qty=2.0, trigger=200, price=199, confidence=0.8, strategy=profit_taking]
+[TRAILING_STOP: symbol=BTC/USD, qty=0.05, offset=1500, confidence=0.8, strategy=trend_following]
+[TRAILING_STOP_LIMIT: symbol=BTC/USD, qty=0.05, offset=1500, price_offset=200, confidence=0.8, strategy=trend_following]
+[ICEBERG: symbol=BTC/USD, qty=0.1, price=77000, visible=0.02, confidence=0.7, strategy=accumulation]
+
+CANCEL PENDING ORDERS:
+[CANCEL_ORDER: 3, 7]
+
 - symbol MUST be one of the 10 tradeable pairs
 - qty = amount of the coin (not USD)
 - stop/target/trail are optional (trail = trailing stop %, 0 = fixed stop)
 - confidence must be >= 0.6 to execute
 - strategy: momentum, mean_reversion, trend_following, sentiment, accumulation, scaling, profit_taking, stop_loss
+- expires = hours until order expires (0 = no expiry, default)
+- Order type guide:
+  * LIMIT: set exact entry/exit price. Buys fill at or below, sells fill at or above
+  * STOP_LOSS: market sell when price drops to trigger (protects downside)
+  * STOP_LOSS_LIMIT: same but places a limit order at price when trigger is hit
+  * TAKE_PROFIT: market sell when price rises to trigger (locks in gains)
+  * TAKE_PROFIT_LIMIT: same but places limit at price when trigger is hit
+  * TRAILING_STOP: stop that follows price up by offset amount in USD
+  * TRAILING_STOP_LIMIT: trailing stop that places limit order when triggered
+  * ICEBERG: large limit order split into smaller visible chunks
+- Use limit/advanced orders when you see clear support/resistance levels rather than chasing market price
+- Use trailing stops to ride trends while protecting gains
+- Full Kraken order type docs: https://www.kraken.com/learn/trading/trade-orders
 
 JOURNAL TAG — save a lesson or observation to your persistent memory:
 [JOURNAL: category=lesson | Bought SOL too early, should have waited for 4h confirmation next time]
@@ -156,6 +183,13 @@ class AIDecision:
     action: str = "HOLD"
     symbol: str = "BTC/USD"
     quantity: float = 0.0
+    order_type: str = "market"  # market, limit, stop-loss, stop-loss-limit, take-profit, take-profit-limit, trailing-stop, trailing-stop-limit, iceberg
+    limit_price: float = 0.0   # limit price (for limit, stop-limit, tp-limit, iceberg)
+    trigger_price: float = 0.0 # trigger/stop price (for stop-loss, take-profit, trailing)
+    price2: float = 0.0        # secondary price (price_offset for trailing-stop-limit)
+    offset: float = 0.0        # trailing offset in USD
+    visible_size: float = 0.0  # visible portion for iceberg orders
+    expires_hours: float = 0.0 # order expiry (0 = no expiry)
     stop_loss: float = 0.0
     take_profit: float = 0.0
     trailing_stop_pct: float = 0.0
@@ -438,7 +472,11 @@ class AIStrategy:
 
         action_taken = "hold"
         if decision.confidence >= 0.6:
-            if decision.action == "BUY":
+            # Advanced order types → save as pending order (checked each scan)
+            if decision.order_type != "market":
+                action_taken = await self._execute_advanced_order(decision, target_price)
+
+            elif decision.action == "BUY":
                 if position is not None:
                     action_taken = await self._execute_scale_in(decision, position, target_price)
                 else:
@@ -460,6 +498,9 @@ class AIStrategy:
         elif decision.action != "HOLD":
             logger.info(f"AI suggested {decision.action} {target_symbol} but confidence too low ({decision.confidence:.2f})")
             action_taken = f"low_confidence_{decision.action.lower()}"
+
+        # --- Check pending orders for fills ---
+        await self._check_pending_orders(current_price, market_overview)
 
         # --- 9. Check stop-loss / take-profit on ALL open positions ---
         for pos in positions:
@@ -600,6 +641,24 @@ class AIStrategy:
         alert_ctx = self._alert_manager.format_for_context()
         if alert_ctx:
             parts.append(alert_ctx)
+
+        # Pending orders
+        pending = self.db.get_pending_orders()
+        if pending:
+            parts.append(f"\n## PENDING ORDERS ({len(pending)})")
+            for o in pending:
+                base = SYMBOL_MAP.get(o["symbol"], {}).get("base", "???")
+                age_hrs = (time.time() - o["created_at"]) / 3600
+                exp_str = ""
+                if o["expires_at"] > 0:
+                    remaining = (o["expires_at"] - time.time()) / 3600
+                    exp_str = f" | Expires in {remaining:.1f}h" if remaining > 0 else " | EXPIRED"
+                parts.append(
+                    f"  #{o['id']}: {o['order_type'].upper()} {o['side'].upper()} "
+                    f"{o['quantity']:.6f} {base} @ ${o['price']:,.2f} "
+                    f"(placed {age_hrs:.1f}h ago{exp_str})"
+                )
+            parts.append("Use [CANCEL_ORDER: id] to cancel any of these.")
 
         # Sentiment
         if sentiment:
@@ -870,14 +929,36 @@ class AIStrategy:
             # The conversational text (minus tags) becomes the reasoning shown on dashboard
             clean_text = content
 
-            # Parse [BUY: ...] or [SELL: ...]
+            # Parse all trade/order tags
+            _ORDER_TAGS = (
+                "LIMIT_BUY|LIMIT_SELL|STOP_LOSS_LIMIT|STOP_LOSS|"
+                "TAKE_PROFIT_LIMIT|TAKE_PROFIT|TRAILING_STOP_LIMIT|TRAILING_STOP|"
+                "ICEBERG|BUY|SELL"
+            )
             trade_match = _re.search(
-                r'\[(BUY|SELL):\s*(.*?)\]', content, _re.IGNORECASE
+                r'\[(' + _ORDER_TAGS + r'):\s*(.*?)\]', content, _re.IGNORECASE
             )
             if trade_match:
-                action = trade_match.group(1).upper()
+                raw_action = trade_match.group(1).upper()
                 params_str = trade_match.group(2)
+
+                # Map tag to action (BUY/SELL) and order_type
+                _ORDER_TYPE_MAP = {
+                    "BUY": ("BUY", "market"),
+                    "SELL": ("SELL", "market"),
+                    "LIMIT_BUY": ("BUY", "limit"),
+                    "LIMIT_SELL": ("SELL", "limit"),
+                    "STOP_LOSS": ("SELL", "stop-loss"),
+                    "STOP_LOSS_LIMIT": ("SELL", "stop-loss-limit"),
+                    "TAKE_PROFIT": ("SELL", "take-profit"),
+                    "TAKE_PROFIT_LIMIT": ("SELL", "take-profit-limit"),
+                    "TRAILING_STOP": ("SELL", "trailing-stop"),
+                    "TRAILING_STOP_LIMIT": ("SELL", "trailing-stop-limit"),
+                    "ICEBERG": ("BUY", "iceberg"),
+                }
+                action, order_type = _ORDER_TYPE_MAP.get(raw_action, ("HOLD", "market"))
                 decision.action = action
+                decision.order_type = order_type
 
                 # Parse key=value pairs from the tag
                 params = {}
@@ -901,8 +982,29 @@ class AIStrategy:
                 decision.trailing_stop_pct = float(params.get("trail", 0))
                 decision.confidence = float(params.get("confidence", 0))
                 decision.strategy_used = params.get("strategy", "")
+                decision.expires_hours = float(params.get("expires", 0))
 
-                clean_text = _re.sub(r'\[(BUY|SELL):\s*.*?\]', '', clean_text, flags=_re.IGNORECASE)
+                # Price fields for advanced orders
+                decision.limit_price = float(params.get("price", 0))
+                decision.trigger_price = float(params.get("trigger", 0))
+                decision.price2 = float(params.get("price_offset", 0))
+                decision.visible_size = float(params.get("visible", 0))
+                decision.offset = float(params.get("offset", 0))
+
+                clean_text = _re.sub(r'\[(' + _ORDER_TAGS + r'):\s*.*?\]', '', clean_text, flags=_re.IGNORECASE)
+
+            # Parse [CANCEL_ORDER: id, id, ...]
+            cancel_order_match = _re.search(r'\[CANCEL_ORDER:\s*([\d,\s]+)\]', content)
+            if cancel_order_match:
+                for oid in cancel_order_match.group(1).split(","):
+                    oid = oid.strip()
+                    if oid.isdigit():
+                        try:
+                            self.db.cancel_pending_order(int(oid))
+                            logger.info(f"Pending order #{oid} cancelled by AI")
+                        except Exception as e:
+                            logger.warning(f"Failed to cancel order #{oid}: {e}")
+                clean_text = _re.sub(r'\[CANCEL_ORDER:\s*[\d,\s]+\]', '', clean_text)
 
             # Parse [JOURNAL: category=... | text]
             journal_match = _re.search(r'\[JOURNAL:\s*(.*?)\]', content)
@@ -1357,6 +1459,283 @@ class AIStrategy:
         except Exception as e:
             logger.error(f"Sell execution failed for {decision.symbol}: {e}")
             return f"error: {e}"
+
+    async def _execute_advanced_order(self, decision: AIDecision, current_price: float) -> str:
+        """Place an advanced (non-market) order — either as pending in paper mode, or on Kraken in live."""
+        sym_info = SYMBOL_MAP.get(decision.symbol, SYMBOL_MAP["BTC/USD"])
+        base_coin = sym_info["base"]
+        order_type = decision.order_type
+
+        if self.is_paper:
+            # In paper mode, save to pending_orders and check each scan
+            oid = self.db.create_pending_order(
+                symbol=decision.symbol,
+                side=decision.action.lower(),
+                price=decision.limit_price or decision.trigger_price or decision.offset,
+                quantity=decision.quantity,
+                stop_loss=decision.stop_loss,
+                take_profit=decision.take_profit,
+                trailing_stop_pct=decision.trailing_stop_pct,
+                strategy=decision.strategy_used,
+                reasoning=decision.reasoning[:200],
+                confidence=decision.confidence,
+                expires_hours=decision.expires_hours,
+            )
+            # Store the full order_type so we know how to check fills
+            self.db.conn.execute(
+                "UPDATE pending_orders SET order_type=? WHERE id=?",
+                (order_type, oid),
+            )
+            self.db.conn.commit()
+
+            price_label = decision.limit_price or decision.trigger_price or decision.offset
+            logger.info(
+                f"PENDING {order_type.upper()} {decision.action} {decision.symbol}: "
+                f"{decision.quantity:.6f} {base_coin} @ ${price_label:,.2f} | Order #{oid}"
+            )
+            self.db.log("ORDER",
+                f"Pending {order_type} {decision.action.lower()} {decision.symbol}: "
+                f"{decision.quantity:.6f} @ ${price_label:,.2f} (#{oid})")
+
+            # Discord notification
+            await self.discord.send_trade_alert(
+                side=f"pending_{decision.action.lower()}",
+                symbol=decision.symbol,
+                quantity=decision.quantity,
+                price=price_label,
+                value=price_label * decision.quantity,
+                fee=0,
+                strategy=f"{order_type}_{decision.strategy_used}",
+                reasoning=f"Limit order placed: {decision.reasoning[:150]}",
+                confidence=decision.confidence,
+            )
+
+            return f"pending_{order_type}_{decision.action.lower()}"
+        else:
+            # Live mode — place on Kraken using the universal order method
+            try:
+                orig_symbol = self.kraken.symbol
+                self.kraken.symbol = sym_info["kraken"]
+
+                # Map our order params to Kraken's API params
+                price = None
+                price2 = None
+                oflags = ""
+
+                if order_type == "limit":
+                    price = Decimal(str(decision.limit_price))
+                elif order_type == "stop-loss":
+                    price = Decimal(str(decision.trigger_price))
+                elif order_type == "stop-loss-limit":
+                    price = Decimal(str(decision.trigger_price))
+                    price2 = Decimal(str(decision.limit_price))
+                elif order_type == "take-profit":
+                    price = Decimal(str(decision.trigger_price))
+                elif order_type == "take-profit-limit":
+                    price = Decimal(str(decision.trigger_price))
+                    price2 = Decimal(str(decision.limit_price))
+                elif order_type == "trailing-stop":
+                    price = Decimal(str(decision.offset))
+                elif order_type == "trailing-stop-limit":
+                    price = Decimal(str(decision.offset))
+                    price2 = Decimal(str(decision.price2))
+                elif order_type == "iceberg":
+                    price = Decimal(str(decision.limit_price))
+                    oflags = f"viqc" if decision.visible_size else ""
+
+                result = await self.kraken.place_order(
+                    side=decision.action.lower(),
+                    volume=Decimal(str(round(decision.quantity, 8))),
+                    ordertype=order_type,
+                    price=price,
+                    price2=price2,
+                    oflags=oflags,
+                    validate=(self.config.mode != "live"),
+                )
+                self.kraken.symbol = orig_symbol
+
+                # Also save to pending_orders for tracking
+                oid = self.db.create_pending_order(
+                    symbol=decision.symbol,
+                    side=decision.action.lower(),
+                    price=float(price) if price else 0,
+                    quantity=decision.quantity,
+                    stop_loss=decision.stop_loss,
+                    take_profit=decision.take_profit,
+                    strategy=decision.strategy_used,
+                    reasoning=decision.reasoning[:200],
+                    confidence=decision.confidence,
+                    expires_hours=decision.expires_hours,
+                )
+                self.db.conn.execute(
+                    "UPDATE pending_orders SET order_type=? WHERE id=?",
+                    (order_type, oid),
+                )
+                self.db.conn.commit()
+
+                logger.info(
+                    f"LIVE {order_type.upper()} {decision.action} {decision.symbol}: "
+                    f"{decision.quantity:.6f} | Kraken order: {result.order_id}"
+                )
+                return f"{order_type}_{decision.action.lower()}"
+
+            except Exception as e:
+                logger.error(f"Advanced order failed for {decision.symbol}: {e}")
+                self.kraken.symbol = orig_symbol
+                return f"error: {e}"
+
+    async def _check_pending_orders(self, btc_price: float, market_overview=None):
+        """Check all pending (paper) orders for fill conditions each scan cycle."""
+        if not self.is_paper:
+            return  # live orders are on Kraken's matching engine
+
+        # Expire old orders first
+        self.db.expire_pending_orders()
+
+        pending = self.db.get_pending_orders()
+        if not pending:
+            return
+
+        # Build price map for all coins
+        coin_prices = {"BTC": btc_price}
+        if market_overview and hasattr(market_overview, 'coin_snapshots'):
+            for snap in market_overview.coin_snapshots:
+                coin_prices[snap.symbol] = snap.price
+
+        for order in pending:
+            symbol = order["symbol"]
+            base_coin = SYMBOL_MAP.get(symbol, {}).get("base", "BTC")
+            current_price = coin_prices.get(base_coin, 0)
+            if current_price <= 0:
+                continue
+
+            order_type = order["order_type"]
+            side = order["side"]
+            order_price = order["price"]
+            filled = False
+
+            # Check fill conditions based on order type
+            if order_type == "limit":
+                if side == "buy" and current_price <= order_price:
+                    filled = True
+                elif side == "sell" and current_price >= order_price:
+                    filled = True
+
+            elif order_type == "stop-loss":
+                if current_price <= order_price:
+                    filled = True
+
+            elif order_type == "stop-loss-limit":
+                # Trigger at stop price, but only fill at limit (we simplify: fill at trigger)
+                if current_price <= order_price:
+                    filled = True
+
+            elif order_type == "take-profit":
+                if current_price >= order_price:
+                    filled = True
+
+            elif order_type == "take-profit-limit":
+                if current_price >= order_price:
+                    filled = True
+
+            elif order_type in ("trailing-stop", "trailing-stop-limit"):
+                # Track highest price, trigger when price drops by offset from peak
+                trail_key = f"pending_{order['id']}"
+                trail_data = self._trailing_stops.get(trail_key, {"highest_price": current_price})
+                trail_data["highest_price"] = max(trail_data["highest_price"], current_price)
+                self._trailing_stops[trail_key] = trail_data
+                trigger_price = trail_data["highest_price"] - order_price  # offset in USD
+                if current_price <= trigger_price:
+                    filled = True
+
+            elif order_type == "iceberg":
+                # Treat like limit for paper trading
+                if side == "buy" and current_price <= order_price:
+                    filled = True
+                elif side == "sell" and current_price >= order_price:
+                    filled = True
+
+            if filled:
+                await self._fill_pending_order(order, current_price)
+
+    async def _fill_pending_order(self, order: dict, fill_price: float):
+        """Execute a pending order that has been triggered."""
+        symbol = order["symbol"]
+        side = order["side"]
+        quantity = order["quantity"]
+        sym_info = SYMBOL_MAP.get(symbol, SYMBOL_MAP["BTC/USD"])
+        base_coin = sym_info["base"]
+
+        logger.info(
+            f"FILLING pending {order['order_type']} {side} {symbol}: "
+            f"{quantity:.6f} {base_coin} @ ${fill_price:,.2f} (order #{order['id']})"
+        )
+
+        try:
+            if side == "buy":
+                if self.paper_trader:
+                    self.paper_trader.execute_buy(
+                        price=fill_price, quantity=quantity,
+                        symbol=base_coin, display_symbol=symbol,
+                        strategy=f"filled_{order['order_type']}_{order.get('strategy', '')}",
+                    )
+                # Save position
+                position = Position(
+                    symbol=symbol, side="long", entry_price=fill_price,
+                    quantity=quantity, entry_time=time.time(),
+                    stop_loss=order.get("stop_loss", 0) or fill_price * 0.95,
+                    take_profit=order.get("take_profit", 0) or fill_price * 1.10,
+                )
+                self.db.save_position(position)
+
+            elif side == "sell":
+                if self.paper_trader:
+                    self.paper_trader.execute_sell(
+                        price=fill_price, quantity=quantity,
+                        symbol=base_coin, display_symbol=symbol,
+                        strategy=f"filled_{order['order_type']}_{order.get('strategy', '')}",
+                    )
+                # Close position
+                position = self.db.get_open_position(symbol=symbol)
+                if position:
+                    remaining = position.quantity - quantity
+                    min_size = MIN_ORDER_SIZE.get(base_coin, 0.0001)
+                    if remaining >= min_size:
+                        position.quantity = remaining
+                        self.db.save_position(position)
+                    else:
+                        self.db.close_all_positions_for_symbol(symbol)
+
+            # Mark order as filled
+            self.db.fill_pending_order(order["id"])
+
+            # Discord notification
+            pnl = 0
+            position = self.db.get_open_position(symbol=symbol)
+            if position and side == "sell":
+                pnl = (fill_price - position.entry_price) * quantity
+
+            bal = self.paper_trader.get_balance() if self.paper_trader else None
+            await self.discord.send_trade_alert(
+                side=side, symbol=symbol, quantity=quantity,
+                price=fill_price, value=fill_price * quantity,
+                fee=fill_price * quantity * 0.0026,
+                strategy=f"filled_{order['order_type']}",
+                reasoning=f"Pending {order['order_type']} order #{order['id']} filled",
+                confidence=order.get("confidence", 0),
+                pnl=pnl,
+                cash_usd=bal.cash_usd if bal else 0,
+                total_equity=bal.total_equity if bal else 0,
+                holdings=bal.holdings if bal else None,
+            )
+
+            self.db.log("TRADE",
+                f"FILLED {order['order_type']} {side} {symbol}: "
+                f"{quantity:.6f} @ ${fill_price:,.2f} (order #{order['id']})")
+
+        except Exception as e:
+            logger.error(f"Failed to fill pending order #{order['id']}: {e}")
+            self.db.log("ERROR", f"Pending order fill failed: {e}")
 
     async def generate_weekly_digest(self):
         """Generate and send the Monday morning weekly digest via Discord."""

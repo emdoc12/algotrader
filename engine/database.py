@@ -192,6 +192,25 @@ class Database:
                 triggered_at REAL DEFAULT 0,
                 active INTEGER DEFAULT 1
             );
+
+            CREATE TABLE IF NOT EXISTS pending_orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                order_type TEXT NOT NULL DEFAULT 'limit',
+                price REAL NOT NULL,
+                quantity REAL NOT NULL,
+                stop_loss REAL DEFAULT 0,
+                take_profit REAL DEFAULT 0,
+                trailing_stop_pct REAL DEFAULT 0,
+                strategy TEXT DEFAULT '',
+                reasoning TEXT DEFAULT '',
+                confidence REAL DEFAULT 0,
+                created_at REAL NOT NULL,
+                expires_at REAL DEFAULT 0,
+                status TEXT DEFAULT 'open',
+                filled_at REAL DEFAULT 0
+            );
         """)
         # Add symbol column to trades if not present (migration)
         try:
@@ -362,6 +381,77 @@ class Database:
     def close_all_positions_for_symbol(self, symbol: str):
         """Remove ALL position rows for a symbol (cleanup after full sell)."""
         self.conn.execute("DELETE FROM positions WHERE symbol=?", (symbol,))
+        self.conn.commit()
+
+    # ------------------------------------------------------------------
+    # Pending Orders (limit orders)
+    # ------------------------------------------------------------------
+
+    def create_pending_order(self, symbol: str, side: str, price: float,
+                             quantity: float, stop_loss: float = 0,
+                             take_profit: float = 0, trailing_stop_pct: float = 0,
+                             strategy: str = "", reasoning: str = "",
+                             confidence: float = 0, expires_hours: float = 0) -> int:
+        """Create a pending limit order. Returns the order ID."""
+        import time as _time
+        now = _time.time()
+        expires_at = now + (expires_hours * 3600) if expires_hours > 0 else 0
+        cursor = self.conn.execute(
+            """INSERT INTO pending_orders
+               (symbol, side, order_type, price, quantity, stop_loss, take_profit,
+                trailing_stop_pct, strategy, reasoning, confidence, created_at, expires_at, status)
+               VALUES (?, ?, 'limit', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')""",
+            (symbol, side, price, quantity, stop_loss, take_profit,
+             trailing_stop_pct, strategy, reasoning, confidence, now, expires_at),
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def get_pending_orders(self, symbol: str = None) -> list[dict]:
+        """Get all open pending orders, optionally filtered by symbol."""
+        if symbol:
+            rows = self.conn.execute(
+                "SELECT * FROM pending_orders WHERE status='open' AND symbol=? ORDER BY created_at ASC",
+                (symbol,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM pending_orders WHERE status='open' ORDER BY created_at ASC"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def fill_pending_order(self, order_id: int):
+        """Mark a pending order as filled."""
+        import time as _time
+        self.conn.execute(
+            "UPDATE pending_orders SET status='filled', filled_at=? WHERE id=?",
+            (_time.time(), order_id),
+        )
+        self.conn.commit()
+
+    def cancel_pending_order(self, order_id: int):
+        """Cancel a pending order."""
+        self.conn.execute(
+            "UPDATE pending_orders SET status='cancelled' WHERE id=?",
+            (order_id,),
+        )
+        self.conn.commit()
+
+    def cancel_all_pending_for_symbol(self, symbol: str):
+        """Cancel all open pending orders for a symbol."""
+        self.conn.execute(
+            "UPDATE pending_orders SET status='cancelled' WHERE symbol=? AND status='open'",
+            (symbol,),
+        )
+        self.conn.commit()
+
+    def expire_pending_orders(self):
+        """Cancel orders past their expiry time. Call each scan cycle."""
+        import time as _time
+        self.conn.execute(
+            "UPDATE pending_orders SET status='expired' WHERE status='open' AND expires_at > 0 AND expires_at < ?",
+            (_time.time(),),
+        )
         self.conn.commit()
 
     # ------------------------------------------------------------------
