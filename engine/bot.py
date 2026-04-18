@@ -123,10 +123,16 @@ class AlgoTraderBot:
             with open(version_path) as f:
                 return f.read().strip()
         except Exception:
-            return "3.0.0"
+            return "4.0.0"
 
     async def start(self):
-        """Start the bot and run until shutdown."""
+        """Start the bot and run until shutdown.
+
+        v4.0 Dual-Loop Architecture:
+        - PM Loop (slow): Opus runs every pm_interval_seconds (default 2h)
+        - Agent Loop (fast): Haiku agents run every agent_interval_seconds (default 5m)
+        - Wake System: Agents can wake Opus early for emergencies
+        """
         self.running = True
         self._print_banner()
 
@@ -135,7 +141,7 @@ class AlgoTraderBot:
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, self._request_shutdown)
 
-        self.db.log("INFO", f"Bot started in {self.config.mode.upper()} mode")
+        self.db.log("INFO", f"Bot started in {self.config.mode.upper()} mode (v4.0 multi-agent)")
 
         # Start web dashboard
         dashboard_port = int(os.getenv("DASHBOARD_PORT", "3737"))
@@ -148,90 +154,135 @@ class AlgoTraderBot:
         # Print initial state
         await self._print_status()
 
-        # Main loop
-        scan_count = 0
+        # v4.0: Dual-loop timing
+        pm_interval = self.config.agents.pm_interval_seconds
+        agent_interval = self.config.agents.agent_interval_seconds
+        last_pm_time = 0  # Force immediate first PM session
+        agent_cycle = 0
+        pm_cycle = 0
+
+        logger.info(f"v4.0 Multi-Agent Active: PM every {pm_interval}s, Agents every {agent_interval}s")
+
         while not self._shutdown_event.is_set():
-            scan_count += 1
-            try:
-                result = await self.strategy.run_scan()
-                self._log_scan_result(scan_count, result)
-                # Feed latest data to dashboard
-                if "price" in result:
-                    signals = result.get("signals")
-                    signals_dict = {}
-                    if signals and hasattr(signals, 'ema'):
-                        signals_dict = {
-                            "recommendation": signals.recommendation,
-                            "composite": signals.composite_score,
-                            "ema_fast": round(signals.ema.fast_ema, 2),
-                            "ema_slow": round(signals.ema.slow_ema, 2),
-                            "ema_crossover": signals.ema.crossover,
-                            "rsi": round(signals.rsi.rsi, 2),
-                            "rsi_signal": signals.rsi.signal,
-                            "bb_position": round(signals.bollinger.price_position, 4),
-                        }
-                    # Add AI decision info if available
-                    ai_decision = result.get("ai_decision")
-                    if ai_decision:
-                        signals_dict["ai_action"] = ai_decision.action
-                        signals_dict["ai_symbol"] = getattr(ai_decision, 'symbol', 'BTC/USD')
-                        signals_dict["ai_confidence"] = ai_decision.confidence
-                        signals_dict["ai_reasoning"] = ai_decision.reasoning
-                        signals_dict["ai_outlook"] = ai_decision.market_outlook
-                        signals_dict["ai_strategy"] = ai_decision.strategy_used
-                        signals_dict["recommendation"] = ai_decision.action
-                        signals_dict["composite"] = ai_decision.confidence
+            now = time.time()
+            agent_cycle += 1
 
-                    # Add sentiment if available
-                    sentiment = result.get("sentiment")
-                    if sentiment and hasattr(sentiment, 'fear_greed_value'):
-                        signals_dict["fear_greed"] = sentiment.fear_greed_value
-                        signals_dict["fear_greed_label"] = sentiment.fear_greed_label
-                        signals_dict["news_sentiment"] = sentiment.news_sentiment_summary
+            # === Check if Opus PM session is due ===
+            time_since_pm = now - last_pm_time
+            wake_event = None
 
-                    # Add market overview if available
-                    mkt = result.get("market_overview")
-                    if mkt and hasattr(mkt, 'coin_snapshots'):
-                        signals_dict["market_momentum"] = mkt.market_momentum
-                        signals_dict["sector_rotation"] = mkt.sector_rotation_signal
-                        signals_dict["top_movers"] = ", ".join(mkt.top_movers[:3]) if mkt.top_movers else ""
-                        signals_dict["coins_scanned"] = len(mkt.coin_snapshots)
-                        signals_dict["coin_data"] = [
-                            {
-                                "symbol": c.symbol,
-                                "price": c.price,
-                                "change_1h": c.change_1h,
-                                "change_24h": c.change_24h,
-                                "rsi": c.rsi,
-                                "rsi_signal": c.rsi_signal,
-                                "momentum": c.momentum_score,
-                                "ema_crossover": c.ema_crossover,
-                                "bb_position": c.bb_position,
-                                "composite_score": c.composite_score,
-                                "recommendation": c.recommendation,
-                            }
-                            for c in mkt.coin_snapshots[:10]
-                        ]
+            # Check for emergency wake-up from agents
+            if self._using_ai and hasattr(self.strategy, '_agent_runner'):
+                wake_event = self.strategy._agent_runner.has_pending_wake()
 
-                    self.dashboard.update_signals(result["price"], signals_dict)
-            except Exception as e:
-                logger.error(f"Scan #{scan_count} failed: {e}")
-                self.db.log("ERROR", f"Scan failed: {e}")
+            run_pm = (time_since_pm >= pm_interval) or (wake_event is not None)
 
-            # Monday morning weekly digest check
-            await self._check_weekly_digest()
+            if run_pm and self._using_ai:
+                pm_cycle += 1
+                trigger = "scheduled" if not wake_event else f"wake: {wake_event.get('reason', 'unknown')[:60]}"
+                logger.info(f"═══ PM Session #{pm_cycle} ({trigger}) ═══")
 
-            # Wait for next scan or shutdown
+                try:
+                    result = await self.strategy.run_scan()
+                    self._log_scan_result(pm_cycle, result)
+                    self._update_dashboard(result)
+                except Exception as e:
+                    logger.error(f"PM Session #{pm_cycle} failed: {e}")
+                    self.db.log("ERROR", f"PM session failed: {e}")
+
+                last_pm_time = time.time()
+
+                # Monday morning weekly digest check
+                await self._check_weekly_digest()
+
+            elif not self._using_ai:
+                # Non-AI mode: run indicator strategy on original interval
+                try:
+                    result = await self.strategy.run_scan()
+                    self._log_scan_result(agent_cycle, result)
+                    self._update_dashboard(result)
+                except Exception as e:
+                    logger.error(f"Scan #{agent_cycle} failed: {e}")
+
+            # === Log agent cycle ===
+            if agent_cycle % 12 == 0:  # Log every ~hour
+                logger.info(
+                    f"Agent desk: cycle #{agent_cycle} | "
+                    f"Next PM in {max(0, pm_interval - (time.time() - last_pm_time)):.0f}s"
+                )
+
+            # Wait for next agent cycle or shutdown
             try:
                 await asyncio.wait_for(
                     self._shutdown_event.wait(),
-                    timeout=self.config.strategy.scan_interval_seconds,
+                    timeout=agent_interval,
                 )
             except asyncio.TimeoutError:
-                pass  # Normal — timeout means it's time for the next scan
+                pass
 
         # Shutdown
         await self._shutdown()
+
+    def _update_dashboard(self, result: dict):
+        """Feed scan result data to the dashboard."""
+        if "price" not in result:
+            return
+
+        signals = result.get("signals")
+        signals_dict = {}
+        if signals and hasattr(signals, 'ema'):
+            signals_dict = {
+                "recommendation": signals.recommendation,
+                "composite": signals.composite_score,
+                "ema_fast": round(signals.ema.fast_ema, 2),
+                "ema_slow": round(signals.ema.slow_ema, 2),
+                "ema_crossover": signals.ema.crossover,
+                "rsi": round(signals.rsi.rsi, 2),
+                "rsi_signal": signals.rsi.signal,
+                "bb_position": round(signals.bollinger.price_position, 4),
+            }
+
+        ai_decision = result.get("ai_decision")
+        if ai_decision:
+            signals_dict["ai_action"] = ai_decision.action
+            signals_dict["ai_symbol"] = getattr(ai_decision, 'symbol', 'BTC/USD')
+            signals_dict["ai_confidence"] = ai_decision.confidence
+            signals_dict["ai_reasoning"] = ai_decision.reasoning
+            signals_dict["ai_outlook"] = ai_decision.market_outlook
+            signals_dict["ai_strategy"] = ai_decision.strategy_used
+            signals_dict["recommendation"] = ai_decision.action
+            signals_dict["composite"] = ai_decision.confidence
+
+        sentiment = result.get("sentiment")
+        if sentiment and hasattr(sentiment, 'fear_greed_value'):
+            signals_dict["fear_greed"] = sentiment.fear_greed_value
+            signals_dict["fear_greed_label"] = sentiment.fear_greed_label
+            signals_dict["news_sentiment"] = sentiment.news_sentiment_summary
+
+        mkt = result.get("market_overview")
+        if mkt and hasattr(mkt, 'coin_snapshots'):
+            signals_dict["market_momentum"] = mkt.market_momentum
+            signals_dict["sector_rotation"] = mkt.sector_rotation_signal
+            signals_dict["top_movers"] = ", ".join(mkt.top_movers[:3]) if mkt.top_movers else ""
+            signals_dict["coins_scanned"] = len(mkt.coin_snapshots)
+            signals_dict["coin_data"] = [
+                {
+                    "symbol": c.symbol,
+                    "price": c.price,
+                    "change_1h": c.change_1h,
+                    "change_24h": c.change_24h,
+                    "rsi": c.rsi,
+                    "rsi_signal": c.rsi_signal,
+                    "momentum": c.momentum_score,
+                    "ema_crossover": c.ema_crossover,
+                    "bb_position": c.bb_position,
+                    "composite_score": c.composite_score,
+                    "recommendation": c.recommendation,
+                }
+                for c in mkt.coin_snapshots[:10]
+            ]
+
+        self.dashboard.update_signals(result["price"], signals_dict)
 
     async def _check_weekly_digest(self):
         """Send weekly digest on Monday mornings (7-8 AM Eastern)."""
@@ -280,15 +331,17 @@ class AlgoTraderBot:
         c = self.config
         mode_label = "PAPER TRADING" if c.mode == "paper" else "LIVE TRADING"
         logger.info("=" * 60)
-        ai_label = "AI-Powered (Claude)" if self._using_ai else "Indicator-Based"
-        logger.info(f"  AlgoTrader v{self._version()} — Kraken Crypto Bot")
-        logger.info(f"  Strategy: {ai_label}")
+        ai_label = "Multi-Agent (Opus PM + 7 Haiku Agents)" if self._using_ai else "Indicator-Based"
+        logger.info(f"  AlgoTrader v{self._version()} — Multi-Agent Crypto Trading Desk")
+        logger.info(f"  Architecture: {ai_label}")
         logger.info(f"  Mode: {mode_label}")
-        logger.info(f"  Symbol: {c.kraken.display_symbol}")
+        logger.info(f"  PM Model: {c.ai_model}")
+        logger.info(f"  Agent Model: {c.haiku_model}")
+        logger.info(f"  Chat Model: {c.chat_model}")
+        logger.info(f"  PM Interval: {c.agents.pm_interval_seconds}s ({c.agents.pm_interval_seconds // 3600}h)")
+        logger.info(f"  Agent Interval: {c.agents.agent_interval_seconds}s ({c.agents.agent_interval_seconds // 60}m)")
+        logger.info(f"  Wake Limit: {c.agents.max_wakes_per_day}/day (cooldown: {c.agents.wake_cooldown_seconds}s)")
         logger.info(f"  Candle interval: {c.candle_interval}m")
-        logger.info(f"  Scan interval: {c.strategy.scan_interval_seconds}s")
-        logger.info(f"  EMA: {c.strategy.ema_fast_period}/{c.strategy.ema_slow_period}")
-        logger.info(f"  RSI period: {c.strategy.rsi_period}")
         logger.info(f"  Stop-loss: {c.strategy.stop_loss_pct}% | Take-profit: {c.strategy.take_profit_pct}%")
         if c.mode == "paper":
             balance = self.paper_trader.get_balance()

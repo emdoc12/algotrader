@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# AlgoTrader v2.0.0 — Kraken BTC Trading Bot
+# AlgoTrader v4.0.0 — Multi-Agent Crypto Trading Bot
 #
 # Lean Python-only container for 24/7 Bitcoin trading on Kraken.
 #
@@ -12,7 +12,7 @@ FROM python:3.12-slim
 LABEL maintainer="emdoc12"
 LABEL org.opencontainers.image.title="AlgoTrader"
 LABEL org.opencontainers.image.description="24/7 Bitcoin trading bot for Kraken"
-LABEL org.opencontainers.image.version="3.0.0"
+LABEL org.opencontainers.image.version="4.0.0"
 
 # ── System deps ──────────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -40,6 +40,15 @@ ENV BOT_DB_PATH=/app/data/bot_data.db
 ENV BOT_LOG_LEVEL=INFO
 ENV PYTHONUNBUFFERED=1
 ENV DASHBOARD_PORT=3737
+# v4.0 Multi-Agent Model Hierarchy
+ENV AI_MODEL=claude-opus-4-6
+ENV HAIKU_MODEL=claude-haiku-4-5-20251001
+ENV CHAT_MODEL=claude-haiku-4-5-20251001
+# v4.0 Timing
+ENV PM_INTERVAL_SECONDS=7200
+ENV AGENT_INTERVAL_SECONDS=300
+ENV MAX_WAKES_PER_DAY=6
+ENV WAKE_COOLDOWN_SECONDS=1800
 
 # ── Dashboard port ───────────────────────────────────────────────────────────
 EXPOSE 3737

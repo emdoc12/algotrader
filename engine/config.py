@@ -55,6 +55,19 @@ class PaperTradingConfig:
 
 
 @dataclass
+class AgentConfig:
+    """v4.0 Multi-agent system configuration."""
+    # Opus PM decision cycle (seconds) — default every 2 hours
+    pm_interval_seconds: int = 7200
+    # Agent fast loop (seconds) — how often Haiku agents run
+    agent_interval_seconds: int = 300
+    # Max emergency wakes per day
+    max_wakes_per_day: int = 6
+    # Minimum cooldown between wakes (seconds)
+    wake_cooldown_seconds: int = 1800
+
+
+@dataclass
 class BotConfig:
     """Top-level bot configuration."""
     # Trading mode: "paper" or "live"
@@ -68,13 +81,18 @@ class BotConfig:
     # AI-powered strategy (requires Anthropic API key)
     use_ai_strategy: bool = True
     anthropic_api_key: str = ""
-    ai_model: str = "claude-sonnet-4-20250514"
+    # v4.0 Model hierarchy
+    ai_model: str = "claude-opus-4-6"                # PM brain (Opus)
+    haiku_model: str = "claude-haiku-4-5-20251001"   # Agent workers (Haiku)
+    chat_model: str = "claude-haiku-4-5-20251001"    # Dashboard chat (Haiku)
     # Kraken
     kraken: KrakenConfig = field(default_factory=KrakenConfig)
     # Strategy
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
     # Paper trading
     paper: PaperTradingConfig = field(default_factory=PaperTradingConfig)
+    # v4.0 Multi-agent system
+    agents: AgentConfig = field(default_factory=AgentConfig)
 
 
 def load_config() -> BotConfig:
@@ -86,7 +104,9 @@ def load_config() -> BotConfig:
         candle_interval=int(os.getenv("BOT_CANDLE_INTERVAL", "15")),
         use_ai_strategy=os.getenv("USE_AI_STRATEGY", "true").lower() == "true",
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
-        ai_model=os.getenv("AI_MODEL", "claude-sonnet-4-20250514"),
+        ai_model=os.getenv("AI_MODEL", "claude-opus-4-6"),
+        haiku_model=os.getenv("HAIKU_MODEL", "claude-haiku-4-5-20251001"),
+        chat_model=os.getenv("CHAT_MODEL", "claude-haiku-4-5-20251001"),
         kraken=KrakenConfig(
             api_key=os.getenv("KRAKEN_API_KEY", ""),
             api_secret=os.getenv("KRAKEN_API_SECRET", ""),
@@ -112,6 +132,12 @@ def load_config() -> BotConfig:
             starting_capital=float(os.getenv("PAPER_STARTING_CAPITAL", "10000")),
             maker_fee_pct=float(os.getenv("PAPER_MAKER_FEE_PCT", "0.16")),
             taker_fee_pct=float(os.getenv("PAPER_TAKER_FEE_PCT", "0.26")),
+        ),
+        agents=AgentConfig(
+            pm_interval_seconds=int(os.getenv("PM_INTERVAL_SECONDS", "7200")),
+            agent_interval_seconds=int(os.getenv("AGENT_INTERVAL_SECONDS", "300")),
+            max_wakes_per_day=int(os.getenv("MAX_WAKES_PER_DAY", "6")),
+            wake_cooldown_seconds=int(os.getenv("WAKE_COOLDOWN_SECONDS", "1800")),
         ),
     )
     return config

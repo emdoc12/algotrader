@@ -42,23 +42,51 @@ from social_sentiment import SocialSentimentFetcher
 from liquidation_data import LiquidationDataFetcher
 from volume_profile import VolumeProfileAnalyzer
 from backtester import Backtester, run_backtest_from_tag
+from agent_runner import AgentRunner, WakeManager, WakeConfig
 
 logger = logging.getLogger(__name__)
 
 
-SYSTEM_PROMPT = """You are an expert cryptocurrency trader with FULL CONTROL over a multi-coin portfolio on Kraken.
-You run 24/7 and make decisions every scan cycle based on technical analysis, market sentiment, and news.
+SYSTEM_PROMPT = """You are the PORTFOLIO MANAGER (PM) of a multi-coin crypto trading desk on Kraken.
+You are Claude Opus — the smartest model in the room. You run the show.
 
 ## WHO YOU ARE
-You're one continuous agent — the same mind that trades AND chats with your operator. You have persistent
-memory through your strategy journal and research notebook. You remember conversations, follow through
-on promises, and learn from every trade.
+You're the decision maker. You have a team of 7 specialist AI agents (powered by Haiku) who
+do the legwork — research, analysis, monitoring, backtesting. They report to YOU. You read their
+reports, synthesize the big picture, and make the actual trading decisions.
+
+You're one continuous mind. You have persistent memory through your journal, research notebook,
+and agent reports. You remember conversations with your operator. You follow through on promises.
 
 ## HOW YOU TALK
-Talk like a real person. A sharp friend who trades crypto for a living.
-- "BTC looks heavy — RSI cooling off, funding rates are elevated. I'm sitting this one out and waiting for 80K."
-- NOT: "Current market microstructure indicates consolidation during elevated funding regime."
-Write like you'd text a friend, not like you're writing a whitepaper.
+Talk like a real person. A sharp PM who runs a crypto desk.
+- "The desk is telling me funding rates are getting spicy while on-chain shows distribution. I'm trimming."
+- NOT: "Analysis of multiple data streams suggests elevated risk parameters."
+Write like you'd brief your boss, not a whitepaper.
+
+## YOUR TEAM — 7 SPECIALIST AGENTS
+You have a full trading desk. They run every 5 minutes and file reports for you.
+
+RESEARCH TEAM:
+  1. Market Research Agent — news, sentiment analysis, macro events, Reddit scanning
+  2. Technical Analysis Agent — pattern recognition, multi-timeframe analysis, indicator synthesis
+  3. On-Chain Agent — whale movements, exchange flows, network health, stablecoin supply
+  4. Derivatives Agent — funding rates, options flow, liquidation analysis, L/S ratios
+
+EXECUTION TEAM:
+  5. Order Manager Agent — order book analysis, fill optimization, pending order monitoring
+  6. Risk Manager Agent — position sizing, correlation analysis, drawdown monitoring, risk scoring
+  7. Backtest Agent — strategy testing against historical data, performance validation
+
+HOW TO USE YOUR TEAM — TASK TAGS:
+[TASK: agent=market_research, title=Research ETH Pectra upgrade, priority=3, instructions=Find latest news on ETH Pectra upgrade timeline and trading implications]
+[TASK: agent=backtest, title=Test EMA crossover on SOL, priority=5, instructions=[BACKTEST: strategy=ema_crossover, pair=SOL/USD, interval=60, hours=336, fast=9, slow=21]]
+[TASK: agent=setup_tracker, title=Watch BTC 60K support, priority=2, instructions=Alert me if BTC drops below 60000 or if buying volume spikes above 60500]
+[TASK: agent=technical, title=Deep dive on AVAX chart, priority=4, instructions=Full technical breakdown of AVAX across all timeframes]
+
+- agent = market_research, technical, onchain, derivatives, order_manager, risk_manager, backtest, setup_tracker
+- priority = 1 (critical) to 10 (low). Priority 1-3 tasks get done first.
+- Use these LIBERALLY. Your agents are cheap to run. Delegate everything that isn't a trade decision.
 
 ## YOUR GOALS
 1. Grow the USD cash balance — take profits when the setup is right
@@ -68,38 +96,16 @@ Balance these based on what the market is doing.
 ## TRADEABLE COINS
 BTC/USD, ETH/USD, SOL/USD, DOGE/USD, ADA/USD, AVAX/USD, LINK/USD, DOT/USD, POL/USD, XRP/USD
 
-## YOUR DATA
-You have an extremely rich data feed. Use ALL of it — the edge comes from combining signals across domains.
-
-TECHNICALS: Multi-timeframe (15m/1h/4h) on all 10 coins, EMA/RSI/BB/ATR, VWAP with bands, volume profile (POC, value area, HVN/LVN).
-ORDER FLOW: Order book depth/imbalance, whale transactions, volume climax detection, buy/sell volume ratio.
-DERIVATIVES: Funding rates, open interest trends, liquidation levels/magnets, long/short ratios (Binance+Bybit), options put/call.
-ON-CHAIN: Exchange inflows/outflows, mempool congestion, stablecoin supply changes (USDT/USDC), hash rate, network health.
-MACRO: S&P 500, DXY, 10Y yields, VIX, gold — plus macro regime classification (risk-on/risk-off/mixed). FOMC calendar with alerts.
-SENTIMENT: Fear & Greed index, Reddit sentiment scoring (with contrarian signals), CoinGecko trending coins, news headlines.
-LIQUIDATION MAP: Estimated liquidation clusters above/below price at 5x/10x/25x/50x/100x leverage. Liquidation magnets.
-BACKTESTING: Use [BACKTEST:] tags to test strategy ideas against historical data before deploying them.
-
-KEY PRINCIPLES:
-- Timeframe alignment: bullish on 15m + 1h + 4h = high conviction. Bullish 15m vs bearish 4h = trap.
-- Derivatives: high positive funding = crowded longs (squeeze risk). Heavy liquidations = possible capitulation.
-- On-chain: coins flowing INTO exchanges = selling pressure coming. Stablecoin supply expanding = fresh capital.
-- Macro: risk-off regime (high VIX, rising DXY, rising yields) = reduce position sizes. FOMC within 3 days = danger zone.
-- Social: extreme Reddit bullishness is a contrarian SELL signal. Extreme fear is often a BUY signal.
-- Liquidation magnets: price is drawn toward clusters of leveraged positions. Use this to predict short-term moves.
-- VWAP: price below VWAP with declining volume = bearish bias. POC and HVN are real support/resistance.
-- ATR: volatile coins get smaller positions, calm coins get bigger ones.
-
 ## RISK RULES
 - Aggressive but smart. Go big on high-conviction setups, small on speculative ones.
 - You can scale in, partial sell, trail stops — your call.
 - DRAWDOWN BREAKER: 5%+ drawdown from peak = system halves your sizes automatically.
 - FEE RULE: Kraken charges 0.26% per trade (0.52% round trip). Sells under 0.6% profit get blocked (except stop-losses).
 - No shorting, no futures — spot only.
+- LISTEN TO YOUR RISK MANAGER. If they flag HIGH or CRITICAL risk, address it.
 
 ## HOW TO TAKE ACTIONS
 Write your thoughts naturally, then use ACTION TAGS for anything the system should execute.
-Only include tags when you actually want to do something — most cycles you'll just think and hold.
 
 TRADE TAGS (one per response max):
 [BUY: symbol=BTC/USD, qty=0.001, stop=79000, target=88000, trail=2.0, confidence=0.8, strategy=accumulation]
@@ -119,37 +125,20 @@ ADVANCED ORDER TAGS — place orders at specific prices/triggers:
 CANCEL PENDING ORDERS:
 [CANCEL_ORDER: 3, 7]
 
-BACKTEST TAG — test a strategy against historical data before using it:
-[BACKTEST: strategy=ema_crossover, pair=BTC/USD, interval=60, hours=168, fast=9, slow=21]
-Available strategies: ema_crossover (params: fast, slow), rsi_reversal (params: oversold, overbought), bollinger_bounce (params: period, std), vwap_reversion (params: deviation)
-interval = candle minutes (15, 60, 240, 1440). hours = lookback period. Results appear next scan cycle.
-
 - symbol MUST be one of the 10 tradeable pairs
 - qty = amount of the coin (not USD)
 - stop/target/trail are optional (trail = trailing stop %, 0 = fixed stop)
 - confidence must be >= 0.6 to execute
 - strategy: momentum, mean_reversion, trend_following, sentiment, accumulation, scaling, profit_taking, stop_loss
 - expires = hours until order expires (0 = no expiry, default)
-- Order type guide:
-  * LIMIT: set exact entry/exit price. Buys fill at or below, sells fill at or above
-  * STOP_LOSS: market sell when price drops to trigger (protects downside)
-  * STOP_LOSS_LIMIT: same but places a limit order at price when trigger is hit
-  * TAKE_PROFIT: market sell when price rises to trigger (locks in gains)
-  * TAKE_PROFIT_LIMIT: same but places limit at price when trigger is hit
-  * TRAILING_STOP: stop that follows price up by offset amount in USD
-  * TRAILING_STOP_LIMIT: trailing stop that places limit order when triggered
-  * ICEBERG: large limit order split into smaller visible chunks
-- Use limit/advanced orders when you see clear support/resistance levels rather than chasing market price
-- Use trailing stops to ride trends while protecting gains
-- Full Kraken order type docs: https://www.kraken.com/learn/trading/trade-orders
 
-JOURNAL TAG — save a lesson or observation to your persistent memory:
+JOURNAL TAG — save a lesson to your persistent memory:
 [JOURNAL: category=lesson | Bought SOL too early, should have waited for 4h confirmation next time]
 
-RESEARCH NOTE TAG — save a longer analysis to your notebook:
-[NOTE: topic=macro, coins=BTC,ETH | Title here | Full body of your research note goes here. Can be multiple sentences.]
+RESEARCH NOTE TAG — save longer analysis to your notebook:
+[NOTE: topic=macro, coins=BTC,ETH | Title here | Full body of your research note goes here.]
 
-STALE NOTES — mark outdated research notes for removal:
+STALE NOTES — mark outdated notes for removal:
 [STALE: 5, 12, 23]
 
 WEB RESEARCH — queue a search for next cycle:
@@ -159,16 +148,29 @@ ALERT TAGS — set or cancel price/indicator alerts:
 [ALERT: coin=ETH, condition=price_below, threshold=1500, reason=watching for breakdown, plan=buy 0.5 ETH if structure holds]
 [CANCEL_ALERT: 3, 7]
 
-## WHAT TO WRITE
-Every scan cycle, share your current thinking in 2-4 paragraphs:
-- What's the market doing right now? What stands out?
-- What are you watching? Any setups forming?
-- What's your plan? Why are you holding/buying/selling?
-- Any lessons from recent trades?
+## PM SESSION STRUCTURE
+Each session, you receive:
+1. AGENT REPORTS — intelligence from your 7 specialists since your last session
+2. MARKET DATA — current prices, positions, account state
+3. MEMORY — your journal, research notes, chat history, directives
 
-Then add action tags at the end ONLY if you're actually doing something.
-Your operator sees your thinking on the dashboard — make it worth reading.
-Most cycles you'll just be thinking and holding. That's fine. Don't force trades.
+Your job each session:
+1. READ all agent reports — acknowledge what's important, dismiss what's noise
+2. SYNTHESIZE the big picture — what's the market telling you across all domains?
+3. DECIDE — trade, adjust positions, or hold. Explain your reasoning.
+4. DELEGATE — create tasks for your agents: what do you need them watching, researching, testing?
+5. PLAN — what are you watching for your next session?
+
+## WHAT TO WRITE
+Share your thinking in 3-5 paragraphs:
+- What are your agents telling you? What stands out from their reports?
+- What's the market doing? What's your read on it?
+- What are you doing and why? (trade decisions or deliberate holds)
+- What tasks are you assigning your team?
+- What's your plan until next session?
+
+Your operator sees this on the dashboard — make it worth reading.
+Most sessions you'll be holding. That's fine. A great PM knows when not to trade.
 """
 
 
@@ -287,6 +289,13 @@ class AIStrategy:
         self._pending_backtest_result: str = ""
         # Self-alert system
         self._alert_manager = AlertManager(db)
+        # v4.0 Multi-agent system
+        self._wake_config = WakeConfig(
+            min_cooldown_seconds=config.agents.wake_cooldown_seconds,
+            max_wakes_per_day=config.agents.max_wakes_per_day,
+        )
+        self._wake_manager = WakeManager(db, self._wake_config)
+        self._agent_runner = AgentRunner(db, config, self._http, self._wake_manager)
 
     async def run_scan(self) -> dict:
         """Run one AI-powered scan cycle."""
@@ -504,15 +513,43 @@ class AIStrategy:
                 logger.warning(f"Web research failed: {e}")
             self._pending_research_query = ""
 
-        # --- 8. Build prompt and call Claude ---
+        # --- 7b. Build market data for agents (v4.0) ---
+        agent_market_data = self.build_agent_market_data(
+            current_price, bars, signals, sentiment_data,
+            positions, balance, market_overview,
+        )
+
+        # --- 7c. Run Haiku agent desk ---
+        try:
+            await self._agent_runner.run_cycle(agent_market_data)
+        except Exception as e:
+            logger.warning(f"Agent runner cycle failed: {e}")
+
+        # --- 8. Build prompt and call Opus PM ---
         context = self._build_context(
             current_price, bars, signals, sentiment_data,
             positions, recent_trades, balance, market_overview,
         )
         self._last_context = context  # Cache for chat to reuse
+        agent_market_data["raw_context"] = context  # For data agent next cycle
+
+        # Record PM session
+        session_id = self.db.start_pm_session(
+            session_type="scan",
+            trigger_reason="scheduled scan cycle",
+        )
 
         decision = await self._call_claude(context)
         self._last_decision = decision
+
+        # Complete PM session
+        self.db.complete_pm_session(
+            session_id=session_id,
+            summary=decision.reasoning[:200] if decision.reasoning else "",
+        )
+
+        # Reset wake escalation after a normal scheduled session
+        self._wake_manager.reset_escalation()
 
         # (Journal, research notes, alerts, and stale note processing all happen
         #  inside _call_claude now — parsed from action tags in the response)
@@ -655,12 +692,225 @@ class AIStrategy:
 
         return result
 
+    def build_agent_market_data(self, price, bars, signals, sentiment,
+                                positions, balance, market_overview=None) -> dict:
+        """Build the market_data dict that agents consume.
+
+        Agents get pre-segmented text blocks so each specialist only reads
+        the data relevant to its domain.
+        """
+        data = {
+            "btc_price": price,
+            "coin_prices": {},
+            "coin_data": [],
+            "equity": balance.total_equity if balance else 0,
+            "peak_equity": self._peak_equity,
+            "drawdown_pct": self._drawdown_pct,
+        }
+
+        # Coin prices map
+        if market_overview and hasattr(market_overview, 'coin_snapshots'):
+            for snap in market_overview.coin_snapshots:
+                data["coin_prices"][snap.symbol] = snap.price
+                data["coin_data"].append({
+                    "symbol": snap.symbol,
+                    "price": snap.price,
+                    "rsi": snap.rsi if hasattr(snap, 'rsi') else 50,
+                    "change_1h": snap.change_1h if hasattr(snap, 'change_1h') else 0,
+                    "change_24h": snap.change_24h if hasattr(snap, 'change_24h') else 0,
+                })
+
+        # Technical text for TechnicalAgent
+        tech_parts = []
+        if signals:
+            tech_parts.append(f"BTC/USD: ${price:,.2f}")
+            tech_parts.append(f"EMA {signals.ema.fast_ema:.0f}/{signals.ema.slow_ema:.0f} cross={signals.ema.crossover}")
+            tech_parts.append(f"RSI: {signals.rsi.rsi:.1f} ({signals.rsi.signal})")
+            tech_parts.append(f"BB: pos={signals.bollinger.price_position:.2%} bw={signals.bollinger.bandwidth:.4f}")
+            if signals.atr:
+                tech_parts.append(f"ATR: ${signals.atr.atr:.2f} ({signals.atr.volatility})")
+        data["technical_text"] = "\n".join(tech_parts)
+
+        # Multi-timeframe
+        if self._last_mtf_signals:
+            data["mtf_text"] = self._scanner.format_mtf_for_ai(self._last_mtf_signals)
+        else:
+            data["mtf_text"] = ""
+
+        # Coin data text for TechnicalAgent
+        if market_overview and market_overview.coin_snapshots:
+            data["coin_data_text"] = self._scanner.format_for_ai(market_overview)
+        else:
+            data["coin_data_text"] = ""
+
+        # Volume text
+        if self._last_volume_analysis:
+            data["volume_text"] = self._volume_analyzer.format_for_context(self._last_volume_analysis, price)
+        else:
+            data["volume_text"] = ""
+
+        # Sentiment/news for MarketResearchAgent
+        if sentiment:
+            data["sentiment_text"] = (
+                f"Fear & Greed: {sentiment.fear_greed_value} ({sentiment.fear_greed_label})\n"
+                f"Yesterday: {sentiment.fear_greed_yesterday} | Week ago: {sentiment.fear_greed_week_ago}\n"
+                f"Volume trend: {sentiment.volume_trend} ({sentiment.volume_24h_change_pct:+.1f}%)\n"
+                f"1h momentum: {sentiment.price_momentum_1h:+.2f}%\n"
+                f"24h momentum: {sentiment.price_momentum_24h:+.2f}%\n"
+                f"News: {sentiment.news_sentiment_summary}"
+            )
+            data["news_headlines"] = sentiment.news_headlines or []
+        else:
+            data["sentiment_text"] = ""
+            data["news_headlines"] = []
+
+        # Social for MarketResearchAgent
+        if self._last_social:
+            data["social_summary"] = self._social.format_for_context(self._last_social)
+        else:
+            data["social_summary"] = ""
+
+        # Macro for MarketResearchAgent
+        if self._last_macro:
+            data["macro_text"] = self._macro.format_for_context(self._last_macro)
+        else:
+            data["macro_text"] = ""
+
+        # On-chain for OnChainAgent
+        if self._last_onchain:
+            data["onchain_text"] = self._onchain.format_for_context(self._last_onchain)
+        else:
+            data["onchain_text"] = ""
+
+        # Whale data for OnChainAgent
+        if self._last_whale_data:
+            data["whale_text"] = self._whale_monitor.format_for_context(self._last_whale_data)
+        else:
+            data["whale_text"] = ""
+
+        # Derivatives for DerivativesAgent
+        if self._last_derivatives:
+            data["derivatives_text"] = self._derivatives.format_for_context(self._last_derivatives)
+        else:
+            data["derivatives_text"] = ""
+
+        # Liquidation for DerivativesAgent
+        if self._last_liquidation:
+            data["liquidation_text"] = self._liquidation.format_for_context(self._last_liquidation)
+        else:
+            data["liquidation_text"] = ""
+
+        # Order book for OrderManagerAgent
+        if self._last_order_book:
+            ob = self._last_order_book
+            data["orderbook_text"] = (
+                f"Spread: ${ob.get('spread', 0):,.2f} ({ob.get('spread_pct', 0):.4f}%)\n"
+                f"Bid depth: ${ob.get('bid_depth_usd', 0):,.0f} | Ask depth: ${ob.get('ask_depth_usd', 0):,.0f}\n"
+                f"Imbalance: {ob.get('imbalance', 0):+.3f}\n"
+                f"Bid wall: ${ob.get('bid_wall_price', 0):,.2f} | Ask wall: ${ob.get('ask_wall_price', 0):,.2f}"
+            )
+        else:
+            data["orderbook_text"] = ""
+
+        # Balance for RiskManagerAgent
+        if balance:
+            data["balance_text"] = (
+                f"Cash: ${balance.cash_usd:,.2f}\n"
+                f"Equity: ${balance.total_equity:,.2f}\n"
+                f"Holdings: {json.dumps(balance.holdings or {})}"
+            )
+        else:
+            data["balance_text"] = ""
+
+        # Positions for RiskManagerAgent
+        if positions:
+            pos_lines = []
+            for p in (positions if isinstance(positions, list) else [positions]):
+                upnl = p.unrealized_pnl or 0
+                pos_lines.append(
+                    f"{p.symbol}: {p.quantity:.6f} @ ${p.entry_price:,.2f} "
+                    f"(uPnL: ${upnl:,.2f}, SL: ${p.stop_loss:,.2f}, TP: ${p.take_profit:,.2f})"
+                )
+            data["positions_text"] = "\n".join(pos_lines)
+        else:
+            data["positions_text"] = "No open positions"
+
+        # Raw context — full text for data condensation
+        # (Built by _build_context below, set after)
+        data["raw_context"] = ""
+
+        return data
+
     def _build_context(self, price, bars, signals, sentiment, positions, trades, balance, market_overview=None) -> str:
-        """Build the data context string for Claude."""
+        """Build the data context string for Opus PM sessions.
+
+        v4.0: Now includes agent reports as the PRIMARY intelligence source.
+        Raw data is still included but agents have pre-analyzed it.
+        """
         parts = []
 
+        # ── Agent Intelligence Briefing (v4.0) ──
+        unread_reports = self.db.get_unread_reports(limit=30)
+        if unread_reports:
+            parts.append("## AGENT INTELLIGENCE BRIEFING")
+            parts.append(f"Your team has filed {len(unread_reports)} reports since your last session.\n")
+
+            # Group by agent type
+            by_agent = {}
+            for r in unread_reports:
+                at = r["agent_type"]
+                if at not in by_agent:
+                    by_agent[at] = []
+                by_agent[at].append(r)
+
+            agent_labels = {
+                "market_research": "📰 Market Research",
+                "technical": "📊 Technical Analysis",
+                "onchain": "⛓️ On-Chain Intelligence",
+                "derivatives": "📈 Derivatives Desk",
+                "order_manager": "📋 Order Manager",
+                "risk_manager": "🛡️ Risk Manager",
+                "backtest": "🧪 Backtester",
+                "setup_tracker": "🎯 Setup Tracker",
+                "wake_system": "🚨 Wake System",
+            }
+
+            for agent_type, reports in by_agent.items():
+                label = agent_labels.get(agent_type, agent_type)
+                parts.append(f"\n### {label} ({len(reports)} reports)")
+                for r in reports:
+                    sev_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡"}.get(r["severity"], "⚪")
+                    ts = time.strftime('%m/%d %H:%M', time.gmtime(r["created_at"]))
+                    parts.append(f"  {sev_icon} [{ts}] {r['title']}")
+                    if r["summary"]:
+                        parts.append(f"     {r['summary'][:300]}")
+
+            # Mark all as read
+            self.db.mark_reports_read([r["id"] for r in unread_reports])
+        else:
+            parts.append("## AGENT INTELLIGENCE BRIEFING")
+            parts.append("No new reports from your team since last session.")
+
+        # ── Wake events ──
+        recent_wakes = self.db.get_wake_events_since(time.time() - 7200)
+        unacked = [w for w in recent_wakes if not w.get("acknowledged")]
+        if unacked:
+            parts.append(f"\n## ⚠️ WAKE EVENTS ({len(unacked)} unacknowledged)")
+            for w in unacked:
+                ts = time.strftime('%m/%d %H:%M', time.gmtime(w["created_at"]))
+                parts.append(f"  🚨 [{w['severity'].upper()}] {w['trigger_type']}: {w['reason']}")
+            self.db.acknowledge_wake_events()
+
+        # ── PM session budget ──
+        usage = self.db.get_pm_token_usage_today()
+        parts.append(f"\n## SESSION INFO")
+        parts.append(f"Today: {usage['session_count']} PM sessions so far")
+        wake_events_today = self.db.get_wake_events_since(time.time() - 86400)
+        remaining_wakes = max(0, self._wake_config.max_wakes_per_day - len(wake_events_today))
+        parts.append(f"Emergency wakes remaining today: {remaining_wakes}/{self._wake_config.max_wakes_per_day}")
+
         # Current price
-        parts.append(f"## CURRENT MARKET DATA")
+        parts.append(f"\n## CURRENT MARKET DATA")
         parts.append(f"BTC/USD Price: ${price:,.2f}")
         parts.append(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}")
 
@@ -1238,6 +1488,33 @@ class AIStrategy:
                 except Exception:
                     pass
                 clean_text = _re.sub(r'\[DIRECTIVE:\s*.*?\]', '', clean_text)
+
+            # v4.0: Parse [TASK: agent=..., title=..., priority=..., instructions=...]
+            task_matches = _re.findall(r'\[TASK:\s*(.*?)\]', content, _re.DOTALL)
+            tasks_created = 0
+            for tmatch in task_matches:
+                tparams = {}
+                for pair in _re.findall(r'(\w+)\s*=\s*([^,\]]+)', tmatch):
+                    tparams[pair[0].lower().strip()] = pair[1].strip()
+                agent_type = tparams.get("agent", "general")
+                title = tparams.get("title", "Untitled task")
+                priority = int(tparams.get("priority", "5"))
+                instructions = tparams.get("instructions", "")
+                try:
+                    tid = self.db.create_agent_task(
+                        task_type=agent_type,
+                        title=title,
+                        instructions=instructions,
+                        agent_type=agent_type,
+                        priority=priority,
+                        created_by="opus",
+                    )
+                    tasks_created += 1
+                    logger.info(f"PM created task #{tid} for {agent_type}: {title}")
+                except Exception as e:
+                    logger.warning(f"Failed to create agent task: {e}")
+            if task_matches:
+                clean_text = _re.sub(r'\[TASK:\s*.*?\]', '', clean_text, flags=_re.DOTALL)
 
             # Parse [BACKTEST: strategy=..., pair=..., interval=..., hours=..., ...]
             backtest_match = _re.search(r'\[BACKTEST:\s*(.*?)\]', content)

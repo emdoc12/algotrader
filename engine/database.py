@@ -211,6 +211,78 @@ class Database:
                 status TEXT DEFAULT 'open',
                 filled_at REAL DEFAULT 0
             );
+
+            -- ============================================================
+            -- v4.0 Multi-Agent System Tables
+            -- ============================================================
+
+            -- Agent task queue: Opus creates tasks, Haiku agents pick them up
+            CREATE TABLE IF NOT EXISTS agent_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_type TEXT NOT NULL,
+                agent_type TEXT NOT NULL DEFAULT 'general',
+                priority INTEGER DEFAULT 5,
+                status TEXT DEFAULT 'pending',
+                title TEXT NOT NULL,
+                instructions TEXT NOT NULL DEFAULT '',
+                context TEXT DEFAULT '',
+                result TEXT DEFAULT '',
+                error TEXT DEFAULT '',
+                created_at REAL NOT NULL,
+                started_at REAL DEFAULT 0,
+                completed_at REAL DEFAULT 0,
+                created_by TEXT DEFAULT 'opus',
+                assigned_to TEXT DEFAULT ''
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_agent_tasks_status ON agent_tasks(status);
+            CREATE INDEX IF NOT EXISTS idx_agent_tasks_type ON agent_tasks(task_type);
+
+            -- Agent reports: completed work products that Opus reads
+            CREATE TABLE IF NOT EXISTS agent_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER DEFAULT 0,
+                agent_type TEXT NOT NULL,
+                report_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL DEFAULT '',
+                body TEXT NOT NULL DEFAULT '',
+                data_json TEXT DEFAULT '{}',
+                severity TEXT DEFAULT 'info',
+                read_by_opus INTEGER DEFAULT 0,
+                created_at REAL NOT NULL,
+                FOREIGN KEY (task_id) REFERENCES agent_tasks(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_agent_reports_read ON agent_reports(read_by_opus);
+            CREATE INDEX IF NOT EXISTS idx_agent_reports_type ON agent_reports(report_type);
+
+            -- Wake events: tracks when Haiku wakes Opus with cooldown enforcement
+            CREATE TABLE IF NOT EXISTS wake_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trigger_type TEXT NOT NULL,
+                severity TEXT NOT NULL DEFAULT 'medium',
+                reason TEXT NOT NULL,
+                data_json TEXT DEFAULT '{}',
+                created_at REAL NOT NULL,
+                acknowledged INTEGER DEFAULT 0
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_wake_events_time ON wake_events(created_at);
+
+            -- PM sessions: tracks Opus decision sessions
+            CREATE TABLE IF NOT EXISTS pm_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_type TEXT NOT NULL DEFAULT 'scheduled',
+                trigger_reason TEXT DEFAULT '',
+                started_at REAL NOT NULL,
+                completed_at REAL DEFAULT 0,
+                input_tokens INTEGER DEFAULT 0,
+                output_tokens INTEGER DEFAULT 0,
+                tasks_created INTEGER DEFAULT 0,
+                trades_executed INTEGER DEFAULT 0,
+                summary TEXT DEFAULT ''
+            );
         """)
         # Add symbol column to trades if not present (migration)
         try:
@@ -882,6 +954,204 @@ class Database:
             "total_sold": sells,
             "realized_pnl": sells - buys if sells > 0 else 0,
         }
+
+    # ------------------------------------------------------------------
+    # Agent Task Queue (v4.0)
+    # ------------------------------------------------------------------
+
+    def create_agent_task(self, task_type: str, title: str, instructions: str = "",
+                          context: str = "", agent_type: str = "general",
+                          priority: int = 5, created_by: str = "opus") -> int:
+        """Create a new task for an agent to pick up."""
+        cursor = self.conn.execute(
+            """INSERT INTO agent_tasks (task_type, agent_type, priority, title,
+               instructions, context, created_at, created_by)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (task_type, agent_type, priority, title, instructions, context,
+             time.time(), created_by),
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def get_pending_agent_tasks(self, agent_type: str = None, limit: int = 10) -> list[dict]:
+        """Get pending tasks, optionally filtered by agent type."""
+        if agent_type:
+            rows = self.conn.execute(
+                """SELECT * FROM agent_tasks WHERE status = 'pending'
+                   AND agent_type = ? ORDER BY priority ASC, created_at ASC LIMIT ?""",
+                (agent_type, limit),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """SELECT * FROM agent_tasks WHERE status = 'pending'
+                   ORDER BY priority ASC, created_at ASC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def claim_agent_task(self, task_id: int, agent_name: str) -> bool:
+        """Claim a pending task for an agent. Returns True if claimed."""
+        result = self.conn.execute(
+            """UPDATE agent_tasks SET status = 'in_progress', assigned_to = ?,
+               started_at = ? WHERE id = ? AND status = 'pending'""",
+            (agent_name, time.time(), task_id),
+        )
+        self.conn.commit()
+        return result.rowcount > 0
+
+    def complete_agent_task(self, task_id: int, result: str = "", error: str = ""):
+        """Mark a task as completed with optional result or error."""
+        status = "failed" if error else "completed"
+        self.conn.execute(
+            """UPDATE agent_tasks SET status = ?, result = ?, error = ?,
+               completed_at = ? WHERE id = ?""",
+            (status, result, error, time.time(), task_id),
+        )
+        self.conn.commit()
+
+    def get_recent_agent_tasks(self, limit: int = 20) -> list[dict]:
+        """Get recent tasks for dashboard display."""
+        rows = self.conn.execute(
+            "SELECT * FROM agent_tasks ORDER BY created_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # Agent Reports (v4.0)
+    # ------------------------------------------------------------------
+
+    def add_agent_report(self, agent_type: str, report_type: str, title: str,
+                         summary: str = "", body: str = "", data_json: str = "{}",
+                         severity: str = "info", task_id: int = 0) -> int:
+        """Save a report from an agent."""
+        cursor = self.conn.execute(
+            """INSERT INTO agent_reports (task_id, agent_type, report_type, title,
+               summary, body, data_json, severity, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (task_id, agent_type, report_type, title, summary, body,
+             data_json, severity, time.time()),
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def get_unread_reports(self, limit: int = 50) -> list[dict]:
+        """Get reports Opus hasn't read yet."""
+        rows = self.conn.execute(
+            """SELECT * FROM agent_reports WHERE read_by_opus = 0
+               ORDER BY severity DESC, created_at ASC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_reports_read(self, report_ids: list[int] = None):
+        """Mark reports as read by Opus. If no IDs given, marks all."""
+        if report_ids:
+            placeholders = ",".join("?" * len(report_ids))
+            self.conn.execute(
+                f"UPDATE agent_reports SET read_by_opus = 1 WHERE id IN ({placeholders})",
+                report_ids,
+            )
+        else:
+            self.conn.execute("UPDATE agent_reports SET read_by_opus = 1")
+        self.conn.commit()
+
+    def get_recent_reports(self, limit: int = 20, agent_type: str = None) -> list[dict]:
+        """Get recent reports for dashboard display."""
+        if agent_type:
+            rows = self.conn.execute(
+                """SELECT * FROM agent_reports WHERE agent_type = ?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (agent_type, limit),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM agent_reports ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # Wake Events (v4.0)
+    # ------------------------------------------------------------------
+
+    def create_wake_event(self, trigger_type: str, severity: str, reason: str,
+                          data_json: str = "{}") -> int:
+        """Log a wake event (Haiku requesting Opus attention)."""
+        cursor = self.conn.execute(
+            """INSERT INTO wake_events (trigger_type, severity, reason,
+               data_json, created_at) VALUES (?, ?, ?, ?, ?)""",
+            (trigger_type, severity, reason, data_json, time.time()),
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def get_wake_events_since(self, since_ts: float) -> list[dict]:
+        """Get wake events since a timestamp."""
+        rows = self.conn.execute(
+            "SELECT * FROM wake_events WHERE created_at >= ? ORDER BY created_at DESC",
+            (since_ts,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_wake_events_by_type(self, trigger_type: str, since_ts: float) -> list[dict]:
+        """Get wake events for a specific trigger type since a timestamp."""
+        rows = self.conn.execute(
+            """SELECT * FROM wake_events WHERE trigger_type = ? AND created_at >= ?
+               ORDER BY created_at DESC""",
+            (trigger_type, since_ts),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def acknowledge_wake_events(self):
+        """Mark all unacknowledged wake events as acknowledged."""
+        self.conn.execute("UPDATE wake_events SET acknowledged = 1 WHERE acknowledged = 0")
+        self.conn.commit()
+
+    # ------------------------------------------------------------------
+    # PM Sessions (v4.0)
+    # ------------------------------------------------------------------
+
+    def start_pm_session(self, session_type: str = "scheduled",
+                         trigger_reason: str = "") -> int:
+        """Record the start of an Opus PM session."""
+        cursor = self.conn.execute(
+            """INSERT INTO pm_sessions (session_type, trigger_reason, started_at)
+               VALUES (?, ?, ?)""",
+            (session_type, trigger_reason, time.time()),
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def complete_pm_session(self, session_id: int, input_tokens: int = 0,
+                            output_tokens: int = 0, tasks_created: int = 0,
+                            trades_executed: int = 0, summary: str = ""):
+        """Record completion of an Opus PM session."""
+        self.conn.execute(
+            """UPDATE pm_sessions SET completed_at = ?, input_tokens = ?,
+               output_tokens = ?, tasks_created = ?, trades_executed = ?,
+               summary = ? WHERE id = ?""",
+            (time.time(), input_tokens, output_tokens, tasks_created,
+             trades_executed, summary, session_id),
+        )
+        self.conn.commit()
+
+    def get_recent_pm_sessions(self, limit: int = 10) -> list[dict]:
+        """Get recent PM sessions for dashboard/context."""
+        rows = self.conn.execute(
+            "SELECT * FROM pm_sessions ORDER BY started_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_pm_token_usage_today(self) -> dict:
+        """Get total Opus token usage for today."""
+        today_start = time.time() - 86400
+        row = self.conn.execute(
+            """SELECT COALESCE(SUM(input_tokens), 0) as input_total,
+                      COALESCE(SUM(output_tokens), 0) as output_total,
+                      COUNT(*) as session_count
+               FROM pm_sessions WHERE started_at >= ?""",
+            (today_start,),
+        ).fetchone()
+        return dict(row) if row else {"input_total": 0, "output_total": 0, "session_count": 0}
 
     # ------------------------------------------------------------------
     # Cleanup

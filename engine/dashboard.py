@@ -1125,8 +1125,8 @@ they'll be processed silently and the operator won't see the raw tags."""
             # Ensure proper alternation
             messages = self._fix_message_alternation(messages)
 
-            # Call Claude with the SAME model and personality as the trading engine
-            model = self.config.ai_model if self.config else "claude-sonnet-4-20250514"
+            # v4.0: Chat uses Haiku (cheap) — PM brain stays on Opus for trading
+            model = self.config.chat_model if self.config else "claude-haiku-4-5-20251001"
             resp = await self._http.post(
                 "https://api.anthropic.com/v1/messages",
                 headers={
