@@ -19,10 +19,58 @@ import json
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from typing import Optional
 
 import httpx
+
+# US Eastern timezone (handles EST/EDT automatically)
+_EST = timezone(timedelta(hours=-5))
+_EDT = timezone(timedelta(hours=-4))
+
+def _eastern_now() -> datetime:
+    """Get current time in US Eastern (auto-detect EST/EDT)."""
+    utc_now = datetime.now(timezone.utc)
+    # Simple DST check: EDT is Mar second Sun to Nov first Sun
+    # For robustness, just check if month is in EDT range
+    month = utc_now.month
+    if 3 < month < 11:
+        return utc_now.astimezone(_EDT)
+    elif month == 3:
+        # After second Sunday
+        second_sun = 14 - (datetime(utc_now.year, 3, 1).weekday() + 1) % 7
+        return utc_now.astimezone(_EDT if utc_now.day >= second_sun else _EST)
+    elif month == 11:
+        # Before first Sunday
+        first_sun = 7 - (datetime(utc_now.year, 11, 1).weekday() + 1) % 7
+        return utc_now.astimezone(_EDT if utc_now.day < first_sun else _EST)
+    else:
+        return utc_now.astimezone(_EST)
+
+def _to_eastern(epoch: float) -> datetime:
+    """Convert unix epoch to US Eastern datetime."""
+    utc_dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
+    # Reuse same logic
+    month = utc_dt.month
+    if 3 < month < 11:
+        return utc_dt.astimezone(_EDT)
+    elif month == 3:
+        second_sun = 14 - (datetime(utc_dt.year, 3, 1).weekday() + 1) % 7
+        return utc_dt.astimezone(_EDT if utc_dt.day >= second_sun else _EST)
+    elif month == 11:
+        first_sun = 7 - (datetime(utc_dt.year, 11, 1).weekday() + 1) % 7
+        return utc_dt.astimezone(_EDT if utc_dt.day < first_sun else _EST)
+    else:
+        return utc_dt.astimezone(_EST)
+
+def _fmt_et(epoch: float, fmt: str = "%m/%d %I:%M %p") -> str:
+    """Format a unix epoch as Eastern Time string."""
+    return _to_eastern(epoch).strftime(fmt)
+
+def _now_et(fmt: str = "%Y-%m-%d %I:%M %p ET") -> str:
+    """Format current time as Eastern Time string."""
+    return _eastern_now().strftime(fmt)
 
 from config import BotConfig
 from database import Database, Position, Trade
@@ -938,7 +986,7 @@ class AIStrategy:
                 parts.append(f"\n### {label} ({len(reports)} reports)")
                 for r in reports:
                     sev_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡"}.get(r["severity"], "⚪")
-                    ts = time.strftime('%m/%d %H:%M', time.gmtime(r["created_at"]))
+                    ts = _fmt_et(r["created_at"])
                     parts.append(f"  {sev_icon} [{ts}] {r['title']}")
                     if r["summary"]:
                         parts.append(f"     {r['summary'][:300]}")
@@ -955,7 +1003,7 @@ class AIStrategy:
         if unacked:
             parts.append(f"\n## ⚠️ WAKE EVENTS ({len(unacked)} unacknowledged)")
             for w in unacked:
-                ts = time.strftime('%m/%d %H:%M', time.gmtime(w["created_at"]))
+                ts = _fmt_et(w["created_at"])
                 parts.append(f"  🚨 [{w['severity'].upper()}] {w['trigger_type']}: {w['reason']}")
             self.db.acknowledge_wake_events()
 
@@ -970,13 +1018,13 @@ class AIStrategy:
         # Current price
         parts.append(f"\n## CURRENT MARKET DATA")
         parts.append(f"BTC/USD Price: ${price:,.2f}")
-        parts.append(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}")
+        parts.append(f"Timestamp: {_now_et()}")
 
         # Recent price action (last 10 candles)
         if bars and len(bars) >= 10:
             parts.append(f"\nRecent 15m candles (last 10):")
             for bar in bars[-10:]:
-                t = time.strftime('%H:%M', time.gmtime(bar.timestamp))
+                t = _fmt_et(bar.timestamp, "%I:%M %p")
                 parts.append(f"  {t} | O:{bar.open:.0f} H:{bar.high:.0f} L:{bar.low:.0f} C:{bar.close:.0f} V:{bar.volume:.2f}")
 
         # Technical indicators
@@ -1164,7 +1212,7 @@ class AIStrategy:
             parts.append(f"\n## RECENT TRADES (last {len(trades)})")
             for t in trades[:5]:
                 coin = getattr(t, 'symbol', 'BTC/USD')
-                ts = time.strftime('%m/%d %H:%M', time.gmtime(t.timestamp))
+                ts = _fmt_et(t.timestamp)
                 parts.append(f"  {ts} | {t.side.upper()} {t.quantity:.6f} {coin} @ ${t.price:,.2f} | ${t.value:,.2f}")
 
         # Performance stats — win rate, drawdown, profit factor, per-coin breakdown
@@ -1207,7 +1255,7 @@ class AIStrategy:
                 parts.append(f"\n## YOUR STRATEGY JOURNAL (persistent memory)")
                 parts.append(f"These are YOUR notes from previous cycles. You wrote them. Use them.")
                 for entry in journal:
-                    ts = time.strftime('%m/%d %H:%M', time.gmtime(entry["timestamp"]))
+                    ts = _fmt_et(entry["timestamp"])
                     cat = entry.get("category", "note")
                     coin = entry.get("coin", "")
                     coin_tag = f" [{coin}]" if coin else ""
@@ -1224,7 +1272,7 @@ class AIStrategy:
                 parts.append("You wrote them. Reference them when making decisions.")
                 parts.append("Mark notes as stale via stale_note_ids when they're outdated.\n")
                 for note in notes:
-                    ts = time.strftime('%m/%d %H:%M', time.gmtime(note["timestamp"]))
+                    ts = _fmt_et(note["timestamp"])
                     topic = note.get("topic", "general")
                     coins = note.get("coins", "")
                     coins_tag = f" [{coins}]" if coins else ""
@@ -1289,7 +1337,7 @@ class AIStrategy:
                 parts.append("Your operator gave you these instructions via chat. Follow them until told otherwise.")
                 parts.append("You can mark a directive as completed by including its ID in your response.")
                 for d in directives:
-                    ts = time.strftime('%m/%d %H:%M', time.gmtime(d["timestamp"]))
+                    ts = _fmt_et(d["timestamp"])
                     parts.append(f"  [#{d['id']} {ts}]: {d['directive']}")
         except Exception as e:
             logger.debug(f"Could not load directives: {e}")
@@ -1306,7 +1354,7 @@ class AIStrategy:
                 parts.append("This is YOUR chat history with your operator. You said these things. Remember them.")
                 parts.append("If you made promises or acknowledged instructions, follow through.\n")
                 for msg in recent_chat:
-                    ts = time.strftime('%m/%d %H:%M', time.gmtime(msg.get("timestamp", 0)))
+                    ts = _fmt_et(msg.get("timestamp", 0))
                     role = "Operator" if msg["role"] == "user" else "You"
                     text = msg["message"][:300]
                     parts.append(f"  [{ts}] {role}: {text}")
@@ -2289,7 +2337,7 @@ class AIStrategy:
                 qty = t.get("quantity", 0)
                 pnl = t.get("pnl_dollar")
                 pnl_str = f" | P&L: ${pnl:,.2f}" if pnl is not None else ""
-                ts = time.strftime('%m/%d %H:%M', time.gmtime(t["timestamp"]))
+                ts = _fmt_et(t["timestamp"])
                 strat = t.get("strategy", "")
                 strat_str = f" ({strat})" if strat else ""
                 digest_prompt_parts.append(
@@ -2326,7 +2374,7 @@ class AIStrategy:
         if week_journal:
             digest_prompt_parts.append(f"\nYour journal entries this week ({len(week_journal)}):")
             for j in week_journal[:20]:
-                ts = time.strftime('%m/%d', time.gmtime(j["timestamp"]))
+                ts = _fmt_et(j["timestamp"], "%m/%d")
                 digest_prompt_parts.append(f"  [{ts}] ({j.get('category', 'note')}): {j['lesson']}")
 
         # Research notes this week
