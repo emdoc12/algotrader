@@ -756,8 +756,10 @@ def parse_backtest_tag(tag_content: str) -> dict:
     Returns dict with keys: strategy, pair, interval, hours, plus any
     strategy-specific params.
     """
-    # Strip prefix
+    # Strip brackets and prefix — handles both "[BACKTEST: ...]" and "BACKTEST: ..."
     text = tag_content.strip()
+    if text.startswith("["):
+        text = text.lstrip("[").rstrip("]").strip()
     if text.upper().startswith("BACKTEST:"):
         text = text[len("BACKTEST:"):].strip()
 
@@ -768,11 +770,19 @@ def parse_backtest_tag(tag_content: str) -> dict:
             key, val = part.split("=", 1)
             raw[key.strip().lower()] = val.strip()
 
-    # Extract known top-level params
+    # Extract known top-level params with safe parsing
     strategy = raw.pop("strategy", "ema_crossover")
     pair = raw.pop("pair", "BTC/USD")
-    interval = int(raw.pop("interval", "60"))
-    hours = int(raw.pop("hours", "168"))
+    try:
+        interval = int(raw.pop("interval", "60"))
+    except (ValueError, TypeError):
+        logger.warning(f"Invalid backtest interval, defaulting to 60")
+        interval = 60
+    try:
+        hours = int(raw.pop("hours", "168"))
+    except (ValueError, TypeError):
+        logger.warning(f"Invalid backtest hours, defaulting to 168")
+        hours = 168
 
     # Everything else is strategy params — try to convert to numbers
     strategy_params: dict = {}

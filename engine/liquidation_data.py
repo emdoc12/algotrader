@@ -331,15 +331,18 @@ class LiquidationDataFetcher:
             resp.raise_for_status()
             data = resp.json()
 
-            if not data:
-                raise ValueError(f"No OI history data for {symbol}")
+            if not data or not isinstance(data, list):
+                raise ValueError(f"No OI history data for {symbol} (response: {str(data)[:100]})")
 
             # Data comes sorted oldest to newest
             latest = data[-1]
             oldest = data[0]
 
-            latest_oi = float(latest.get("sumOpenInterestValue", 0))
-            oldest_oi = float(oldest.get("sumOpenInterestValue", 0))
+            # Binance may use "sumOpenInterestValue" (USD) or "sumOpenInterest" (contracts)
+            latest_oi = float(latest.get("sumOpenInterestValue") or latest.get("sumOpenInterest", 0))
+            oldest_oi = float(oldest.get("sumOpenInterestValue") or oldest.get("sumOpenInterest", 0))
+            if latest_oi == 0:
+                logger.debug(f"Binance OI fields for {symbol}: {list(latest.keys())}")
             oi_change_pct = ((latest_oi - oldest_oi) / oldest_oi * 100) if oldest_oi > 0 else 0.0
 
             if oi_change_pct > 3:

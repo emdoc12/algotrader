@@ -25,7 +25,11 @@ logger = logging.getLogger(__name__)
 CACHE_TTL = 600.0  # 10 minutes
 
 REDDIT_BASE = "https://www.reddit.com/r"
-REDDIT_HEADERS = {"User-Agent": "AlgoTrader/2.11 (crypto trading bot)"}
+REDDIT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 SUBREDDITS = ["cryptocurrency", "bitcoin"]
 
