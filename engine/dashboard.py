@@ -31,7 +31,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AlgoTrader v3.0.0</title>
+<title>AlgoTrader v{{VERSION}}</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4" async></script>
 <style>
   :root {
@@ -147,7 +147,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="header">
-  <h1>AlgoTrader v3.0.0</h1>
+  <h1>AlgoTrader v{{VERSION}}</h1>
   <div class="badges">
     <span class="badge badge-ai" id="aiLabel">AI</span>
     <div class="toggle-wrap">
@@ -865,6 +865,14 @@ class Dashboard:
         self._last_signals = {}
         self._last_price = 0
         self._http = httpx.AsyncClient(timeout=60.0)
+        # Read version from VERSION file
+        try:
+            import os
+            vpath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "VERSION")
+            with open(vpath) as f:
+                self._version = f.read().strip()
+        except Exception:
+            self._version = "4.0.2"
         self.app = web.Application()
         self.app.router.add_get('/', self._index)
         self.app.router.add_get('/api/status', self._api_status)
@@ -882,7 +890,8 @@ class Dashboard:
         self._last_signals = signals_dict
 
     async def _index(self, request):
-        return web.Response(text=DASHBOARD_HTML, content_type='text/html')
+        html = DASHBOARD_HTML.replace("{{VERSION}}", self._version)
+        return web.Response(text=html, content_type='text/html')
 
     async def _api_status(self, request):
         """JSON endpoint with all dashboard data."""
@@ -1226,9 +1235,34 @@ they'll be processed silently and the operator won't see the raw tags."""
                         except Exception:
                             pass
 
+            # Process [NOTIFY:] tags from chat — send to Discord
+            notify_matches = _re.findall(r'\[NOTIFY:\s*(.*?)\]', ai_reply, _re.DOTALL)
+            if notify_matches and self.bot and hasattr(self.bot, 'strategy'):
+                discord = getattr(self.bot.strategy, 'discord', None)
+                if discord:
+                    for nmatch in notify_matches:
+                        nparams = {}
+                        for pair in _re.findall(r'(\w+)\s*=\s*([^,\]]+)', nmatch):
+                            nparams[pair[0].lower().strip()] = pair[1].strip()
+                        n_severity = nparams.get("severity", "info")
+                        n_title = nparams.get("title", "Chat Notification")
+                        n_message = nparams.get("message", "")
+                        if n_message:
+                            try:
+                                import asyncio as _aio
+                                await discord.send_agent_alert(
+                                    agent_name="Chat (Haiku)",
+                                    title=n_title,
+                                    message=n_message,
+                                    severity=n_severity,
+                                )
+                                logger.info(f"Chat sent Discord notification: [{n_severity}] {n_title}")
+                            except Exception as e:
+                                logger.warning(f"Chat Discord notification failed: {e}")
+
             # Clean all tags from response before showing to user
             clean_reply = ai_reply
-            for tag in ["RESEARCH", "JOURNAL", "DIRECTIVE", "NOTE", "STALE", "ALERT", "CANCEL_ALERT"]:
+            for tag in ["RESEARCH", "JOURNAL", "DIRECTIVE", "NOTE", "STALE", "ALERT", "CANCEL_ALERT", "NOTIFY"]:
                 clean_reply = _re.sub(rf'\[{tag}:\s*.+?\]', '', clean_reply)
             clean_reply = clean_reply.strip()
 
