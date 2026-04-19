@@ -253,6 +253,13 @@ class AlgoTraderBot:
             signals_dict["recommendation"] = ai_decision.action
             signals_dict["composite"] = ai_decision.confidence
 
+        # PM session info for dashboard
+        try:
+            today_usage = self.db.get_pm_token_usage_today()
+            signals_dict["pm_session_info"] = f"#{today_usage.get('session_count', '?')} today"
+        except Exception:
+            pass
+
         sentiment = result.get("sentiment")
         if sentiment and hasattr(sentiment, 'fear_greed_value'):
             signals_dict["fear_greed"] = sentiment.fear_greed_value

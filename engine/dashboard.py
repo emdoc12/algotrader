@@ -222,15 +222,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
 <div class="grid" style="grid-template-columns: 1fr;">
   <div class="card">
-    <div style="display:flex;align-items:center;gap:16px;margin-bottom:8px">
-      <h2 style="margin:0">AI Decision</h2>
+    <div style="display:flex;align-items:center;gap:16px;margin-bottom:8px;flex-wrap:wrap">
+      <h2 style="margin:0">PM Status</h2>
       <span class="signal-badge signal-hold" id="aiAction" style="font-size:14px;padding:4px 14px">--</span>
-      <div style="font-size:13px"><span style="color:var(--muted)">Confidence:</span> <span id="aiConfidence" style="font-weight:600">--</span></div>
-      <div style="font-size:13px"><span style="color:var(--muted)">Strategy:</span> <span id="aiStrategy">--</span></div>
+      <div style="font-size:13px"><span style="color:var(--muted)">Outlook:</span> <span id="pmOutlook" style="font-weight:600">--</span></div>
+      <div style="font-size:13px"><span style="color:var(--muted)">Session:</span> <span id="pmSession">--</span></div>
     </div>
-    <div class="confidence-bar" style="margin-bottom:8px"><div class="confidence-fill" id="confFill" style="width:0;background:var(--muted)"></div></div>
     <h3 style="font-size:14px;color:var(--purple)">Current Thinking</h3>
-    <div class="ai-reasoning" id="aiReasoning">Waiting for first scan...</div>
+    <div class="ai-reasoning" id="aiReasoning">Waiting for first PM session...</div>
   </div>
 </div>
 
@@ -352,22 +351,23 @@ async function fetchData() {
     // Mode — sync toggle
     document.getElementById('modeToggle').checked = (d.mode === 'live');
 
-    // AI Decision panel
+    // PM Status panel
     const aiSymbol = sig.ai_symbol || 'BTC/USD';
-    const aiAction = sig.ai_action ? sig.ai_action + ' ' + aiSymbol : '--';
+    const aiAction = sig.ai_action ? sig.ai_action + ' ' + aiSymbol : 'MONITORING';
     const aiEl = document.getElementById('aiAction');
     aiEl.textContent = aiAction;
     aiEl.className = 'signal-badge ' + (aiAction.includes('BUY') ? 'signal-buy' : aiAction.includes('SELL') ? 'signal-sell' : 'signal-hold');
 
-    const conf = sig.ai_confidence || 0;
-    document.getElementById('aiConfidence').textContent = (conf * 100).toFixed(0) + '%';
-    const confFill = document.getElementById('confFill');
-    confFill.style.width = (conf * 100) + '%';
-    confFill.style.background = conf >= 0.6 ? (aiAction === 'BUY' ? 'var(--green)' : aiAction === 'SELL' ? 'var(--red)' : 'var(--muted)') : 'var(--muted)';
+    const outlook = sig.ai_outlook || '--';
+    const outlookEl = document.getElementById('pmOutlook');
+    outlookEl.textContent = outlook;
+    outlookEl.style.color = outlook.toLowerCase().includes('bull') ? 'var(--green)' : outlook.toLowerCase().includes('bear') ? 'var(--red)' : 'var(--text)';
 
-    document.getElementById('aiStrategy').textContent = sig.ai_strategy || '--';
+    const sessionInfo = sig.pm_session_info || '--';
+    document.getElementById('pmSession').textContent = sessionInfo;
+
     const reasonEl = document.getElementById('aiReasoning');
-    const reasonText = sig.ai_reasoning || 'Waiting for scan...';
+    const reasonText = sig.ai_reasoning || 'Waiting for first PM session...';
     reasonEl.innerHTML = reasonText.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\\n/g,'<br>');
 
     // Sentiment
