@@ -12,6 +12,7 @@ precede short-term price moves (frequently as contrarian indicators).
 
 import asyncio
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -24,11 +25,18 @@ logger = logging.getLogger(__name__)
 # Cache TTL: social data is noisy, no need to refetch constantly
 CACHE_TTL = 600.0  # 10 minutes
 
-REDDIT_BASE = "https://www.reddit.com/r"
+# Reddit OAuth (preferred) — register a free "script" app at:
+#   https://www.reddit.com/prefs/apps/
+# Set REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET env vars.
+# Falls back to unauthenticated public JSON if not set.
+REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID", "")
+REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET", "")
+REDDIT_OAUTH_BASE = "https://oauth.reddit.com/r"
+REDDIT_PUBLIC_BASE = "https://www.reddit.com/r"
+REDDIT_USER_AGENT = "AlgoTrader/4.0 by /u/algotrader_bot (crypto trading bot)"
 REDDIT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "User-Agent": REDDIT_USER_AGENT,
     "Accept": "application/json",
-    "Accept-Language": "en-US,en;q=0.9",
 }
 
 SUBREDDITS = ["cryptocurrency", "bitcoin"]
@@ -171,6 +179,40 @@ class SocialSentimentFetcher:
         self._cache_ttl = CACHE_TTL
         self._last_snapshot: Optional[SocialSnapshot] = None
         self._last_fetch_time: float = 0.0
+        # Reddit OAuth state
+        self._reddit_token: Optional[str] = None
+        self._reddit_token_expires: float = 0.0
+        self._reddit_oauth_enabled = bool(REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET)
+        if self._reddit_oauth_enabled:
+            logger.info("Reddit OAuth enabled (client_id set)")
+        else:
+            logger.info("Reddit OAuth disabled — using public JSON (may get 403s from server IPs)")
+
+    async def _get_reddit_token(self) -> Optional[str]:
+        """Get or refresh Reddit OAuth token (application-only auth)."""
+        if not self._reddit_oauth_enabled:
+            return None
+        # Return cached token if still valid (with 60s buffer)
+        if self._reddit_token and time.time() < (self._reddit_token_expires - 60):
+            return self._reddit_token
+        try:
+            resp = await self._http.post(
+                "https://www.reddit.com/api/v1/access_token",
+                data={"grant_type": "client_credentials"},
+                auth=(REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET),
+                headers={"User-Agent": REDDIT_USER_AGENT},
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            token_data = resp.json()
+            self._reddit_token = token_data["access_token"]
+            self._reddit_token_expires = time.time() + token_data.get("expires_in", 3600)
+            logger.info("Reddit OAuth token acquired/refreshed")
+            return self._reddit_token
+        except Exception as e:
+            logger.warning(f"Reddit OAuth token request failed: {e}")
+            self._reddit_token = None
+            return None
 
     def _get_cached(self, key: str) -> Optional[object]:
         """Return cached value if still fresh, else None."""
@@ -243,47 +285,74 @@ class SocialSentimentFetcher:
     # ------------------------------------------------------------------
 
     async def _fetch_reddit_hot(self, subreddit: str) -> list[RedditPost]:
-        """Fetch hot posts from a subreddit via Reddit's public JSON API."""
+        """Fetch hot posts from a subreddit. Uses OAuth if configured, else public JSON."""
         cache_key = f"reddit_{subreddit}"
         cached = self._get_cached(cache_key)
         if cached is not None:
             return cached
+
+        # Try OAuth first (reliable from server IPs)
+        token = await self._get_reddit_token()
+        if token:
+            try:
+                resp = await self._http.get(
+                    f"{REDDIT_OAUTH_BASE}/{subreddit}/hot",
+                    params={"limit": 25, "raw_json": 1},
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "User-Agent": REDDIT_USER_AGENT,
+                    },
+                    timeout=15.0,
+                )
+                if resp.status_code == 401:
+                    # Token expired — clear it and fall through to public
+                    self._reddit_token = None
+                    logger.debug("Reddit OAuth token expired, falling back to public")
+                else:
+                    resp.raise_for_status()
+                    posts = self._parse_reddit_listing(resp.json(), subreddit)
+                    self._set_cached(cache_key, posts)
+                    return posts
+            except Exception as e:
+                logger.debug(f"Reddit OAuth fetch failed for r/{subreddit}: {e}")
+                # Fall through to public endpoint
+
+        # Fallback: public JSON endpoint (may 403 from server IPs)
         try:
             resp = await self._http.get(
-                f"{REDDIT_BASE}/{subreddit}/hot.json",
-                params={"limit": 25},
+                f"{REDDIT_PUBLIC_BASE}/{subreddit}/hot.json",
+                params={"limit": 25, "raw_json": 1},
                 headers=REDDIT_HEADERS,
                 timeout=15.0,
             )
             if resp.status_code in (403, 429):
-                logger.debug(
-                    f"Reddit blocked for r/{subreddit} (HTTP {resp.status_code})"
-                )
                 raise RuntimeError(
                     f"Reddit returned {resp.status_code} for r/{subreddit}"
                 )
             resp.raise_for_status()
-            data = resp.json()
-
-            posts = []
-            for child in data.get("data", {}).get("children", []):
-                post_data = child.get("data", {})
-                # Skip stickied/pinned posts (mod announcements)
-                if post_data.get("stickied", False):
-                    continue
-                posts.append(RedditPost(
-                    title=post_data.get("title", ""),
-                    score=post_data.get("score", 0),
-                    num_comments=post_data.get("num_comments", 0),
-                    upvote_ratio=post_data.get("upvote_ratio", 0.0),
-                    subreddit=subreddit,
-                ))
-
+            posts = self._parse_reddit_listing(resp.json(), subreddit)
             self._set_cached(cache_key, posts)
             return posts
         except Exception as e:
             logger.debug(f"Reddit fetch failed for r/{subreddit}: {e}")
             raise
+
+    @staticmethod
+    def _parse_reddit_listing(data: dict, subreddit: str) -> list[RedditPost]:
+        """Parse a Reddit listing response into RedditPost objects."""
+        posts = []
+        for child in data.get("data", {}).get("children", []):
+            post_data = child.get("data", {})
+            if post_data.get("stickied", False):
+                continue
+            posts.append(RedditPost(
+                title=post_data.get("title", ""),
+                score=post_data.get("score", 0),
+                num_comments=post_data.get("num_comments", 0),
+                upvote_ratio=post_data.get("upvote_ratio", 0.0),
+                subreddit=subreddit,
+            ))
+        return posts
 
     # ------------------------------------------------------------------
     # CoinGecko fetches
