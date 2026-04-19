@@ -402,6 +402,93 @@ class DiscordNotifier:
         except Exception as e:
             logger.debug(f"Discord notification failed: {e}")
 
+    async def send_agent_alert(
+        self,
+        agent_name: str,
+        title: str,
+        message: str,
+        severity: str = "info",
+        data: dict = None,
+    ):
+        """Send a general alert from any agent or the PM to Discord.
+
+        Use this for anything noteworthy: data errors, unusual findings,
+        risk warnings, setup triggers, wake events, etc.
+        """
+        if not self.enabled:
+            return
+
+        severity_config = {
+            "critical": {"color": 0xE74C3C, "icon": "🔴", "label": "CRITICAL"},
+            "high":     {"color": 0xE67E22, "icon": "🟠", "label": "HIGH"},
+            "medium":   {"color": 0xF1C40F, "icon": "🟡", "label": "MEDIUM"},
+            "info":     {"color": 0x3498DB, "icon": "🔵", "label": "INFO"},
+        }
+        cfg = severity_config.get(severity, severity_config["info"])
+
+        fields = [
+            {"name": "Agent", "value": agent_name, "inline": True},
+            {"name": "Severity", "value": f"{cfg['icon']} {cfg['label']}", "inline": True},
+        ]
+
+        if data:
+            # Add up to 4 data fields
+            for i, (k, v) in enumerate(data.items()):
+                if i >= 4:
+                    break
+                fields.append({"name": k, "value": str(v)[:200], "inline": True})
+
+        embed = {
+            "title": f"{cfg['icon']} {title}",
+            "color": cfg["color"],
+            "description": message[:2000],
+            "fields": fields,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "footer": {"text": f"AlgoTrader — {agent_name}"},
+        }
+
+        await self._send(embed)
+
+    async def send_wake_alert(self, trigger_type: str, severity: str, reason: str):
+        """Send a wake event notification — Opus is being woken up."""
+        if not self.enabled:
+            return
+
+        embed = {
+            "title": f"🚨 WAKE EVENT — {trigger_type.upper()}",
+            "color": 0xE74C3C if severity == "critical" else 0xE67E22,
+            "description": f"Agents are waking Opus for an emergency session.\n\n**Reason:** {reason}",
+            "fields": [
+                {"name": "Trigger", "value": trigger_type, "inline": True},
+                {"name": "Severity", "value": severity.upper(), "inline": True},
+            ],
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "footer": {"text": "AlgoTrader — Wake System"},
+        }
+        await self._send(embed)
+
+    async def send_pm_session_summary(self, session_num: int, summary: str,
+                                       trades_executed: int = 0, tasks_created: int = 0):
+        """Send a brief summary after each Opus PM session."""
+        if not self.enabled:
+            return
+
+        fields = [
+            {"name": "Session", "value": f"#{session_num}", "inline": True},
+            {"name": "Trades", "value": str(trades_executed), "inline": True},
+            {"name": "Tasks Assigned", "value": str(tasks_created), "inline": True},
+        ]
+
+        embed = {
+            "title": "🧠 PM Session Complete",
+            "color": COLOR_INFO,
+            "description": summary[:2000] if summary else "No notable activity.",
+            "fields": fields,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "footer": {"text": "AlgoTrader — Opus PM"},
+        }
+        await self._send(embed)
+
     async def close(self):
         """Clean up."""
         if self._owns_http:

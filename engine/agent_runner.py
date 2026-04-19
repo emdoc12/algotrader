@@ -36,6 +36,7 @@ import httpx
 
 from database import Database
 from config import BotConfig
+from discord_notifier import DiscordNotifier
 
 logger = logging.getLogger(__name__)
 
@@ -68,10 +69,12 @@ class WakeConfig:
 class WakeManager:
     """Manages wake-up events with cooldowns and rate limiting."""
 
-    def __init__(self, db: Database, config: WakeConfig = None):
+    def __init__(self, db: Database, config: WakeConfig = None,
+                 discord: DiscordNotifier = None):
         self.db = db
         self.config = config or WakeConfig()
         self._consecutive_wakes = 0
+        self.discord = discord
 
     def can_wake(self, trigger_type: str, severity: str) -> bool:
         """Check if a wake-up is allowed right now."""
@@ -131,7 +134,16 @@ class WakeManager:
         )
         self._consecutive_wakes += 1
         logger.info(f"🚨 WAKE EVENT #{wake_id}: [{severity}] {trigger_type} — {reason}")
+
+        # Send to Discord so the operator knows immediately
+        if self.discord:
+            asyncio.ensure_future(self.discord.send_wake_alert(trigger_type, severity, reason))
+
         return wake_id
+
+    def set_discord(self, discord: DiscordNotifier):
+        """Attach Discord notifier (called after init)."""
+        self.discord = discord
 
     def reset_escalation(self):
         """Reset consecutive wake counter after a scheduled PM session."""
@@ -148,10 +160,12 @@ class BaseAgent:
     AGENT_TYPE = "base"
     AGENT_NAME = "Base Agent"
 
-    def __init__(self, db: Database, config: BotConfig, http: httpx.AsyncClient):
+    def __init__(self, db: Database, config: BotConfig, http: httpx.AsyncClient,
+                 discord: DiscordNotifier = None):
         self.db = db
         self.config = config
         self._http = http
+        self.discord = discord
 
     async def run_cycle(self, market_data: dict = None):
         """Run one cycle: process tasks + autonomous work."""
@@ -165,12 +179,27 @@ class BaseAgent:
                 except Exception as e:
                     logger.error(f"{self.AGENT_NAME} task #{task['id']} failed: {e}")
                     self.db.complete_agent_task(task["id"], error=str(e))
+                    # Flag task failures to Discord
+                    await self.report_and_notify(
+                        report_type="task_error",
+                        title=f"Task Failed: {task.get('title', 'unknown')[:50]}",
+                        summary=f"{self.AGENT_NAME} task #{task['id']} error: {str(e)[:200]}",
+                        severity="high",
+                        task_id=task["id"],
+                    )
 
         # Run autonomous work
         try:
             await self.autonomous_work(market_data)
         except Exception as e:
-            logger.debug(f"{self.AGENT_NAME} autonomous work error: {e}")
+            logger.warning(f"{self.AGENT_NAME} autonomous work error: {e}")
+            # Flag autonomous failures — these are data/API issues
+            await self.report_and_notify(
+                report_type="system_error",
+                title=f"{self.AGENT_NAME}: System Error",
+                summary=f"Autonomous work failed: {str(e)[:200]}",
+                severity="critical",
+            )
 
     async def execute_task(self, task: dict, market_data: dict = None) -> str:
         """Execute a queued task. Override in subclasses."""
@@ -179,6 +208,31 @@ class BaseAgent:
     async def autonomous_work(self, market_data: dict = None):
         """Run autonomous background work. Override in subclasses."""
         pass
+
+    async def report_and_notify(self, report_type: str, title: str,
+                                summary: str, body: str = "",
+                                severity: str = "info", task_id: int = 0,
+                                data: dict = None):
+        """Save a report AND send to Discord if severity is high/critical."""
+        self.db.add_agent_report(
+            agent_type=self.AGENT_TYPE,
+            report_type=report_type,
+            title=title,
+            summary=summary,
+            body=body or summary,
+            severity=severity,
+            task_id=task_id,
+            data_json=json.dumps(data or {}),
+        )
+        # Push to Discord for anything medium or above
+        if self.discord and severity in ("medium", "high", "critical"):
+            await self.discord.send_agent_alert(
+                agent_name=self.AGENT_NAME,
+                title=title,
+                message=summary,
+                severity=severity,
+                data=data,
+            )
 
     async def call_haiku(self, system_prompt: str, user_message: str,
                          max_tokens: int = 500) -> str:
@@ -599,8 +653,8 @@ Rules:
 - Max 250 words."""
 
     def __init__(self, db: Database, config: BotConfig, http: httpx.AsyncClient,
-                 wake_manager: WakeManager):
-        super().__init__(db, config, http)
+                 wake_manager: WakeManager, discord: DiscordNotifier = None):
+        super().__init__(db, config, http, discord=discord)
         self.wake_manager = wake_manager
 
     async def autonomous_work(self, market_data: dict = None):
@@ -662,8 +716,7 @@ Rules:
             elif "HIGH" in result.upper() or "ELEVATED" in result.upper():
                 severity = "high"
 
-            self.db.add_agent_report(
-                agent_type=self.AGENT_TYPE,
+            await self.report_and_notify(
                 report_type="risk_assessment",
                 title="Risk Assessment",
                 summary=result[:200],
@@ -767,8 +820,8 @@ class SetupTracker(BaseAgent):
     AGENT_NAME = "Setup Tracker"
 
     def __init__(self, db: Database, config: BotConfig, http: httpx.AsyncClient,
-                 wake_manager: WakeManager):
-        super().__init__(db, config, http)
+                 wake_manager: WakeManager, discord: DiscordNotifier = None):
+        super().__init__(db, config, http, discord=discord)
         self.wake_manager = wake_manager
         self._last_btc_price: float = 0
         self._last_prices: dict = {}
@@ -888,25 +941,26 @@ class AgentRunner:
     """
 
     def __init__(self, db: Database, config: BotConfig, http: httpx.AsyncClient,
-                 wake_manager: WakeManager):
+                 wake_manager: WakeManager, discord: DiscordNotifier = None):
         self.db = db
         self.config = config
         self._http = http
         self.wake_manager = wake_manager
+        self.discord = discord
 
         # Research Team
-        self.market_research = MarketResearchAgent(db, config, http)
-        self.technical = TechnicalAgent(db, config, http)
-        self.onchain = OnChainAgent(db, config, http)
-        self.derivatives = DerivativesAgent(db, config, http)
+        self.market_research = MarketResearchAgent(db, config, http, discord=discord)
+        self.technical = TechnicalAgent(db, config, http, discord=discord)
+        self.onchain = OnChainAgent(db, config, http, discord=discord)
+        self.derivatives = DerivativesAgent(db, config, http, discord=discord)
 
         # Execution Team
-        self.order_manager = OrderManagerAgent(db, config, http)
-        self.risk_manager = RiskManagerAgent(db, config, http, wake_manager)
-        self.backtester = BacktestAgent(db, config, http)
+        self.order_manager = OrderManagerAgent(db, config, http, discord=discord)
+        self.risk_manager = RiskManagerAgent(db, config, http, wake_manager, discord=discord)
+        self.backtester = BacktestAgent(db, config, http, discord=discord)
 
         # Cross-cutting
-        self.setup_tracker = SetupTracker(db, config, http, wake_manager)
+        self.setup_tracker = SetupTracker(db, config, http, wake_manager, discord=discord)
 
         self._all_agents = [
             self.market_research, self.technical, self.onchain, self.derivatives,
