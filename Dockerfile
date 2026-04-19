@@ -49,6 +49,8 @@ ENV PM_INTERVAL_SECONDS=7200
 ENV AGENT_INTERVAL_SECONDS=300
 ENV MAX_WAKES_PER_DAY=6
 ENV WAKE_COOLDOWN_SECONDS=1800
+# v4.0.2 Discord Alerts
+ENV DISCORD_WEBHOOK_URL=
 
 # ── Dashboard port ───────────────────────────────────────────────────────────
 EXPOSE 3737

@@ -148,6 +148,12 @@ ALERT TAGS — set or cancel price/indicator alerts:
 [ALERT: coin=ETH, condition=price_below, threshold=1500, reason=watching for breakdown, plan=buy 0.5 ETH if structure holds]
 [CANCEL_ALERT: 3, 7]
 
+DISCORD NOTIFICATION — send a message directly to your operator's Discord:
+[NOTIFY: severity=critical, title=Exchange API Down, message=Kraken returning 503 errors for the last 15 minutes. Halting all trading until resolved.]
+[NOTIFY: severity=medium, title=Strategy Shift, message=Switching to defensive posture — multiple bearish signals converging across BTC and ETH.]
+- severity: critical, high, medium, info
+- Use this to flag broken infrastructure, major decisions, or anything your operator needs to see NOW.
+
 ## PM SESSION STRUCTURE
 Each session, you receive:
 1. AGENT REPORTS — intelligence from your 7 specialists since your last session
@@ -1567,6 +1573,29 @@ class AIStrategy:
                     logger.warning(f"Failed to create agent task: {e}")
             if task_matches:
                 clean_text = _re.sub(r'\[TASK:\s*.*?\]', '', clean_text, flags=_re.DOTALL)
+
+            # Parse [NOTIFY: severity=..., title=..., message=...]
+            notify_matches = _re.findall(r'\[NOTIFY:\s*(.*?)\]', content, _re.DOTALL)
+            for nmatch in notify_matches:
+                nparams = {}
+                for pair in _re.findall(r'(\w+)\s*=\s*([^,\]]+)', nmatch):
+                    nparams[pair[0].lower().strip()] = pair[1].strip()
+                n_severity = nparams.get("severity", "info")
+                n_title = nparams.get("title", "PM Notification")
+                n_message = nparams.get("message", "")
+                if n_message:
+                    try:
+                        await self.discord.send_agent_alert(
+                            agent_name="Opus PM",
+                            title=n_title,
+                            message=n_message,
+                            severity=n_severity,
+                        )
+                        logger.info(f"PM sent Discord notification: [{n_severity}] {n_title}")
+                    except Exception as e:
+                        logger.warning(f"Failed to send PM Discord notification: {e}")
+            if notify_matches:
+                clean_text = _re.sub(r'\[NOTIFY:\s*.*?\]', '', clean_text, flags=_re.DOTALL)
 
             # Parse [BACKTEST: strategy=..., pair=..., interval=..., hours=..., ...]
             backtest_match = _re.search(r'\[BACKTEST:\s*(.*?)\]', content)
