@@ -381,10 +381,12 @@ async function fetchData() {
     nsEl.textContent = ns.replace('_', ' ');
     nsEl.className = ns.includes('bullish') ? 'positive' : ns.includes('bearish') ? 'negative' : 'neutral';
 
-    const outlook = sig.ai_outlook || '--';
+    const olText = sig.ai_outlook || '--';
     const olEl = document.getElementById('aiOutlook');
-    olEl.textContent = outlook;
-    olEl.className = outlook === 'bullish' ? 'positive' : outlook === 'bearish' ? 'negative' : 'neutral';
+    if (olEl) {
+      olEl.textContent = olText;
+      olEl.className = olText === 'bullish' ? 'positive' : olText === 'bearish' ? 'negative' : 'neutral';
+    }
 
     // Market overview
     if (sig.coins_scanned) {
