@@ -368,10 +368,15 @@ class AlgoTraderBot:
         except Exception as e:
             logger.warning(f"Could not fetch initial ticker: {e}")
 
-        position = self.db.get_open_position()
-        if position:
+        positions = self.db.get_all_open_positions() if hasattr(self.db, 'get_all_open_positions') else []
+        if not positions:
+            position = self.db.get_open_position()
+            positions = [position] if position else []
+        for position in positions:
+            sym = getattr(position, 'symbol', 'BTC/USD')
+            coin = sym.split('/')[0] if '/' in sym else sym
             logger.info(
-                f"Open position: {position.quantity:.6f} BTC @ ${position.entry_price:,.2f} | "
+                f"Open position: {position.quantity:.6f} {coin} @ ${position.entry_price:,.2f} | "
                 f"SL: ${position.stop_loss:,.2f} | TP: ${position.take_profit:,.2f}"
             )
         else:

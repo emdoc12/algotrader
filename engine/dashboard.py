@@ -711,8 +711,8 @@ function appendChatMsg(role, text, ts) {
   html = html.replace(/[*][*](.*?)[*][*]/g, '<strong>$1</strong>');
   html = html.replace(/[*](.*?)[*]/g, '<em>$1</em>');
   html = html.replace(/\\n/g, '<br>');
-  html = html.replace(/(<br>)\s*[-•]\s+/g, '$1&#8226; ');
-  html = html.replace(/^[-•]\s+/, '&#8226; ');
+  html = html.replace(/(<br>)\\s*[-•]\\s+/g, '$1&#8226; ');
+  html = html.replace(/^[-•]\\s+/, '&#8226; ');
   if (ts) {
     const dt = new Date(ts * 1000);
     html += '<div class="chat-msg-time">' + dt.toLocaleTimeString() + '</div>';
