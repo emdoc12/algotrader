@@ -937,6 +937,17 @@ class AIStrategy:
                 pos.unrealized_pnl = (pos_price - pos.entry_price) * pos.quantity
                 self.db.save_position(pos)
 
+        # --- Refresh chat context cache so PM chat sees fresh agent intel ---
+        try:
+            recent_trades = self.db.get_trades(limit=10)
+            self._last_context = self._build_context(
+                current_price, bars, signals, sentiment_data,
+                positions, recent_trades, balance, market_overview,
+                mark_read=False,  # Don't consume reports — Opus still needs them
+            )
+        except Exception as e:
+            logger.debug(f"Agent cycle context refresh failed: {e}")
+
         return {
             "price": current_price,
             "action": "agent_cycle",
@@ -1094,11 +1105,15 @@ class AIStrategy:
 
         return data
 
-    def _build_context(self, price, bars, signals, sentiment, positions, trades, balance, market_overview=None) -> str:
+    def _build_context(self, price, bars, signals, sentiment, positions, trades, balance, market_overview=None, mark_read=True) -> str:
         """Build the data context string for Opus PM sessions.
 
         v4.0: Now includes agent reports as the PRIMARY intelligence source.
         Raw data is still included but agents have pre-analyzed it.
+
+        Args:
+            mark_read: If True (default), marks agent reports as read. Set False
+                       for cache-refresh during agent cycles (so Opus still sees them).
         """
         parts = []
 
@@ -1138,8 +1153,9 @@ class AIStrategy:
                     if r["summary"]:
                         parts.append(f"     {r['summary'][:600]}")
 
-            # Mark all as read
-            self.db.mark_reports_read([r["id"] for r in unread_reports])
+            # Mark all as read (only during actual PM sessions, not cache refreshes)
+            if mark_read:
+                self.db.mark_reports_read([r["id"] for r in unread_reports])
         else:
             parts.append("## AGENT INTELLIGENCE BRIEFING")
             parts.append("No new reports from your team since last session.")
