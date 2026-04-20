@@ -1761,6 +1761,18 @@ class AIStrategy:
                 f"SL: ${position.stop_loss:,.2f} | TP: ${position.take_profit:,.2f}"
             )
 
+            # === AUTO-PLACE HARD STOP ORDER ===
+            # Critical: position.stop_loss is just a tracking value checked every scan.
+            # In fast markets, price can blow through it between cycles.
+            # Place an actual stop-market order to guarantee execution.
+            await self._place_protective_stop(
+                symbol=decision.symbol,
+                quantity=quantity,
+                stop_price=position.stop_loss,
+                strategy=decision.strategy_used,
+                reason=f"Auto-stop for {decision.symbol} buy @ ${price:,.2f}",
+            )
+
             # Discord alert
             bal = self.paper_trader.get_balance() if self.paper_trader else None
             await self.discord.send_trade_alert(
@@ -1864,6 +1876,17 @@ class AIStrategy:
                 f"Total: {total_qty:.6f} @ ${avg_entry:,.2f} avg"
             )
 
+            # === AUTO-PLACE HARD STOP ORDER (updated for new total qty) ===
+            # Cancel any existing stop for this symbol, then place new one for full position
+            await self._cancel_existing_stops(decision.symbol)
+            await self._place_protective_stop(
+                symbol=decision.symbol,
+                quantity=total_qty,
+                stop_price=position.stop_loss,
+                strategy=f"{decision.strategy_used}_scalein",
+                reason=f"Updated stop for {decision.symbol} scale-in, total {total_qty:.6f}",
+            )
+
             bal = self.paper_trader.get_balance() if self.paper_trader else None
             await self.discord.send_trade_alert(
                 side="buy", symbol=decision.symbol, quantity=quantity,
@@ -1938,11 +1961,22 @@ class AIStrategy:
                 if decision.take_profit > 0:
                     position.take_profit = decision.take_profit
                 self.db.save_position(position)
+                # Update auto-stop to reflect reduced position size
+                await self._cancel_existing_stops(decision.symbol)
+                await self._place_protective_stop(
+                    symbol=decision.symbol,
+                    quantity=remaining,
+                    stop_price=position.stop_loss,
+                    strategy=decision.strategy_used,
+                    reason=f"Updated stop after partial sell, remaining {remaining:.6f}",
+                )
                 sell_type = "PARTIAL SELL"
             else:
                 # Full close — remove ALL position rows for this symbol
                 self.db.close_all_positions_for_symbol(decision.symbol)
                 self._trailing_stops.pop(decision.symbol, None)
+                # Cancel any outstanding auto-stop orders (position is closed)
+                await self._cancel_existing_stops(decision.symbol)
                 sell_type = "SELL"
 
             self.db.log("TRADE",
@@ -1995,6 +2029,127 @@ class AIStrategy:
         except Exception as e:
             logger.error(f"Sell execution failed for {decision.symbol}: {e}")
             return f"error: {e}"
+
+    # ── Protective Stop Helpers ──────────────────────────────────────────────
+
+    async def _place_protective_stop(self, symbol: str, quantity: float,
+                                     stop_price: float, strategy: str = "",
+                                     reason: str = ""):
+        """Place a HARD stop-loss order — stop-market on Kraken, pending_order in paper.
+
+        This guarantees execution when the trigger price is hit, unlike the soft
+        position.stop_loss field which is only checked each scan cycle (~5 min).
+        """
+        if stop_price <= 0 or quantity <= 0:
+            return
+
+        sym_info = SYMBOL_MAP.get(symbol, SYMBOL_MAP["BTC/USD"])
+        base_coin = sym_info["base"]
+
+        try:
+            if self.is_paper:
+                # Paper mode: create a pending stop-loss order checked each scan
+                oid = self.db.create_pending_order(
+                    symbol=symbol,
+                    side="sell",
+                    price=stop_price,
+                    quantity=quantity,
+                    stop_loss=0,
+                    take_profit=0,
+                    strategy=f"auto_stop_{strategy}",
+                    reasoning=reason[:200],
+                    confidence=1.0,
+                    expires_hours=0,  # GTC — good till cancelled
+                )
+                self.db.conn.execute(
+                    "UPDATE pending_orders SET order_type='stop-loss' WHERE id=?",
+                    (oid,),
+                )
+                self.db.conn.commit()
+                logger.info(
+                    f"HARD STOP placed (paper): {symbol} sell {quantity:.6f} {base_coin} "
+                    f"@ ${stop_price:,.2f} trigger | Order #{oid}"
+                )
+                self.db.log("ORDER",
+                    f"Auto stop-market: sell {quantity:.6f} {base_coin} @ ${stop_price:,.2f} (#{oid})")
+            else:
+                # Live mode: place actual stop-loss (stop-MARKET) on Kraken
+                orig_symbol = self.kraken.symbol
+                self.kraken.symbol = sym_info["kraken"]
+                result = await self.kraken.place_order(
+                    side="sell",
+                    volume=Decimal(str(round(quantity, 8))),
+                    ordertype="stop-loss",  # stop-MARKET, NOT stop-limit
+                    price=Decimal(str(stop_price)),
+                    validate=(self.config.mode != "live"),
+                )
+                self.kraken.symbol = orig_symbol
+
+                # Track in pending_orders for dashboard visibility
+                oid = self.db.create_pending_order(
+                    symbol=symbol,
+                    side="sell",
+                    price=stop_price,
+                    quantity=quantity,
+                    stop_loss=0,
+                    take_profit=0,
+                    strategy=f"auto_stop_{strategy}",
+                    reasoning=reason[:200],
+                    confidence=1.0,
+                    expires_hours=0,
+                )
+                self.db.conn.execute(
+                    "UPDATE pending_orders SET order_type='stop-loss' WHERE id=?",
+                    (oid,),
+                )
+                self.db.conn.commit()
+
+                logger.info(
+                    f"HARD STOP placed (Kraken): {symbol} sell {quantity:.6f} {base_coin} "
+                    f"@ ${stop_price:,.2f} trigger | Kraken: {result.order_id} | Local #{oid}"
+                )
+                self.db.log("ORDER",
+                    f"Kraken stop-market: sell {quantity:.6f} {base_coin} @ ${stop_price:,.2f} "
+                    f"(Kraken: {result.order_id})")
+
+        except Exception as e:
+            # This is critical — if we can't place a stop, the position is unprotected
+            logger.error(f"FAILED to place protective stop for {symbol}: {e}")
+            self.db.log("ERROR", f"Protective stop FAILED for {symbol}: {e}")
+            await self.discord.send_agent_alert(
+                agent_name="OrderExecution",
+                title=f"STOP ORDER FAILED — {symbol}",
+                message=(
+                    f"Could not place protective stop-loss for {symbol}.\n"
+                    f"Position is UNPROTECTED at stop ${stop_price:,.2f}.\n"
+                    f"Error: {e}\n"
+                    f"ACTION REQUIRED: Place stop manually or monitor closely."
+                ),
+                severity="critical",
+            )
+
+    async def _cancel_existing_stops(self, symbol: str):
+        """Cancel any existing auto-stop pending orders for a symbol.
+
+        Called before placing a new stop (e.g., after scale-in changes position size).
+        """
+        try:
+            rows = self.db.conn.execute(
+                """SELECT id FROM pending_orders
+                   WHERE symbol=? AND order_type='stop-loss'
+                     AND strategy LIKE 'auto_stop_%' AND status='open'""",
+                (symbol,),
+            ).fetchall()
+            for row in rows:
+                self.db.conn.execute(
+                    "UPDATE pending_orders SET status='cancelled' WHERE id=?",
+                    (row["id"],),
+                )
+                logger.info(f"Cancelled old auto-stop #{row['id']} for {symbol}")
+            if rows:
+                self.db.conn.commit()
+        except Exception as e:
+            logger.warning(f"Error cancelling existing stops for {symbol}: {e}")
 
     async def _execute_advanced_order(self, decision: AIDecision, current_price: float) -> str:
         """Place an advanced (non-market) order — either as pending in paper mode, or on Kraken in live."""
@@ -2241,6 +2396,8 @@ class AIStrategy:
                         self.db.save_position(position)
                     else:
                         self.db.close_all_positions_for_symbol(symbol)
+                        # Cancel any other auto-stops (position fully closed)
+                        await self._cancel_existing_stops(symbol)
 
             # Mark order as filled
             self.db.fill_pending_order(order["id"])

@@ -310,7 +310,7 @@ Rules:
         result = await self.call_haiku(
             system_prompt=self.ANALYSIS_PROMPT,
             user_message=combined[:6000],
-            max_tokens=350,
+            max_tokens=700,
         )
 
         if result:
