@@ -32,7 +32,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AlgoTrader v{{VERSION}}</title>
-<link rel="icon" href="data:image/png;base64,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">
+<link rel="icon" type="image/png" href="/favicon.png">
+<link rel="apple-touch-icon" href="/favicon.png">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4" async></script>
 <style>
   :root {
@@ -876,8 +877,18 @@ class Dashboard:
                 self._version = f.read().strip()
         except Exception:
             self._version = "4.0.2"
+        # Load favicon as bytes for serving
+        try:
+            import os as _os
+            favicon_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "favicon_64.png")
+            with open(favicon_path, "rb") as f:
+                self._favicon_bytes = f.read()
+        except Exception:
+            self._favicon_bytes = None
         self.app = web.Application()
         self.app.router.add_get('/', self._index)
+        self.app.router.add_get('/favicon.ico', self._favicon)
+        self.app.router.add_get('/favicon.png', self._favicon)
         self.app.router.add_get('/api/status', self._api_status)
         self.app.router.add_post('/api/mode', self._api_set_mode)
         self.app.router.add_get('/api/goals', self._api_get_goals)
@@ -891,6 +902,11 @@ class Dashboard:
         """Called by the bot after each scan to update displayed signals."""
         self._last_price = price
         self._last_signals = signals_dict
+
+    async def _favicon(self, request):
+        if self._favicon_bytes:
+            return web.Response(body=self._favicon_bytes, content_type='image/png')
+        return web.Response(status=404)
 
     async def _index(self, request):
         html = DASHBOARD_HTML.replace("{{VERSION}}", self._version)
