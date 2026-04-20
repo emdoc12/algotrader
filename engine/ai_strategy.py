@@ -807,6 +807,144 @@ class AIStrategy:
 
         return result
 
+    async def run_agent_cycle(self) -> dict:
+        """Run just the agent desk — lightweight cycle between PM sessions.
+
+        Fetches current price + market overview, runs the 7 Haiku agents,
+        checks stop-losses, and returns a summary dict. Does NOT call Opus.
+        """
+        # --- Get current price ---
+        try:
+            ticker = await self.kraken.get_ticker()
+            current_price = float(ticker.last)
+        except Exception as e:
+            logger.warning(f"Agent cycle: ticker fetch failed: {e}")
+            return {"error": str(e)}
+
+        # --- Market overview (multi-coin scan) ---
+        market_overview = None
+        try:
+            market_overview = await self._scanner.scan_all()
+            self._last_market_overview = market_overview
+        except Exception as e:
+            logger.debug(f"Agent cycle: market scan failed: {e}")
+
+        # --- Whale activity ---
+        try:
+            self._last_whale_data = await self._whale_monitor.get_whale_activity()
+        except Exception as e:
+            logger.debug(f"Agent cycle: whale monitor failed: {e}")
+
+        # --- Sentiment (lightweight, uses cache) ---
+        try:
+            sentiment_data = await self.sentiment.get_sentiment()
+        except Exception:
+            sentiment_data = None
+
+        # --- Get positions and balance ---
+        positions = self.db.get_open_positions()
+        balance = self.paper_trader.get_balance() if self.paper_trader else None
+
+        # --- Update equity and drawdown tracking ---
+        if self.is_paper and self.paper_trader:
+            prices = {"BTC": current_price}
+            if market_overview:
+                for snap in market_overview.coin_snapshots:
+                    prices[snap.symbol] = snap.price
+            self.paper_trader.update_equity(prices)
+
+            equity = self.paper_trader.balance.total_equity
+            if equity > self._peak_equity:
+                self._peak_equity = equity
+            if self._peak_equity > 0:
+                self._drawdown_pct = ((self._peak_equity - equity) / self._peak_equity) * 100
+            self._drawdown_active = self._drawdown_pct >= 5.0
+
+        # --- Build market data and run agents ---
+        try:
+            bars = await self.kraken.get_ohlc(interval=self.config.candle_interval)
+        except Exception:
+            bars = []
+
+        signals = None
+        if bars:
+            try:
+                from indicators import compute_signals
+                signals = compute_signals(bars)
+            except Exception:
+                pass
+
+        agent_market_data = self.build_agent_market_data(
+            current_price, bars, signals, sentiment_data,
+            positions, balance, market_overview,
+        )
+
+        try:
+            await self._agent_runner.run_cycle(agent_market_data)
+        except Exception as e:
+            logger.warning(f"Agent runner cycle failed: {e}")
+
+        # --- Check pending orders ---
+        await self._check_pending_orders(current_price, market_overview)
+
+        # --- Check stop-loss / take-profit on ALL open positions ---
+        for pos in positions:
+            pos_sym_info = SYMBOL_MAP.get(pos.symbol, {})
+            pos_base = pos_sym_info.get("base", "BTC")
+            if pos.symbol == "BTC/USD":
+                pos_price = current_price
+            elif market_overview:
+                pos_price = next(
+                    (s.price for s in market_overview.coin_snapshots if s.symbol == pos_base),
+                    0
+                )
+            else:
+                pos_price = 0
+
+            if pos_price <= 0:
+                continue
+
+            # Trailing stop ratchet
+            trail = self._trailing_stops.get(pos.symbol, {})
+            trail_pct = trail.get("trailing_pct", 0)
+            if trail_pct > 0:
+                highest = max(trail.get("highest_price", pos_price), pos_price)
+                trail["highest_price"] = highest
+                self._trailing_stops[pos.symbol] = trail
+                trailing_stop_price = highest * (1 - trail_pct / 100)
+                if trailing_stop_price > pos.stop_loss:
+                    logger.info(
+                        f"Trailing stop on {pos.symbol} ratcheted: "
+                        f"${pos.stop_loss:,.2f} -> ${trailing_stop_price:,.2f}"
+                    )
+                    pos.stop_loss = trailing_stop_price
+
+            if pos.stop_loss > 0 and pos_price <= pos.stop_loss:
+                sell_decision = AIDecision(
+                    action="SELL", symbol=pos.symbol, quantity=pos.quantity,
+                    confidence=1.0, strategy_used="stop_loss",
+                    reasoning=f"Stop-loss triggered at ${pos_price:,.2f}",
+                )
+                await self._execute_sell(sell_decision, pos, pos_price)
+            elif pos.take_profit > 0 and pos_price >= pos.take_profit:
+                sell_decision = AIDecision(
+                    action="SELL", symbol=pos.symbol, quantity=pos.quantity,
+                    confidence=1.0, strategy_used="profit_taking",
+                    reasoning=f"Take-profit triggered at ${pos_price:,.2f}",
+                )
+                await self._execute_sell(sell_decision, pos, pos_price)
+            else:
+                pos.unrealized_pnl = (pos_price - pos.entry_price) * pos.quantity
+                self.db.save_position(pos)
+
+        return {
+            "price": current_price,
+            "action": "agent_cycle",
+            "market_overview": market_overview,
+            "signals": signals,
+            "sentiment": sentiment_data,
+        }
+
     def build_agent_market_data(self, price, bars, signals, sentiment,
                                 positions, balance, market_overview=None) -> dict:
         """Build the market_data dict that agents consume.

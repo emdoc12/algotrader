@@ -195,7 +195,21 @@ class AlgoTraderBot:
                 # Monday morning weekly digest check
                 await self._check_weekly_digest()
 
-            elif not self._using_ai:
+            elif self._using_ai:
+                # Between PM sessions: run agent desk + stop checks every 5 min
+                try:
+                    result = await self.strategy.run_agent_cycle()
+                    if "error" not in result:
+                        self._update_dashboard(result)
+                        if agent_cycle % 6 == 0:  # Log every ~30 min
+                            logger.info(
+                                f"Agent cycle #{agent_cycle}: ${result.get('price', 0):,.2f} | "
+                                f"Next PM in {max(0, pm_interval - (time.time() - last_pm_time)):.0f}s"
+                            )
+                except Exception as e:
+                    logger.error(f"Agent cycle #{agent_cycle} failed: {e}")
+
+            else:
                 # Non-AI mode: run indicator strategy on original interval
                 try:
                     result = await self.strategy.run_scan()
@@ -204,10 +218,11 @@ class AlgoTraderBot:
                 except Exception as e:
                     logger.error(f"Scan #{agent_cycle} failed: {e}")
 
-            # === Log agent cycle ===
-            if agent_cycle % 12 == 0:  # Log every ~hour
+            # === Heartbeat log (hourly) ===
+            if agent_cycle % 12 == 0:
+                pos_count = len(self.db.get_open_positions()) if hasattr(self.db, 'get_open_positions') else 0
                 logger.info(
-                    f"Agent desk: cycle #{agent_cycle} | "
+                    f"Heartbeat: cycle #{agent_cycle} | {pos_count} positions | "
                     f"Next PM in {max(0, pm_interval - (time.time() - last_pm_time)):.0f}s"
                 )
 
