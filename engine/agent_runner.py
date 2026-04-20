@@ -241,22 +241,35 @@ class BaseAgent:
         if not api_key:
             return ""
         try:
-            resp = await self._http.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": self.config.haiku_model,
-                    "max_tokens": max_tokens,
-                    "system": system_prompt,
-                    "messages": [{"role": "user", "content": user_message}],
-                },
+            resp = await asyncio.wait_for(
+                self._http.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": api_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": self.config.haiku_model,
+                        "max_tokens": max_tokens,
+                        "system": system_prompt,
+                        "messages": [{"role": "user", "content": user_message}],
+                    },
+                ),
+                timeout=30.0,  # 30s hard timeout — prevent agent desk stalls
             )
             resp.raise_for_status()
-            return resp.json()["content"][0]["text"]
+            data = resp.json()
+            text = data["content"][0]["text"]
+            # Warn if response was truncated (hit max_tokens)
+            if data.get("stop_reason") == "max_tokens":
+                logger.warning(
+                    f"Agent {self.AGENT_NAME} response truncated at {max_tokens} tokens"
+                )
+            return text
+        except asyncio.TimeoutError:
+            logger.warning(f"Haiku call timed out ({self.AGENT_NAME}) after 30s")
+            return ""
         except Exception as e:
             logger.warning(f"Haiku call failed ({self.AGENT_NAME}): {e}")
             return ""
@@ -347,7 +360,7 @@ Rules:
                 note = await self.call_haiku(
                     system_prompt=self.ANALYSIS_PROMPT,
                     user_message=f"Research query: {query}\n\nFindings:\n{raw}",
-                    max_tokens=400,
+                    max_tokens=800,
                 )
                 if note:
                     self.db.add_research_note(
@@ -411,7 +424,7 @@ Rules:
         result = await self.call_haiku(
             system_prompt=self.TA_PROMPT,
             user_message=combined[:8000],
-            max_tokens=400,
+            max_tokens=800,
         )
 
         if result:
@@ -473,7 +486,7 @@ Rules:
         result = await self.call_haiku(
             system_prompt=self.ONCHAIN_PROMPT,
             user_message=combined[:5000],
-            max_tokens=250,
+            max_tokens=600,
         )
 
         if result:
@@ -535,7 +548,7 @@ Rules:
         result = await self.call_haiku(
             system_prompt=self.DERIV_PROMPT,
             user_message=combined[:5000],
-            max_tokens=300,
+            max_tokens=700,
         )
 
         if result:
@@ -611,7 +624,7 @@ Rules:
         result = await self.call_haiku(
             system_prompt=self.ORDER_PROMPT,
             user_message=combined[:4000],
-            max_tokens=250,
+            max_tokens=600,
         )
 
         if result:
@@ -699,7 +712,7 @@ Rules:
         result = await self.call_haiku(
             system_prompt=self.RISK_PROMPT,
             user_message=combined[:5000],
-            max_tokens=300,
+            max_tokens=700,
         )
 
         if result:
@@ -753,7 +766,7 @@ should be deployed, modified, or abandoned. Be specific with numbers. Max 150 wo
                 summary = await self.call_haiku(
                     system_prompt=self.BACKTEST_SUMMARY_PROMPT,
                     user_message=result,
-                    max_tokens=200,
+                    max_tokens=400,
                 )
                 self.db.add_agent_report(
                     agent_type=self.AGENT_TYPE,
@@ -790,7 +803,7 @@ should be deployed, modified, or abandoned. Be specific with numbers. Max 150 wo
                 summary = await self.call_haiku(
                     system_prompt=self.BACKTEST_SUMMARY_PROMPT,
                     user_message=result,
-                    max_tokens=150,
+                    max_tokens=400,
                 )
                 if summary:
                     self.db.add_agent_report(

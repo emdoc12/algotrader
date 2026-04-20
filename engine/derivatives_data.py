@@ -21,6 +21,27 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+
+async def _retry_fetch(coro_fn, retries: int = 2, backoff: float = 1.5, label: str = ""):
+    """Retry an async fetch with exponential backoff.
+
+    Args:
+        coro_fn: Callable that returns a coroutine (called fresh each attempt).
+        retries: Number of retry attempts after first failure.
+        backoff: Multiplier for delay between retries.
+        label: Name for logging.
+    """
+    delay = backoff
+    for attempt in range(retries + 1):
+        try:
+            return await coro_fn()
+        except Exception as e:
+            if attempt == retries:
+                raise  # Final attempt — let it propagate
+            logger.debug(f"{label} attempt {attempt + 1} failed: {e}, retrying in {delay:.1f}s")
+            await asyncio.sleep(delay)
+            delay *= backoff
+
 # Map our coin symbols to exchange-specific contract names
 BINANCE_SYMBOLS = {
     "BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT",
@@ -124,16 +145,20 @@ class DerivativesDataFetcher:
 
         snapshot = DerivativesSnapshot(timestamp=time.time())
 
-        # Fire all fetches concurrently
+        # Stagger fetches by exchange to avoid rate-limit storms.
+        # Group 1: one request per exchange (funding rates) — fire together
+        # Group 2: one request per exchange (OI) — fire after small delay
+        # Group 3: liquidations + options — fire last
+        # Each individual fetch gets 1 retry with backoff.
         tasks = [
-            self._fetch_binance_funding(coins),
-            self._fetch_bybit_funding(coins),
-            self._fetch_okx_funding(coins),
-            self._fetch_binance_oi(coins),
-            self._fetch_bybit_oi(coins),
-            self._fetch_okx_oi(coins),
-            self._fetch_binance_liquidations(coins),
-            self._fetch_deribit_options(),
+            _retry_fetch(lambda c=coins: self._fetch_binance_funding(c), label="binance_funding"),
+            _retry_fetch(lambda c=coins: self._fetch_bybit_funding(c), label="bybit_funding"),
+            _retry_fetch(lambda c=coins: self._fetch_okx_funding(c), label="okx_funding"),
+            _retry_fetch(lambda c=coins: self._fetch_binance_oi(c), label="binance_oi"),
+            _retry_fetch(lambda c=coins: self._fetch_bybit_oi(c), label="bybit_oi"),
+            _retry_fetch(lambda c=coins: self._fetch_okx_oi(c), label="okx_oi"),
+            _retry_fetch(lambda c=coins: self._fetch_binance_liquidations(c), label="binance_liqs"),
+            _retry_fetch(lambda: self._fetch_deribit_options(), label="deribit_options"),
         ]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -235,7 +260,7 @@ class DerivativesDataFetcher:
         try:
             resp = await self._http.get(
                 "https://fapi.binance.com/fapi/v1/premiumIndex",
-                timeout=10.0,
+                timeout=15.0,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -281,7 +306,7 @@ class DerivativesDataFetcher:
             resp = await self._http.get(
                 "https://fapi.binance.com/fapi/v1/openInterest",
                 params={"symbol": bsym},
-                timeout=8.0,
+                timeout=12.0,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -290,7 +315,7 @@ class DerivativesDataFetcher:
             resp2 = await self._http.get(
                 "https://fapi.binance.com/fapi/v1/premiumIndex",
                 params={"symbol": bsym},
-                timeout=8.0,
+                timeout=12.0,
             )
             resp2.raise_for_status()
             mark = float(resp2.json().get("markPrice", 0))
@@ -311,7 +336,7 @@ class DerivativesDataFetcher:
                 resp = await self._http.get(
                     "https://fapi.binance.com/fapi/v1/allForceOrders",
                     params={"symbol": bsym, "limit": 100},
-                    timeout=8.0,
+                    timeout=12.0,
                 )
                 resp.raise_for_status()
                 orders = resp.json()
@@ -348,7 +373,7 @@ class DerivativesDataFetcher:
             resp = await self._http.get(
                 "https://api.bybit.com/v5/market/tickers",
                 params={"category": "linear"},
-                timeout=10.0,
+                timeout=15.0,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -379,7 +404,7 @@ class DerivativesDataFetcher:
             resp = await self._http.get(
                 "https://api.bybit.com/v5/market/tickers",
                 params={"category": "linear"},
-                timeout=10.0,
+                timeout=15.0,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -413,7 +438,7 @@ class DerivativesDataFetcher:
                 resp = await self._http.get(
                     "https://www.okx.com/api/v5/public/funding-rate",
                     params={"instId": inst_id},
-                    timeout=8.0,
+                    timeout=12.0,
                 )
                 resp.raise_for_status()
                 data = resp.json()
@@ -441,7 +466,7 @@ class DerivativesDataFetcher:
                 resp = await self._http.get(
                     "https://www.okx.com/api/v5/public/open-interest",
                     params={"instType": "SWAP", "instId": inst_id},
-                    timeout=8.0,
+                    timeout=12.0,
                 )
                 resp.raise_for_status()
                 data = resp.json()
@@ -454,7 +479,7 @@ class DerivativesDataFetcher:
                         resp2 = await self._http.get(
                             "https://www.okx.com/api/v5/public/mark-price",
                             params={"instType": "SWAP", "instId": inst_id},
-                            timeout=8.0,
+                            timeout=12.0,
                         )
                         resp2.raise_for_status()
                         mark_data = resp2.json().get("data", [])
@@ -484,7 +509,7 @@ class DerivativesDataFetcher:
                 resp = await self._http.get(
                     "https://www.deribit.com/api/v2/public/get_book_summary_by_currency",
                     params={"currency": currency, "kind": "option"},
-                    timeout=10.0,
+                    timeout=15.0,
                 )
                 resp.raise_for_status()
                 data = resp.json()

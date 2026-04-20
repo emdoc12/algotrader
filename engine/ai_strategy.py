@@ -176,9 +176,18 @@ CANCEL PENDING ORDERS:
 - symbol MUST be one of the 10 tradeable pairs
 - qty = amount of the coin (not USD)
 - stop/target/trail are optional (trail = trailing stop %, 0 = fixed stop)
-- confidence must be >= 0.6 to execute
+- confidence must be >= 0.6 to execute — ENFORCED AT SYSTEM LEVEL. Orders below 0.6 are BLOCKED regardless of your reasoning. The system will log "low_confidence_{action}" and skip execution entirely. This is a hard gate, not a suggestion.
 - strategy: momentum, mean_reversion, trend_following, sentiment, accumulation, scaling, profit_taking, stop_loss
-- expires = hours until order expires (0 = no expiry, default)
+- expires = hours until order expires. Default is 0 = GTC (Good-Till-Cancelled) — the order persists indefinitely until filled or manually cancelled. In live mode, Kraken also defaults to GTC. Always set an explicit expiry for limit orders to avoid stale orders.
+
+PROTECTIVE STOP BEHAVIOR:
+- Every BUY and SCALE-IN automatically places a HARD stop-loss order (stop-market, NOT stop-limit) at the stop price.
+- "Hard stop" = actual order on the exchange (or pending_orders table in paper mode), executed by the exchange engine when triggered.
+- This is separate from the position.stop_loss tracking value, which is a backup checked each scan cycle.
+- On SELL (full close), all auto-stops for that symbol are cancelled.
+- On PARTIAL SELL, auto-stops are updated to reflect the remaining position size.
+- STOP_LOSS tag = stop-MARKET order (guaranteed fill). Use this for protective stops.
+- STOP_LOSS_LIMIT tag = stop-LIMIT order (may NOT fill in fast markets). Only use when you need price control and accept the risk of non-execution.
 
 JOURNAL TAG — save a lesson to your persistent memory:
 [JOURNAL: category=lesson | Bought SOL too early, should have waited for 4h confirmation next time]
@@ -989,7 +998,7 @@ class AIStrategy:
                     ts = _fmt_et(r["created_at"])
                     parts.append(f"  {sev_icon} [{ts}] {r['title']}")
                     if r["summary"]:
-                        parts.append(f"     {r['summary'][:300]}")
+                        parts.append(f"     {r['summary'][:600]}")
 
             # Mark all as read
             self.db.mark_reports_read([r["id"] for r in unread_reports])

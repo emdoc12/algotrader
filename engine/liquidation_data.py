@@ -24,6 +24,20 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+
+async def _retry_fetch(coro_fn, retries: int = 2, backoff: float = 1.5, label: str = ""):
+    """Retry an async fetch with exponential backoff."""
+    delay = backoff
+    for attempt in range(retries + 1):
+        try:
+            return await coro_fn()
+        except Exception as e:
+            if attempt == retries:
+                raise
+            logger.debug(f"{label} attempt {attempt + 1} failed: {e}, retrying in {delay:.1f}s")
+            await asyncio.sleep(delay)
+            delay *= backoff
+
 # Symbols we track
 SYMBOLS = {
     "BTC": {"binance": "BTCUSDT", "bybit": "BTCUSDT"},
@@ -138,16 +152,17 @@ class LiquidationDataFetcher:
             eth_price=eth_price,
         )
 
-        # Fire all API fetches concurrently
+        # Fire all API fetches concurrently with retry on failure
+        # Note: default args in lambdas capture by value (avoids closure bug)
         tasks = [
-            self._fetch_binance_global_ls("BTC"),
-            self._fetch_binance_global_ls("ETH"),
-            self._fetch_binance_top_ls("BTC"),
-            self._fetch_binance_top_ls("ETH"),
-            self._fetch_bybit_ls("BTC"),
-            self._fetch_bybit_ls("ETH"),
-            self._fetch_binance_oi_history("BTC"),
-            self._fetch_binance_oi_history("ETH"),
+            _retry_fetch(lambda s="BTC": self._fetch_binance_global_ls(s), label="binance_global_ls_BTC"),
+            _retry_fetch(lambda s="ETH": self._fetch_binance_global_ls(s), label="binance_global_ls_ETH"),
+            _retry_fetch(lambda s="BTC": self._fetch_binance_top_ls(s), label="binance_top_ls_BTC"),
+            _retry_fetch(lambda s="ETH": self._fetch_binance_top_ls(s), label="binance_top_ls_ETH"),
+            _retry_fetch(lambda s="BTC": self._fetch_bybit_ls(s), label="bybit_ls_BTC"),
+            _retry_fetch(lambda s="ETH": self._fetch_bybit_ls(s), label="bybit_ls_ETH"),
+            _retry_fetch(lambda s="BTC": self._fetch_binance_oi_history(s), label="binance_oi_hist_BTC"),
+            _retry_fetch(lambda s="ETH": self._fetch_binance_oi_history(s), label="binance_oi_hist_ETH"),
         ]
         task_names = [
             "binance_global_ls_BTC", "binance_global_ls_ETH",
@@ -234,7 +249,7 @@ class LiquidationDataFetcher:
             resp = await self._http.get(
                 "https://fapi.binance.com/futures/data/globalLongShortAccountRatio",
                 params={"symbol": bsym, "period": "1h", "limit": 12},
-                timeout=10.0,
+                timeout=15.0,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -254,7 +269,7 @@ class LiquidationDataFetcher:
             resp = await self._http.get(
                 "https://fapi.binance.com/futures/data/topLongShortAccountRatio",
                 params={"symbol": bsym, "period": "1h", "limit": 12},
-                timeout=10.0,
+                timeout=15.0,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -274,7 +289,7 @@ class LiquidationDataFetcher:
             resp = await self._http.get(
                 "https://api.bybit.com/v5/market/account-ratio",
                 params={"category": "linear", "symbol": bsym, "period": "1h", "limit": 12},
-                timeout=10.0,
+                timeout=15.0,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -326,7 +341,7 @@ class LiquidationDataFetcher:
             resp = await self._http.get(
                 "https://fapi.binance.com/futures/data/openInterestHist",
                 params={"symbol": bsym, "period": "1h", "limit": 12},
-                timeout=10.0,
+                timeout=15.0,
             )
             resp.raise_for_status()
             data = resp.json()
