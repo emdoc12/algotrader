@@ -2077,6 +2077,24 @@ class AIStrategy:
         # AI can suggest partial sells
         quantity = min(decision.quantity, position.quantity) if decision.quantity > 0 else position.quantity
 
+        # Safety: cap to what the paper trader actually holds (prevents position/balance drift)
+        if self.is_paper and self.paper_trader:
+            holdings = self.paper_trader.balance.holdings or {}
+            actual_held = holdings.get(base_coin, 0)
+            if actual_held <= 0:
+                # Fallback: check btc_quantity for BTC
+                if base_coin == "BTC":
+                    actual_held = getattr(self.paper_trader.balance, 'btc_quantity', 0) or 0
+            if actual_held > 0 and quantity > actual_held:
+                logger.warning(
+                    f"Position/balance drift on {decision.symbol}: position says {quantity:.6f} "
+                    f"but paper trader holds {actual_held:.6f} {base_coin}. Capping to actual."
+                )
+                quantity = actual_held
+                # Also fix the position record to prevent repeat drift
+                position.quantity = actual_held
+                self.db.save_position(position)
+
         signals_json = json.dumps({
             "ai_action": decision.action,
             "ai_symbol": decision.symbol,
