@@ -938,22 +938,53 @@ class Database:
     # ------------------------------------------------------------------
 
     def get_period_pnl(self, seconds_ago: int) -> dict:
-        """Calculate P&L for a time period (e.g., 7*86400 for weekly)."""
-        cutoff = time.time() - seconds_ago
-        rows = self.conn.execute(
-            "SELECT side, value, fee FROM trades WHERE timestamp >= ?", (cutoff,)
-        ).fetchall()
+        """Calculate realized P&L for a time period using FIFO matching.
 
-        buys = sum(r["value"] + r["fee"] for r in rows if r["side"] == "buy")
-        sells = sum(r["value"] - r["fee"] for r in rows if r["side"] == "sell")
-        trade_count = len(rows)
+        Returns realized P&L only — sells in the window matched against their
+        FIFO-ordered buy lots. A sell this week of a position bought last week
+        contributes the actual profit (sell_revenue - cost_basis - fees), not
+        the gross sell value.
+        """
+        cutoff = time.time() - seconds_ago
+        # Compute FIFO P&L across the full trade history, then keep only sells
+        # whose timestamp falls inside the window. This is the only correct way
+        # to attribute realized P&L: cost basis lives in earlier buys.
+        all_with_pnl = self.get_trades_with_pnl(limit=0)
+
+        realized = 0.0
+        sells_value = 0.0
+        buys_value = 0.0
+        trade_count = 0
+        for t in all_with_pnl:
+            if t["timestamp"] < cutoff:
+                continue
+            trade_count += 1
+            if t["side"] == "sell":
+                sells_value += t["value"]
+                if t.get("pnl_dollar") is not None:
+                    realized += t["pnl_dollar"]
+            else:  # buy
+                buys_value += t["value"] + (t.get("fee") or 0)
 
         return {
             "trade_count": trade_count,
-            "total_bought": buys,
-            "total_sold": sells,
-            "realized_pnl": sells - buys if sells > 0 else 0,
+            "total_bought": buys_value,
+            "total_sold": sells_value,
+            "realized_pnl": round(realized, 2),
         }
+
+    def get_peak_equity(self) -> float:
+        """Return the all-time peak equity from the performance snapshot table.
+
+        Used by the drawdown circuit breaker so it survives restarts. Returns
+        0.0 if no snapshots exist (caller should fall back to starting capital).
+        """
+        row = self.conn.execute(
+            "SELECT MAX(equity) AS peak FROM performance"
+        ).fetchone()
+        if not row or row["peak"] is None:
+            return 0.0
+        return float(row["peak"])
 
     # ------------------------------------------------------------------
     # Agent Task Queue (v4.0)

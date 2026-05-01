@@ -15,10 +15,11 @@ Claude returns a structured JSON decision with action, quantity, and reasoning.
 DUAL OBJECTIVE: Grow the USD cash balance AND accumulate more Bitcoin over time.
 """
 
+import asyncio
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from typing import Optional
@@ -91,6 +92,9 @@ from liquidation_data import LiquidationDataFetcher
 from volume_profile import VolumeProfileAnalyzer
 from backtester import Backtester, run_backtest_from_tag
 from agent_runner import AgentRunner, WakeManager, WakeConfig
+from risk_manager import (
+    RiskLimits, ClampResult, clamp_buy_size, usd_to_qty, risk_usd_to_qty,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +152,13 @@ BTC/USD, ETH/USD, SOL/USD, DOGE/USD, ADA/USD, AVAX/USD, LINK/USD, DOT/USD, POL/U
 - Aggressive but smart. Go big on high-conviction setups, small on speculative ones.
 - You can scale in, partial sell, trail stops — your call.
 - DRAWDOWN BREAKER: 5%+ drawdown from peak = system halves your sizes automatically.
+- DAILY LOSS LIMIT: if daily loss hits the configured limit, system blocks all new buys until UTC midnight (cooldown). Existing protective exits still work.
+- HARD SIZING CAPS (enforced in code, not optional):
+  - max single position: a fraction of equity (config: max_position_pct)
+  - max per-coin exposure: a higher fraction across multiple positions on the same coin (config: max_per_coin_pct)
+  - max risk per trade: stop-distance dollars capped at a small % of equity (config: risk_per_trade_pct)
+  - max total crypto exposure: keeps dry powder for new setups (config: max_total_exposure_pct)
+  Anything you ask for above these limits is silently clamped. Plan within them.
 - FEE RULE: Kraken charges 0.26% per trade (0.52% round trip). Sells under 0.6% profit get blocked (except stop-losses).
 - No shorting, no futures — spot only.
 - LISTEN TO YOUR RISK MANAGER. If they flag HIGH or CRITICAL risk, address it.
@@ -155,9 +166,17 @@ BTC/USD, ETH/USD, SOL/USD, DOGE/USD, ADA/USD, AVAX/USD, LINK/USD, DOT/USD, POL/U
 ## HOW TO TAKE ACTIONS
 Write your thoughts naturally, then use ACTION TAGS for anything the system should execute.
 
-TRADE TAGS (one per response max):
-[BUY: symbol=BTC/USD, qty=0.001, stop=79000, target=88000, trail=2.0, confidence=0.8, strategy=accumulation]
+TRADE TAGS — up to 3 per session, system enforces the total risk budget across all of them.
+Express size as USD notional or risk dollars, NOT coin quantity (avoids mis-sizing across BTC vs DOGE):
+[BUY: symbol=BTC/USD, usd=500, stop=79000, target=88000, trail=2.0, confidence=0.8, strategy=accumulation]
+[BUY: symbol=ETH/USD, risk_usd=75, stop=2400, target=3100, confidence=0.75, strategy=momentum]
 [SELL: symbol=SOL/USD, qty=0.5, confidence=0.75, strategy=profit_taking]
+
+Sizing parameters (pick ONE for buys):
+  - usd=N        → spend $N notional (system converts to coin qty after risk clamps)
+  - risk_usd=N   → size so that (entry - stop) * qty = $N (requires stop=)
+  - qty=N        → legacy: size in coin units (still works but harder to reason about across coins)
+For sells, use qty= (or omit for full close). For partial sells use qty=N or pct=50.
 
 ADVANCED ORDER TAGS — place orders at specific prices/triggers:
 [LIMIT_BUY: symbol=ETH/USD, qty=0.5, price=1800, stop=1700, target=2200, confidence=0.75, strategy=accumulation, expires=48]
@@ -339,6 +358,11 @@ class AIDecision:
     market_outlook: str = "neutral"
     strategy_used: str = ""
     raw_response: str = ""
+    # USD-based sizing intent (resolved to qty at execute time when price is known)
+    _usd_amount: float = 0.0
+    _risk_usd: float = 0.0
+    # Additional trade decisions parsed from the same response (up to N total)
+    extra_decisions: list = field(default_factory=list)
 
 
 class AIStrategy:
@@ -374,10 +398,36 @@ class AIStrategy:
         # Per-symbol trailing stop tracking: {symbol: {highest_price, trailing_pct}}
         self._trailing_stops = {}
         # Drawdown circuit breaker tracking
-        self._peak_equity: float = config.paper.starting_capital if config.mode == "paper" else 0
+        # Load historical peak from equity snapshots so a restart doesn't silently
+        # disable the breaker. Starting capital is only used when there's no history.
+        historical_peak = 0.0
+        try:
+            historical_peak = db.get_peak_equity()
+        except Exception:
+            historical_peak = 0.0
+        starting_capital = config.paper.starting_capital if config.mode == "paper" else 0.0
+        self._peak_equity: float = max(historical_peak, starting_capital)
         self._drawdown_pct: float = 0.0
         self._drawdown_active: bool = False
+
+        # Risk-sizing limits (enforced before every order)
+        s = config.strategy
+        self._risk_limits = RiskLimits(
+            max_position_pct=s.max_position_pct,
+            max_per_coin_pct=s.max_per_coin_pct,
+            max_risk_per_trade_pct=s.risk_per_trade_pct,
+            max_total_exposure_pct=s.max_total_exposure_pct,
+            daily_loss_limit_pct=s.daily_loss_limit_pct,
+        )
+
+        # Daily loss cooldown tracking — equity at the start of the current UTC day
+        self._day_start_ts: float = 0.0
+        self._day_start_equity: float = 0.0
+        self._cooldown_active: bool = False
         # Cached data for context
+        # Multi-symbol order books: {display_symbol: book_dict}
+        self._last_order_books: dict = {}
+        # Backward compat: BTC book is the primary
         self._last_order_book: dict = {}
         self._last_whale_data = None
         self._last_mtf_signals: dict = {}  # multi-timeframe signals
@@ -485,11 +535,15 @@ class AIStrategy:
             logger.warning(f"Market scan failed: {e}")
             market_overview = None
 
-        # Order book depth (BTC — primary pair)
+        # Order book depth — fetch for BTC + open positions + top scanner picks.
+        # Thinly-traded alts (POL, DOT, DOGE) need their own depth context;
+        # without it Claude trades blind on spread/walls and gets bad fills.
         try:
-            self._last_order_book = await self.kraken.get_order_book(depth=15)
+            book_symbols = self._select_order_book_symbols(positions, market_overview, top_n=3)
+            self._last_order_books = await self._fetch_order_books_multi(book_symbols)
+            self._last_order_book = self._last_order_books.get("BTC/USD", {})
         except Exception as e:
-            logger.debug(f"Order book fetch failed: {e}")
+            logger.debug(f"Order books fetch failed: {e}")
 
         # Whale activity
         try:
@@ -731,6 +785,26 @@ class AIStrategy:
             logger.info(f"AI suggested {decision.action} {target_symbol} but confidence too low ({decision.confidence:.2f})")
             action_taken = f"low_confidence_{decision.action.lower()}"
 
+        # Multi-trade per session: process any extra trade tags from the same
+        # response. Risk clamps run on each independently, so the per-coin and
+        # total-exposure caps naturally distribute the budget across them.
+        extras = getattr(decision, "extra_decisions", []) or []
+        if extras:
+            logger.info(f"Processing {len(extras)} extra trade tag(s) from PM session")
+            extra_results = []
+            for extra in extras:
+                # Refresh positions in case the primary trade opened/closed one
+                fresh_positions = self.db.get_open_positions()
+                try:
+                    res = await self._dispatch_decision(
+                        extra, fresh_positions, market_overview, current_price,
+                    )
+                    extra_results.append(f"{extra.action} {extra.symbol}={res}")
+                except Exception as e:
+                    logger.error(f"Extra dispatch failed for {extra.symbol}: {e}")
+                    extra_results.append(f"{extra.action} {extra.symbol}=error")
+            self.db.log("INFO", f"Extra trades: {'; '.join(extra_results)}")
+
         # --- Check pending orders for fills ---
         await self._check_pending_orders(current_price, market_overview)
 
@@ -862,7 +936,7 @@ class AIStrategy:
 
         # --- Build market data and run agents ---
         try:
-            bars = await self.kraken.get_ohlc(interval=self.config.candle_interval)
+            bars = await self.kraken.get_ohlcv(interval=self.config.candle_interval)
         except Exception:
             bars = []
 
@@ -1212,17 +1286,29 @@ class AIStrategy:
         if self._last_mtf_signals:
             parts.append(self._scanner.format_mtf_for_ai(self._last_mtf_signals))
 
-        # Order book depth
-        if self._last_order_book:
-            ob = self._last_order_book
-            parts.append(f"\n## ORDER BOOK (BTC/USD)")
-            parts.append(f"Spread: ${ob.get('spread', 0):,.2f} ({ob.get('spread_pct', 0):.4f}%)")
-            parts.append(f"Bid depth: ${ob.get('bid_depth_usd', 0):,.0f} | Ask depth: ${ob.get('ask_depth_usd', 0):,.0f}")
-            imb = ob.get('imbalance', 0)
-            imb_label = "buyers dominant" if imb > 0.1 else "sellers dominant" if imb < -0.1 else "balanced"
-            parts.append(f"Imbalance: {imb:+.3f} ({imb_label})")
-            parts.append(f"Bid wall: ${ob.get('bid_wall_price', 0):,.2f} ({ob.get('bid_wall_volume', 0):.4f} BTC)")
-            parts.append(f"Ask wall: ${ob.get('ask_wall_price', 0):,.2f} ({ob.get('ask_wall_volume', 0):.4f} BTC)")
+        # Order book depth — multi-symbol now (BTC + open positions + top scanner picks)
+        books = self._last_order_books or (
+            {"BTC/USD": self._last_order_book} if self._last_order_book else {}
+        )
+        if books:
+            parts.append(f"\n## ORDER BOOK DEPTH ({len(books)} symbols)")
+            for sym, ob in books.items():
+                if not ob:
+                    continue
+                base = SYMBOL_MAP.get(sym, {}).get("base", sym.split("/")[0])
+                imb = ob.get('imbalance', 0)
+                imb_label = "buyers dominant" if imb > 0.1 else "sellers dominant" if imb < -0.1 else "balanced"
+                parts.append(
+                    f"{sym}: spread ${ob.get('spread', 0):,.4f} ({ob.get('spread_pct', 0):.3f}%) | "
+                    f"bid depth ${ob.get('bid_depth_usd', 0):,.0f} | ask depth ${ob.get('ask_depth_usd', 0):,.0f} | "
+                    f"imb {imb:+.2f} ({imb_label})"
+                )
+                parts.append(
+                    f"  walls — bid ${ob.get('bid_wall_price', 0):,.2f} "
+                    f"({ob.get('bid_wall_volume', 0):.4f} {base}) / "
+                    f"ask ${ob.get('ask_wall_price', 0):,.2f} "
+                    f"({ob.get('ask_wall_volume', 0):.4f} {base})"
+                )
 
         # Whale activity
         if self._last_whale_data:
@@ -1564,43 +1650,39 @@ class AIStrategy:
             # The conversational text (minus tags) becomes the reasoning shown on dashboard
             clean_text = content
 
-            # Parse all trade/order tags
+            # Parse all trade/order tags — up to N per session, system applies
+            # risk budget across them. The first tag becomes the primary
+            # decision (for dashboard display); the rest go into extra_decisions.
             _ORDER_TAGS = (
                 "LIMIT_BUY|LIMIT_SELL|STOP_LOSS_LIMIT|STOP_LOSS|"
                 "TAKE_PROFIT_LIMIT|TAKE_PROFIT|TRAILING_STOP_LIMIT|TRAILING_STOP|"
                 "ICEBERG|BUY|SELL"
             )
-            trade_match = _re.search(
-                r'\[(' + _ORDER_TAGS + r'):\s*(.*?)\]', content, _re.IGNORECASE
-            )
-            if trade_match:
-                raw_action = trade_match.group(1).upper()
-                params_str = trade_match.group(2)
+            _ORDER_TYPE_MAP = {
+                "BUY": ("BUY", "market"),
+                "SELL": ("SELL", "market"),
+                "LIMIT_BUY": ("BUY", "limit"),
+                "LIMIT_SELL": ("SELL", "limit"),
+                "STOP_LOSS": ("SELL", "stop-loss"),
+                "STOP_LOSS_LIMIT": ("SELL", "stop-loss-limit"),
+                "TAKE_PROFIT": ("SELL", "take-profit"),
+                "TAKE_PROFIT_LIMIT": ("SELL", "take-profit-limit"),
+                "TRAILING_STOP": ("SELL", "trailing-stop"),
+                "TRAILING_STOP_LIMIT": ("SELL", "trailing-stop-limit"),
+                "ICEBERG": ("BUY", "iceberg"),
+            }
 
-                # Map tag to action (BUY/SELL) and order_type
-                _ORDER_TYPE_MAP = {
-                    "BUY": ("BUY", "market"),
-                    "SELL": ("SELL", "market"),
-                    "LIMIT_BUY": ("BUY", "limit"),
-                    "LIMIT_SELL": ("SELL", "limit"),
-                    "STOP_LOSS": ("SELL", "stop-loss"),
-                    "STOP_LOSS_LIMIT": ("SELL", "stop-loss-limit"),
-                    "TAKE_PROFIT": ("SELL", "take-profit"),
-                    "TAKE_PROFIT_LIMIT": ("SELL", "take-profit-limit"),
-                    "TRAILING_STOP": ("SELL", "trailing-stop"),
-                    "TRAILING_STOP_LIMIT": ("SELL", "trailing-stop-limit"),
-                    "ICEBERG": ("BUY", "iceberg"),
-                }
+            def _parse_trade_tag(raw_action: str, params_str: str) -> AIDecision:
+                """Build an AIDecision from a single trade tag's contents."""
+                d = AIDecision()
                 action, order_type = _ORDER_TYPE_MAP.get(raw_action, ("HOLD", "market"))
-                decision.action = action
-                decision.order_type = order_type
+                d.action = action
+                d.order_type = order_type
 
-                # Parse key=value pairs from the tag
                 params = {}
                 for pair in _re.findall(r'(\w+)\s*=\s*([^,\]]+)', params_str):
                     params[pair[0].lower().strip()] = pair[1].strip()
 
-                # Symbol
                 raw_symbol = params.get("symbol", "BTC/USD")
                 if "/" not in raw_symbol and raw_symbol.endswith("USD"):
                     raw_symbol = raw_symbol[:-3] + "/USD"
@@ -1609,23 +1691,85 @@ class AIStrategy:
                 if raw_symbol not in SYMBOL_MAP:
                     logger.warning(f"Unknown symbol '{raw_symbol}' from AI, defaulting to BTC/USD")
                     raw_symbol = "BTC/USD"
-                decision.symbol = raw_symbol
+                d.symbol = raw_symbol
 
-                decision.quantity = float(params.get("qty", 0))
-                decision.stop_loss = float(params.get("stop", 0))
-                decision.take_profit = float(params.get("target", 0))
-                decision.trailing_stop_pct = float(params.get("trail", 0))
-                decision.confidence = float(params.get("confidence", 0))
-                decision.strategy_used = params.get("strategy", "")
-                decision.expires_hours = float(params.get("expires", 0))
+                # Numeric fields with safe float coercion
+                def _f(key, default=0.0):
+                    try:
+                        return float(params.get(key, default))
+                    except (TypeError, ValueError):
+                        return default
 
-                # Price fields for advanced orders
-                decision.limit_price = float(params.get("price", 0))
-                decision.trigger_price = float(params.get("trigger", 0))
-                decision.price2 = float(params.get("price_offset", 0))
-                decision.visible_size = float(params.get("visible", 0))
-                decision.offset = float(params.get("offset", 0))
+                d.quantity = _f("qty", 0)
+                d.stop_loss = _f("stop", 0)
+                d.take_profit = _f("target", 0)
+                d.trailing_stop_pct = _f("trail", 0)
+                d.confidence = _f("confidence", 0)
+                d.strategy_used = params.get("strategy", "")
+                d.expires_hours = _f("expires", 0)
+                d.limit_price = _f("price", 0)
+                d.trigger_price = _f("trigger", 0)
+                d.price2 = _f("price_offset", 0)
+                d.visible_size = _f("visible", 0)
+                d.offset = _f("offset", 0)
 
+                # USD-based sizing: convert to qty before clamps run downstream.
+                # risk_usd needs a stop and a price reference (limit_price for
+                # LIMIT_BUY, otherwise we'll let the executor handle it via stop).
+                usd_amount = _f("usd", 0)
+                risk_usd = _f("risk_usd", 0)
+                ref_price = d.limit_price if d.order_type != "market" else 0
+                # If market buy, qty stays 0 here and gets resolved at execute time
+                # (the executor knows current price). We stash USD intent in qty
+                # via a special channel: positive qty means coin units, but we
+                # also carry usd/risk_usd via attributes for executor lookup.
+                d._usd_amount = usd_amount  # type: ignore[attr-defined]
+                d._risk_usd = risk_usd  # type: ignore[attr-defined]
+
+                # For limit orders we know the fill price — convert immediately
+                if ref_price > 0 and d.action == "BUY" and d.quantity == 0:
+                    if usd_amount > 0:
+                        d.quantity = usd_to_qty(usd_amount, ref_price)
+                    elif risk_usd > 0 and d.stop_loss > 0:
+                        d.quantity = risk_usd_to_qty(risk_usd, ref_price, d.stop_loss)
+
+                return d
+
+            # Find ALL trade tags, cap at config limit
+            max_trades = self.config.strategy.max_trades_per_pm_session
+            trade_iter = list(_re.finditer(
+                r'\[(' + _ORDER_TAGS + r'):\s*(.*?)\]',
+                content,
+                _re.IGNORECASE,
+            ))[:max_trades]
+
+            parsed: list[AIDecision] = []
+            for m in trade_iter:
+                parsed.append(_parse_trade_tag(m.group(1).upper(), m.group(2)))
+
+            if parsed:
+                # Primary decision (dashboard display)
+                primary = parsed[0]
+                decision.action = primary.action
+                decision.order_type = primary.order_type
+                decision.symbol = primary.symbol
+                decision.quantity = primary.quantity
+                decision.stop_loss = primary.stop_loss
+                decision.take_profit = primary.take_profit
+                decision.trailing_stop_pct = primary.trailing_stop_pct
+                decision.confidence = primary.confidence
+                decision.strategy_used = primary.strategy_used
+                decision.expires_hours = primary.expires_hours
+                decision.limit_price = primary.limit_price
+                decision.trigger_price = primary.trigger_price
+                decision.price2 = primary.price2
+                decision.visible_size = primary.visible_size
+                decision.offset = primary.offset
+                # Carry USD intent on primary
+                decision._usd_amount = getattr(primary, "_usd_amount", 0)  # type: ignore[attr-defined]
+                decision._risk_usd = getattr(primary, "_risk_usd", 0)  # type: ignore[attr-defined]
+                # Extras for the dispatcher to also process
+                decision.extra_decisions = parsed[1:]
                 clean_text = _re.sub(r'\[(' + _ORDER_TAGS + r'):\s*.*?\]', '', clean_text, flags=_re.IGNORECASE)
 
             # Parse [CANCEL_ORDER: id, id, ...]
@@ -1838,6 +1982,236 @@ class AIStrategy:
             return AIDecision(action="HOLD", reasoning=f"API error: {e}")
 
     # ------------------------------------------------------------------
+    # Order book helpers (multi-symbol)
+    # ------------------------------------------------------------------
+
+    def _select_order_book_symbols(
+        self,
+        positions: list,
+        market_overview,
+        top_n: int = 3,
+    ) -> list:
+        """Pick the symbols worth fetching depth for: BTC + open positions + top scanner picks."""
+        wanted = ["BTC/USD"]
+        for p in positions or []:
+            if p.symbol and p.symbol in SYMBOL_MAP and p.symbol not in wanted:
+                wanted.append(p.symbol)
+        if market_overview and getattr(market_overview, "coin_snapshots", None):
+            ranked = sorted(
+                market_overview.coin_snapshots,
+                key=lambda c: abs(c.composite_score or 0),
+                reverse=True,
+            )
+            for c in ranked:
+                disp = f"{c.symbol}/USD"
+                if disp in SYMBOL_MAP and disp not in wanted:
+                    wanted.append(disp)
+                    if len(wanted) >= 1 + len(positions or []) + top_n:
+                        break
+        return wanted
+
+    async def _fetch_order_books_multi(self, display_symbols: list) -> dict:
+        """Fetch order books concurrently for all requested display symbols."""
+        async def _one(disp: str):
+            kraken_pair = SYMBOL_MAP.get(disp, {}).get("kraken", "XBTUSD")
+            try:
+                book = await self.kraken.get_order_book(pair=kraken_pair, depth=15)
+                return disp, book
+            except Exception as e:
+                logger.debug(f"Order book fetch failed for {disp}: {e}")
+                return disp, None
+
+        results = await asyncio.gather(*[_one(s) for s in display_symbols])
+        return {disp: book for disp, book in results if book}
+
+    # ------------------------------------------------------------------
+    # Risk / sizing helpers
+    # ------------------------------------------------------------------
+
+    def _last_known_prices(self) -> dict:
+        """Best available {symbol: price} map from the most recent market scan."""
+        prices = {}
+        mkt = self._last_market_overview
+        if mkt and getattr(mkt, "coin_snapshots", None):
+            for c in mkt.coin_snapshots:
+                if c.symbol and c.price:
+                    prices[c.symbol] = c.price
+        return prices
+
+    def _coin_exposure_usd(self, base_coin: str, current_price: float) -> float:
+        """Current USD value of holdings in `base_coin`."""
+        if not self.paper_trader:
+            return 0.0
+        qty = self.paper_trader.balance.holdings.get(base_coin, 0.0)
+        return qty * current_price
+
+    def _total_exposure_usd(self) -> float:
+        """Total USD value of all crypto holdings, using last known prices."""
+        if not self.paper_trader:
+            return 0.0
+        prices = self._last_known_prices()
+        total = 0.0
+        for sym, qty in self.paper_trader.balance.holdings.items():
+            total += qty * prices.get(sym, 0.0)
+        return total
+
+    def _reserved_cash_usd(self) -> float:
+        """Cash committed to open buy limit orders that haven't filled yet."""
+        try:
+            pending = self.db.get_pending_orders()
+        except Exception:
+            return 0.0
+        reserved = 0.0
+        for o in pending:
+            if o.get("side") == "buy":
+                price = o.get("price") or 0
+                qty = o.get("quantity") or 0
+                # add taker fee buffer to match what an actual fill would cost
+                reserved += price * qty * 1.0026
+        return reserved
+
+    def _available_cash_usd(self) -> float:
+        """Cash usable for new orders, net of reservations on open limit buys."""
+        if not self.paper_trader:
+            return 0.0
+        return max(0.0, self.paper_trader.balance.cash_usd - self._reserved_cash_usd())
+
+    def _refresh_daily_cooldown(self) -> None:
+        """Roll over day_start_equity at UTC midnight; flag cooldown if breached."""
+        now = time.time()
+        # Truncate to UTC midnight
+        utc_midnight = now - (now % 86400)
+        if self._day_start_ts != utc_midnight:
+            # New UTC day — snapshot starting equity, clear cooldown
+            self._day_start_ts = utc_midnight
+            equity_now = (self.paper_trader.balance.total_equity
+                          if self.paper_trader else 0.0)
+            self._day_start_equity = equity_now
+            self._cooldown_active = False
+            return
+
+        if not self.paper_trader or self._day_start_equity <= 0:
+            return
+        equity_now = self.paper_trader.balance.total_equity
+        loss_pct = ((self._day_start_equity - equity_now) / self._day_start_equity) * 100
+        if loss_pct >= self._risk_limits.daily_loss_limit_pct:
+            if not self._cooldown_active:
+                logger.warning(
+                    f"DAILY LOSS LIMIT HIT: -{loss_pct:.2f}% from day open "
+                    f"(start ${self._day_start_equity:,.2f} → ${equity_now:,.2f}). "
+                    f"Cooldown active — new buys blocked."
+                )
+                self.db.log("WARNING",
+                    f"Daily loss cooldown active: -{loss_pct:.2f}% (limit "
+                    f"{self._risk_limits.daily_loss_limit_pct:.1f}%)")
+            self._cooldown_active = True
+
+    def _resolve_usd_intent(self, decision: 'AIDecision', price: float) -> None:
+        """Convert decision._usd_amount / _risk_usd into decision.quantity.
+
+        Only fires when qty wasn't explicitly set. Lets Claude express size in
+        dollars (which it reasons about better than coin units across BTC vs DOGE).
+        """
+        if decision.quantity > 0:
+            return
+        usd_amount = getattr(decision, "_usd_amount", 0) or 0
+        risk_usd = getattr(decision, "_risk_usd", 0) or 0
+        if usd_amount > 0:
+            decision.quantity = usd_to_qty(usd_amount, price)
+        elif risk_usd > 0 and decision.stop_loss > 0:
+            decision.quantity = risk_usd_to_qty(risk_usd, price, decision.stop_loss)
+
+    def _apply_risk_clamps(self, decision: 'AIDecision', price: float) -> ClampResult:
+        """Run all sizing clamps for a buy/scale-in. Returns final qty + reasons."""
+        self._refresh_daily_cooldown()
+        # Resolve USD intent first so the clamp sees a coin-unit qty
+        self._resolve_usd_intent(decision, price)
+        sym_info = SYMBOL_MAP.get(decision.symbol, SYMBOL_MAP["BTC/USD"])
+        base_coin = sym_info["base"]
+
+        equity = (self.paper_trader.balance.total_equity
+                  if self.paper_trader else 0.0)
+        coin_value = self._coin_exposure_usd(base_coin, price)
+        total_value = self._total_exposure_usd()
+        available_cash = self._available_cash_usd()
+
+        return clamp_buy_size(
+            symbol=decision.symbol,
+            requested_qty=decision.quantity,
+            price=price,
+            stop_price=decision.stop_loss,
+            equity=equity,
+            available_cash=available_cash,
+            coin_exposure_usd=coin_value,
+            total_exposure_usd=total_value,
+            limits=self._risk_limits,
+            drawdown_active=self._drawdown_active,
+            cooldown_active=self._cooldown_active,
+        )
+
+    async def _dispatch_decision(
+        self,
+        decision: 'AIDecision',
+        positions: list,
+        market_overview,
+        current_price: float,
+    ) -> str:
+        """Dispatch a single AIDecision through the right execution path.
+
+        Used for both the primary decision and any extras parsed from the same
+        Claude response (multi-trade per session). Resolves the target price
+        for the decision's symbol against the market overview.
+        """
+        target_symbol = decision.symbol
+        sym_info = SYMBOL_MAP.get(target_symbol, SYMBOL_MAP["BTC/USD"])
+        base_coin = sym_info["base"]
+
+        if target_symbol == "BTC/USD" or target_symbol == self.config.kraken.display_symbol:
+            target_price = current_price
+        elif market_overview:
+            target_price = next(
+                (s.price for s in market_overview.coin_snapshots if s.symbol == base_coin),
+                0,
+            )
+            if target_price <= 0:
+                logger.error(f"No price for {base_coin} — skipping extra trade")
+                return "no_price"
+        else:
+            if target_symbol != "BTC/USD":
+                return "no_market_data"
+            target_price = current_price
+
+        position = self.db.get_open_position(symbol=target_symbol)
+
+        TAKER_FEE_PCT = 0.26
+        ROUND_TRIP_FEE_PCT = TAKER_FEE_PCT * 2
+        MIN_PROFIT_PCT = 0.60
+
+        if decision.confidence < 0.6:
+            logger.info(
+                f"Extra trade {decision.action} {target_symbol} skipped — "
+                f"low confidence ({decision.confidence:.2f})"
+            )
+            return f"low_confidence_{decision.action.lower()}"
+
+        if decision.order_type != "market":
+            return await self._execute_advanced_order(decision, target_price)
+        if decision.action == "BUY":
+            if position is not None:
+                return await self._execute_scale_in(decision, position, target_price)
+            return await self._execute_buy(decision, target_price)
+        if decision.action == "SELL" and position is not None:
+            profit_pct = (target_price - position.entry_price) / position.entry_price * 100
+            if 0 < profit_pct < MIN_PROFIT_PCT and decision.strategy_used not in ("stop_loss",):
+                logger.info(
+                    f"Blocking extra sell on {target_symbol}: {profit_pct:.2f}% gain "
+                    f"doesn't cover {ROUND_TRIP_FEE_PCT:.2f}% round-trip fees"
+                )
+                return f"blocked_insufficient_profit ({profit_pct:.2f}%)"
+            return await self._execute_sell(decision, position, target_price)
+        return "hold"
+
+    # ------------------------------------------------------------------
     # Trade execution
     # ------------------------------------------------------------------
 
@@ -1846,17 +2220,25 @@ class AIStrategy:
         sym_info = SYMBOL_MAP.get(decision.symbol, SYMBOL_MAP["BTC/USD"])
         base_coin = sym_info["base"]
         min_size = MIN_ORDER_SIZE.get(base_coin, 0.0001)
-        quantity = decision.quantity
 
-        # Drawdown circuit breaker — halve position size when in drawdown
-        if self._drawdown_active:
-            quantity = quantity * 0.5
-            logger.info(f"Drawdown breaker: halving buy size to {quantity:.6f} {base_coin}")
-
-        # Cap to available cash (reserve 0.26% for taker fee)
-        if self.paper_trader:
-            max_qty = self.paper_trader.balance.cash_usd / (price * 1.0026)
-            quantity = min(quantity, max_qty)
+        # Centralized risk clamping (max position %, per-coin cap, risk dollars,
+        # total exposure cap, drawdown halving, daily loss cooldown, cash cap).
+        clamp = self._apply_risk_clamps(decision, price)
+        if clamp.blocked:
+            reason_str = ", ".join(clamp.reasons) or "blocked"
+            logger.info(
+                f"AI buy {decision.symbol} BLOCKED by risk: {reason_str}"
+            )
+            self.db.log("INFO",
+                f"Risk blocked BUY {decision.symbol}: {reason_str}")
+            return f"risk_blocked: {reason_str}"
+        quantity = clamp.final_qty
+        if clamp.changed:
+            logger.info(
+                f"Risk clamps adjusted {decision.symbol} buy: "
+                f"{clamp.requested_qty:.6f} → {quantity:.6f} {base_coin} "
+                f"({', '.join(clamp.reasons)})"
+            )
 
         if quantity < min_size:
             logger.info(f"AI buy quantity {quantity} below min {min_size} for {base_coin}, skipping")
@@ -1960,17 +2342,25 @@ class AIStrategy:
         sym_info = SYMBOL_MAP.get(decision.symbol, SYMBOL_MAP["BTC/USD"])
         base_coin = sym_info["base"]
         min_size = MIN_ORDER_SIZE.get(base_coin, 0.0001)
-        quantity = decision.quantity
 
-        # Drawdown circuit breaker — halve position size
-        if self._drawdown_active:
-            quantity = quantity * 0.5
-            logger.info(f"Drawdown breaker: halving scale-in size to {quantity:.6f} {base_coin}")
-
-        # Cap to available cash (reserve 0.26% for taker fee)
-        if self.paper_trader:
-            max_qty = self.paper_trader.balance.cash_usd / (price * 1.0026)
-            quantity = min(quantity, max_qty)
+        # Same risk clamps as a fresh buy — per-coin cap accounts for the
+        # existing position so scale-ins can't blow past concentration limits.
+        clamp = self._apply_risk_clamps(decision, price)
+        if clamp.blocked:
+            reason_str = ", ".join(clamp.reasons) or "blocked"
+            logger.info(
+                f"Scale-in {decision.symbol} BLOCKED by risk: {reason_str}"
+            )
+            self.db.log("INFO",
+                f"Risk blocked SCALE_IN {decision.symbol}: {reason_str}")
+            return f"risk_blocked: {reason_str}"
+        quantity = clamp.final_qty
+        if clamp.changed:
+            logger.info(
+                f"Risk clamps adjusted {decision.symbol} scale-in: "
+                f"{clamp.requested_qty:.6f} → {quantity:.6f} {base_coin} "
+                f"({', '.join(clamp.reasons)})"
+            )
 
         if quantity < min_size:
             logger.info(f"Scale-in quantity {quantity} below min {min_size} for {base_coin}, skipping")
@@ -2338,6 +2728,32 @@ class AIStrategy:
         base_coin = sym_info["base"]
         order_type = decision.order_type
 
+        # Apply risk clamps to BUY-side advanced orders (LIMIT_BUY, ICEBERG buy, etc.)
+        # SELL-side orders (stop-loss, take-profit, trailing-stop) are protective
+        # exits and bypass clamps. Use the limit price for sizing since that's
+        # where the order will fill if/when triggered.
+        is_buy = decision.action.lower() == "buy"
+        if is_buy:
+            clamp_price = decision.limit_price or current_price
+            # Reuse buy-side clamping by temporarily targeting the limit price
+            saved_qty = decision.quantity
+            clamp = self._apply_risk_clamps(decision, clamp_price)
+            if clamp.blocked:
+                reason_str = ", ".join(clamp.reasons) or "blocked"
+                logger.info(
+                    f"Advanced {order_type} BUY {decision.symbol} BLOCKED by risk: {reason_str}"
+                )
+                self.db.log("INFO",
+                    f"Risk blocked {order_type} BUY {decision.symbol}: {reason_str}")
+                return f"risk_blocked: {reason_str}"
+            if clamp.changed:
+                logger.info(
+                    f"Risk clamps adjusted {order_type} BUY {decision.symbol}: "
+                    f"{saved_qty:.6f} → {clamp.final_qty:.6f} {base_coin} "
+                    f"({', '.join(clamp.reasons)})"
+                )
+                decision.quantity = clamp.final_qty
+
         if self.is_paper:
             # In paper mode, save to pending_orders and check each scan
             oid = self.db.create_pending_order(
@@ -2551,14 +2967,53 @@ class AIStrategy:
                         symbol=base_coin, display_symbol=symbol,
                         strategy=f"filled_{order['order_type']}_{order.get('strategy', '')}",
                     )
-                # Save position
-                position = Position(
-                    symbol=symbol, side="long", entry_price=fill_price,
-                    quantity=quantity, entry_time=time.time(),
-                    stop_loss=order.get("stop_loss", 0) or fill_price * 0.95,
-                    take_profit=order.get("take_profit", 0) or fill_price * 1.10,
-                )
-                self.db.save_position(position)
+                # Merge into existing open position if there is one — otherwise
+                # we'd end up with two Position rows for the same coin and
+                # get_open_position() would only see the latest, distorting
+                # P&L, stops, and scale-in math.
+                existing = self.db.get_open_position(symbol=symbol)
+                if existing:
+                    old_cost = existing.entry_price * existing.quantity
+                    new_cost = fill_price * quantity
+                    total_qty = existing.quantity + quantity
+                    avg_entry = (old_cost + new_cost) / total_qty if total_qty > 0 else fill_price
+                    existing.entry_price = avg_entry
+                    existing.quantity = total_qty
+                    # Prefer the order's stops if provided; otherwise keep existing
+                    if order.get("stop_loss"):
+                        existing.stop_loss = order["stop_loss"]
+                    if order.get("take_profit"):
+                        existing.take_profit = order["take_profit"]
+                    self.db.save_position(existing)
+                    logger.info(
+                        f"MERGED pending fill into existing {symbol} position: "
+                        f"+{quantity:.6f} → total {total_qty:.6f} @ ${avg_entry:,.2f} avg"
+                    )
+                    # Refresh protective stop for the new total size
+                    await self._cancel_existing_stops(symbol)
+                    await self._place_protective_stop(
+                        symbol=symbol,
+                        quantity=total_qty,
+                        stop_price=existing.stop_loss,
+                        strategy=order.get("strategy", "merged_fill"),
+                        reason=f"Updated stop after pending buy fill, total {total_qty:.6f}",
+                    )
+                else:
+                    position = Position(
+                        symbol=symbol, side="long", entry_price=fill_price,
+                        quantity=quantity, entry_time=time.time(),
+                        stop_loss=order.get("stop_loss", 0) or fill_price * 0.95,
+                        take_profit=order.get("take_profit", 0) or fill_price * 1.10,
+                    )
+                    self.db.save_position(position)
+                    # Place protective stop on the new position
+                    await self._place_protective_stop(
+                        symbol=symbol,
+                        quantity=quantity,
+                        stop_price=position.stop_loss,
+                        strategy=order.get("strategy", "filled_buy"),
+                        reason=f"Auto-stop for filled pending buy on {symbol}",
+                    )
 
             elif side == "sell":
                 if self.paper_trader:

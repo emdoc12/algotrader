@@ -26,9 +26,10 @@ class PaperTrader:
     """
 
     def __init__(self, db: Database, starting_capital: float = 10000.0,
-                 taker_fee_pct: float = 0.26):
+                 taker_fee_pct: float = 0.26, slippage_pct: float = 0.05):
         self.db = db
         self.taker_fee_pct = taker_fee_pct
+        self.slippage_pct = slippage_pct
         self.balance = db.get_paper_balance(default_capital=starting_capital)
         # Load persisted holdings
         self.balance.holdings = db.get_holdings()
@@ -87,7 +88,9 @@ class PaperTrader:
             strategy: Strategy name for logging
             signals_json: JSON snapshot of signals
         """
-        cost = price * quantity
+        # Apply slippage: market buys fill above the quoted price
+        fill_price = price * (1.0 + self.slippage_pct / 100.0)
+        cost = fill_price * quantity
         fee = cost * (self.taker_fee_pct / 100.0)
         total_cost = cost + fee
 
@@ -107,11 +110,12 @@ class PaperTrader:
         self.db.save_paper_balance(self.balance)
         self.db.update_holding(symbol, self.balance.holdings[symbol])
 
-        # Record trade
+        # Record trade at the actual fill price (post-slippage), so FIFO P&L
+        # reflects what live execution would have produced.
         trade = Trade(
             timestamp=time.time(),
             side="buy",
-            price=price,
+            price=fill_price,
             quantity=quantity,
             value=cost,
             fee=fee,
@@ -125,7 +129,8 @@ class PaperTrader:
         trade.id = self.db.record_trade(trade)
 
         logger.info(
-            f"[PAPER] BUY {quantity:.6f} {symbol} @ ${price:,.2f} | "
+            f"[PAPER] BUY {quantity:.6f} {symbol} @ ${fill_price:,.2f} "
+            f"(quote ${price:,.2f}, slip {self.slippage_pct:.2f}%) | "
             f"Cost: ${total_cost:,.2f} (fee: ${fee:.2f}) | "
             f"Cash remaining: ${self.balance.cash_usd:,.2f}"
         )
@@ -159,7 +164,9 @@ class PaperTrader:
                 f"have {current_qty:.6f}"
             )
 
-        proceeds = price * quantity
+        # Apply slippage: market sells fill below the quoted price
+        fill_price = price * (1.0 - self.slippage_pct / 100.0)
+        proceeds = fill_price * quantity
         fee = proceeds * (self.taker_fee_pct / 100.0)
         net_proceeds = proceeds - fee
 
@@ -174,11 +181,11 @@ class PaperTrader:
         self.db.save_paper_balance(self.balance)
         self.db.update_holding(symbol, self.balance.holdings.get(symbol, 0))
 
-        # Record trade
+        # Record trade at the actual fill price (post-slippage)
         trade = Trade(
             timestamp=time.time(),
             side="sell",
-            price=price,
+            price=fill_price,
             quantity=quantity,
             value=proceeds,
             fee=fee,
@@ -192,7 +199,8 @@ class PaperTrader:
         trade.id = self.db.record_trade(trade)
 
         logger.info(
-            f"[PAPER] SELL {quantity:.6f} {symbol} @ ${price:,.2f} | "
+            f"[PAPER] SELL {quantity:.6f} {symbol} @ ${fill_price:,.2f} "
+            f"(quote ${price:,.2f}, slip {self.slippage_pct:.2f}%) | "
             f"Proceeds: ${net_proceeds:,.2f} (fee: ${fee:.2f}) | "
             f"Cash: ${self.balance.cash_usd:,.2f}"
         )

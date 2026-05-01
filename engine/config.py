@@ -37,13 +37,18 @@ class StrategyConfig:
     # --- Risk management ---
     stop_loss_pct: float = 3.0       # percent below entry to cut losses
     take_profit_pct: float = 6.0     # percent above entry to lock profit
-    # --- Position sizing ---
-    risk_per_trade_pct: float = 2.0  # percent of capital risked per trade
-    max_position_pct: float = 30.0   # max percent of capital in a single position
+    # --- Position sizing (enforced by risk_manager.py) ---
+    risk_per_trade_pct: float = 1.5  # max stop-distance dollars as % equity
+    max_position_pct: float = 25.0   # single position cap (% equity)
+    max_per_coin_pct: float = 35.0   # combined exposure to one coin (% equity)
+    max_total_exposure_pct: float = 80.0  # total holdings (% equity); leaves dry powder
+    daily_loss_limit_pct: float = 4.0     # daily realized+unrealized drawdown trigger
     # --- Scan interval ---
     scan_interval_seconds: int = 60  # how often to check signals (seconds)
     # --- OHLCV history needed for indicators ---
     history_bars: int = 100          # number of candles to fetch for indicator warmup
+    # --- Multi-trade per session ---
+    max_trades_per_pm_session: int = 3  # cap trade tags executed per PM cycle
 
 
 @dataclass
@@ -52,6 +57,9 @@ class PaperTradingConfig:
     starting_capital: float = 10000.0  # USD
     maker_fee_pct: float = 0.16        # Kraken maker fee
     taker_fee_pct: float = 0.26        # Kraken taker fee
+    # Slippage applied to every market fill (paper only). Buys fill above quote,
+    # sells fill below — closer to what live execution actually delivers.
+    slippage_pct: float = 0.05         # 0.05% per side
 
 
 @dataclass
@@ -123,15 +131,20 @@ def load_config() -> BotConfig:
             bb_std_dev=float(os.getenv("BB_STD_DEV", "2.0")),
             stop_loss_pct=float(os.getenv("STOP_LOSS_PCT", "3.0")),
             take_profit_pct=float(os.getenv("TAKE_PROFIT_PCT", "6.0")),
-            risk_per_trade_pct=float(os.getenv("RISK_PER_TRADE_PCT", "2.0")),
-            max_position_pct=float(os.getenv("MAX_POSITION_PCT", "30.0")),
+            risk_per_trade_pct=float(os.getenv("RISK_PER_TRADE_PCT", "1.5")),
+            max_position_pct=float(os.getenv("MAX_POSITION_PCT", "25.0")),
+            max_per_coin_pct=float(os.getenv("MAX_PER_COIN_PCT", "35.0")),
+            max_total_exposure_pct=float(os.getenv("MAX_TOTAL_EXPOSURE_PCT", "80.0")),
+            daily_loss_limit_pct=float(os.getenv("DAILY_LOSS_LIMIT_PCT", "4.0")),
             scan_interval_seconds=int(os.getenv("SCAN_INTERVAL_SECONDS", "60")),
             history_bars=int(os.getenv("HISTORY_BARS", "100")),
+            max_trades_per_pm_session=int(os.getenv("MAX_TRADES_PER_PM_SESSION", "3")),
         ),
         paper=PaperTradingConfig(
             starting_capital=float(os.getenv("PAPER_STARTING_CAPITAL", "10000")),
             maker_fee_pct=float(os.getenv("PAPER_MAKER_FEE_PCT", "0.16")),
             taker_fee_pct=float(os.getenv("PAPER_TAKER_FEE_PCT", "0.26")),
+            slippage_pct=float(os.getenv("PAPER_SLIPPAGE_PCT", "0.05")),
         ),
         agents=AgentConfig(
             pm_interval_seconds=int(os.getenv("PM_INTERVAL_SECONDS", "7200")),

@@ -86,6 +86,7 @@ class AlgoTraderBot:
                 db=self.db,
                 starting_capital=config.paper.starting_capital,
                 taker_fee_pct=config.paper.taker_fee_pct,
+                slippage_pct=config.paper.slippage_pct,
             )
 
         # Strategy — AI-powered or indicator-based fallback
@@ -387,15 +388,16 @@ class AlgoTraderBot:
         if not positions:
             position = self.db.get_open_position()
             positions = [position] if position else []
-        for position in positions:
-            sym = getattr(position, 'symbol', 'BTC/USD')
-            coin = sym.split('/')[0] if '/' in sym else sym
-            logger.info(
-                f"Open position: {position.quantity:.6f} {coin} @ ${position.entry_price:,.2f} | "
-                f"SL: ${position.stop_loss:,.2f} | TP: ${position.take_profit:,.2f}"
-            )
-        else:
+        if not positions:
             logger.info("No open position")
+        else:
+            for position in positions:
+                sym = getattr(position, 'symbol', 'BTC/USD')
+                coin = sym.split('/')[0] if '/' in sym else sym
+                logger.info(
+                    f"Open position: {position.quantity:.6f} {coin} @ ${position.entry_price:,.2f} | "
+                    f"SL: ${position.stop_loss:,.2f} | TP: ${position.take_profit:,.2f}"
+                )
 
     def _log_scan_result(self, scan_num: int, result: dict):
         """Log the result of a scan cycle."""
