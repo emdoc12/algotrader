@@ -29,6 +29,7 @@ from daytrader.live.competition import (
     team_names,
 )
 from daytrader.live.db import LiveDB
+from daytrader.live import settings
 
 
 # --------------------------------------------------------------------------- #
@@ -124,6 +125,9 @@ class _Handler(BaseHTTPRequestHandler):
             if path == "/api/overview":
                 self._json(overview_payload())
                 return
+            if path == "/api/settings":
+                self._json(settings.masked_status())
+                return
             if path.startswith("/api/team/"):
                 rest = path[len("/api/team/"):]
                 name = urllib.parse.unquote(rest.strip("/"))
@@ -139,6 +143,17 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         try:
             path = urllib.parse.urlparse(self.path).path
+            if path == "/api/settings":
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length else b""
+                try:
+                    body = json.loads(raw.decode("utf-8")) if raw else {}
+                except Exception:  # noqa: BLE001
+                    body = {}
+                if not isinstance(body, dict):
+                    body = {}
+                self._json(settings.save(body))
+                return
             if path.startswith("/api/team/") and path.endswith("/chat"):
                 middle = path[len("/api/team/"):-len("/chat")]
                 name = urllib.parse.unquote(middle.strip("/"))
@@ -327,12 +342,14 @@ function buildTabs(){
   };
   mk("overview", "Overview");
   for(const tm of TEAMS) mk(tm, LABELS[tm]);
+  mk("settings", "Settings");
 }
 function switchTab(id){
   current = id;
   if(refreshTimer){ clearInterval(refreshTimer); refreshTimer = null; }
   buildTabs();
   if(id === "overview") loadOverview();
+  else if(id === "settings") loadSettings();
   else loadTeam(id);
 }
 
@@ -724,6 +741,169 @@ async function sendChat(name){
     if(liveInput) liveInput.disabled = false;
     if(liveBtn) liveBtn.disabled = false;
     if(liveInput) liveInput.focus();
+  }
+}
+
+// ---- settings ----------------------------------------------------------- //
+async function loadSettings(){
+  const main = document.getElementById("main");
+  if(current !== "settings") return;
+  let status;
+  try{ status = await getJSON("/api/settings"); }
+  catch(e){ main.innerHTML = ""; main.appendChild(el("div",{class:"err"}, "Failed to load: "+e)); return; }
+  if(current !== "settings") return;
+  renderSettings(main, status);
+}
+
+// field registry: maps each input id to {key, secret}
+let _settingsFields = [];
+
+function settingsSecretField(status, key, label, placeholder){
+  const st = status[key] || {};
+  const wrap = el("div", {style:"margin-bottom:14px"});
+  const head = el("div", {style:"display:flex;align-items:center;gap:10px;margin-bottom:4px"});
+  head.appendChild(el("label", {class:"k", style:"font-size:11px;color:var(--gray);text-transform:uppercase;letter-spacing:.5px"}, label));
+  if(st.set){
+    head.appendChild(el("span", {class:"green", style:"font-size:11px"}, "set (" + (st.hint||"••••") + ")"));
+  }
+  wrap.appendChild(head);
+  const id = "set_" + key;
+  const input = el("input", {type:"password", id:id, autocomplete:"off",
+    placeholder: placeholder || "leave blank to keep",
+    style:"width:100%;background:#0e0e11;border:1px solid var(--line);color:var(--txt);padding:9px 12px;border-radius:8px;font-size:13px"});
+  wrap.appendChild(input);
+  _settingsFields.push({id:id, key:key, secret:true});
+  return wrap;
+}
+
+function settingsTextField(status, key, label, opts){
+  opts = opts || {};
+  const st = status[key] || {};
+  const wrap = el("div", {style:"margin-bottom:14px"});
+  wrap.appendChild(el("label", {class:"k", style:"display:block;font-size:11px;color:var(--gray);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px"}, label));
+  const id = "set_" + key;
+  const cur = st.value != null ? st.value : "";
+  let input;
+  if(opts.options){
+    input = el("select", {id:id,
+      style:"width:100%;background:#0e0e11;border:1px solid var(--line);color:var(--txt);padding:9px 12px;border-radius:8px;font-size:13px"});
+    const chosen = cur || opts.def || "";
+    opts.options.forEach(o => {
+      const op = el("option", {value:o}, o);
+      if(o === chosen) op.setAttribute("selected", "selected");
+      input.appendChild(op);
+    });
+  } else {
+    input = el("input", {type:"text", id:id, value: cur || opts.def || "",
+      placeholder: opts.placeholder || "",
+      style:"width:100%;background:#0e0e11;border:1px solid var(--line);color:var(--txt);padding:9px 12px;border-radius:8px;font-size:13px"});
+  }
+  wrap.appendChild(input);
+  if(opts.hint) wrap.appendChild(el("div", {class:"muted", style:"font-size:11px;margin-top:4px"}, opts.hint));
+  _settingsFields.push({id:id, key:key, secret:false});
+  return wrap;
+}
+
+function renderSettings(main, status){
+  _settingsFields = [];
+  main.innerHTML = "";
+
+  // Team API keys
+  const keyCard = el("div", {class:"card"});
+  keyCard.appendChild(el("h2", null, "Team API keys"));
+  keyCard.appendChild(settingsSecretField(status, "ANTHROPIC_API_KEY", "Team Claude (ANTHROPIC_API_KEY)"));
+  keyCard.appendChild(settingsSecretField(status, "OPENAI_API_KEY", "Team OpenAI (OPENAI_API_KEY)"));
+  keyCard.appendChild(settingsSecretField(status, "XAI_API_KEY", "Team Grok (XAI_API_KEY)"));
+  keyCard.appendChild(settingsSecretField(status, "DASHSCOPE_API_KEY", "Team Qwen (DASHSCOPE_API_KEY)"));
+  main.appendChild(keyCard);
+
+  // Model / endpoint overrides
+  const modelCard = el("div", {class:"card"});
+  modelCard.appendChild(el("h2", null, "Model / endpoint overrides (optional)"));
+  modelCard.appendChild(settingsTextField(status, "CLAUDE_MODEL", "CLAUDE_MODEL"));
+  modelCard.appendChild(settingsTextField(status, "OPENAI_MODEL", "OPENAI_MODEL"));
+  modelCard.appendChild(settingsTextField(status, "XAI_MODEL", "XAI_MODEL"));
+  modelCard.appendChild(settingsTextField(status, "QWEN_MODEL", "QWEN_MODEL", {
+    hint:"To run Qwen locally, set QWEN_BASE_URL to your local OpenAI-compatible server (vLLM/Ollama/LM Studio) and put any placeholder in DASHSCOPE_API_KEY."}));
+  modelCard.appendChild(settingsTextField(status, "OPENAI_BASE_URL", "OPENAI_BASE_URL"));
+  modelCard.appendChild(settingsTextField(status, "XAI_BASE_URL", "XAI_BASE_URL"));
+  modelCard.appendChild(settingsTextField(status, "QWEN_BASE_URL", "QWEN_BASE_URL"));
+  main.appendChild(modelCard);
+
+  // Alpaca
+  const alpacaCard = el("div", {class:"card"});
+  alpacaCard.appendChild(el("h2", null, "Alpaca (for live/realistic data + options, once integrated)"));
+  alpacaCard.appendChild(el("div", {class:"muted", style:"font-size:12px;margin-bottom:12px"},
+    "Alpaca paper account keys. The full Alpaca integration is coming; entering these now prepares for it."));
+  alpacaCard.appendChild(settingsSecretField(status, "ALPACA_API_KEY", "ALPACA_API_KEY"));
+  alpacaCard.appendChild(settingsSecretField(status, "ALPACA_SECRET_KEY", "ALPACA_SECRET_KEY"));
+  alpacaCard.appendChild(settingsTextField(status, "ALPACA_PAPER", "ALPACA_PAPER", {def:"true"}));
+  alpacaCard.appendChild(settingsTextField(status, "ALPACA_DATA_PLAN", "ALPACA_DATA_PLAN", {options:["free","plus"], def:"free"}));
+  main.appendChild(alpacaCard);
+
+  // Other
+  const otherCard = el("div", {class:"card"});
+  otherCard.appendChild(el("h2", null, "Other (optional)"));
+  otherCard.appendChild(settingsSecretField(status, "GITHUB_TOKEN", "GITHUB_TOKEN (for filing dev-request issues)"));
+  otherCard.appendChild(settingsTextField(status, "GITHUB_REPO", "GITHUB_REPO"));
+  otherCard.appendChild(settingsSecretField(status, "DISCORD_WEBHOOK_URL", "DISCORD_WEBHOOK_URL"));
+  main.appendChild(otherCard);
+
+  // Save bar + notes
+  const saveCard = el("div", {class:"card"});
+  const saveBtn = el("button", {id:"settingsSave"}, "Save settings");
+  saveBtn.addEventListener("click", saveSettings);
+  saveCard.appendChild(saveBtn);
+  saveCard.appendChild(el("div", {class:"err", id:"settingsErr"}));
+  saveCard.appendChild(el("div", {id:"settingsMsg", class:"green", style:"font-size:12px;margin-top:8px"}));
+  saveCard.appendChild(el("div", {class:"muted", style:"font-size:11px;margin-top:12px"},
+    "Keys are stored locally in this container's data volume (paper trading only) and are never committed or logged."));
+  main.appendChild(saveCard);
+}
+
+async function saveSettings(){
+  const btn = document.getElementById("settingsSave");
+  const errEl = document.getElementById("settingsErr");
+  const msgEl = document.getElementById("settingsMsg");
+  if(errEl) errEl.textContent = "";
+  if(msgEl) msgEl.textContent = "";
+  const updates = {};
+  _settingsFields.forEach(f => {
+    const inp = document.getElementById(f.id);
+    if(!inp) return;
+    const v = inp.value != null ? inp.value : "";
+    if(f.secret){
+      // skip blank secret inputs so stored keys stay unchanged
+      if(v.trim() !== "") updates[f.key] = v.trim();
+    } else {
+      // include plain fields as-is
+      updates[f.key] = v;
+    }
+  });
+  if(btn) btn.disabled = true;
+  try{
+    const r = await fetch("/api/settings", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify(updates),
+    });
+    const res = await r.json();
+    if(res && res.error){
+      if(errEl) errEl.textContent = res.error;
+    } else if(current === "settings"){
+      // re-fetch authoritative status and re-render
+      const status = await getJSON("/api/settings");
+      if(current === "settings"){
+        renderSettings(document.getElementById("main"), status);
+        const m = document.getElementById("settingsMsg");
+        if(m) m.textContent = "Saved. New API keys activate their team within the next cycle (no restart needed).";
+      }
+    }
+  }catch(e){
+    if(errEl) errEl.textContent = "Request failed: " + e;
+  }finally{
+    const liveBtn = document.getElementById("settingsSave");
+    if(liveBtn) liveBtn.disabled = false;
   }
 }
 

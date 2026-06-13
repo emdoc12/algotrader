@@ -14,6 +14,11 @@ OPENAI_API_KEY, XAI_API_KEY, DASHSCOPE_API_KEY).
 from __future__ import annotations
 
 import argparse
+import os
+
+# Honor the legacy DASHBOARD_PORT env var so an existing container/port mapping
+# (e.g. the old 3737) keeps working without remapping.
+DEFAULT_PORT = int(os.environ.get("DASHBOARD_PORT", "8787"))
 
 
 def cmd_serve(args):
@@ -52,7 +57,7 @@ def cmd_status(_args):
 def main(argv=None):
     p = argparse.ArgumentParser(prog="daytrader.agent", description="Competing autonomous paper-trading desks")
     sub = p.add_subparsers(dest="cmd", required=True)
-    s = sub.add_parser("serve"); s.add_argument("--port", type=int, default=8787); s.set_defaults(func=cmd_serve)
+    s = sub.add_parser("serve"); s.add_argument("--port", type=int, default=DEFAULT_PORT); s.set_defaults(func=cmd_serve)
     sub.add_parser("compete").set_defaults(func=cmd_compete)
     sub.add_parser("leaderboard").set_defaults(func=cmd_leaderboard)
     sub.add_parser("status").set_defaults(func=cmd_status)

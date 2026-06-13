@@ -5,3 +5,9 @@ __pycache__/
 bot_data.db
 cache/
 *.pkl
+data/
+settings.json
+*.db
+*.db-shm
+*.db-wal
+report.html
