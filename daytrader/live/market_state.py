@@ -82,23 +82,27 @@ def _fresh_signals(data: dict[str, pd.DataFrame], lookback_bars: int = 2) -> lis
     return fresh
 
 
-def snapshot(broker=None, symbols: list[str] | None = None, interval: str = "5m") -> dict:
-    """Build the full market + account + memory snapshot.
+def _default_symbols(top_n: int = 18) -> list[str]:
+    """The day's watchlist from the scanner; falls back to the core universe."""
+    try:
+        from daytrader.data.universe import watchlist
+        return watchlist(top_n=top_n)
+    except Exception:  # noqa: BLE001 - universe module optional / scan hiccup
+        return loader.DEFAULT_UNIVERSE
 
-    `broker` is an optional PaperBroker; when provided, live account state,
-    performance, and recent journal/dev-requests are included.
+
+def market_only(symbols: list[str] | None = None, interval: str = "5m") -> dict:
+    """The shared market view: prices, indicators, regime, fresh signals.
+
+    Account/memory state is NOT included so this can be computed ONCE per cycle
+    and reused across all competing teams (one data fetch, not N).
     """
-    symbols = symbols or loader.DEFAULT_UNIVERSE
+    symbols = symbols or _default_symbols()
     data = loader.load_many(symbols, interval=interval, max_age_hours=0.1)
-
-    per_symbol = {}
-    for sym, df in data.items():
-        per_symbol[sym] = _latest_indicators(df)
-
+    per_symbol = {sym: _latest_indicators(df) for sym, df in data.items()}
     fresh = _fresh_signals(data)
-
     now_et = datetime.now(timezone.utc).astimezone()
-    out = {
+    return {
         "timestamp": now_et.isoformat(),
         "universe": symbols,
         "interval": interval,
@@ -106,20 +110,30 @@ def snapshot(broker=None, symbols: list[str] | None = None, interval: str = "5m"
         "fresh_signals": fresh,
     }
 
-    if broker is not None:
+
+def with_account(market_snap: dict, broker) -> dict:
+    """Overlay one team's account state + memory onto a shared market snapshot."""
+    out = dict(market_snap)
+    if broker is None:
+        return out
+    try:
+        out["account"] = broker.snapshot()
+        out["performance"] = broker.performance()
+    except Exception as e:  # noqa: BLE001
+        out["account_error"] = str(e)
+    db = getattr(broker, "db", None)
+    if db is not None:
         try:
-            out["account"] = broker.snapshot()
-            out["performance"] = broker.performance()
-        except Exception as e:  # noqa: BLE001
-            out["account_error"] = str(e)
-        db = getattr(broker, "db", None)
-        if db is not None:
-            try:
-                out["journal"] = db.recent_journal(limit=20)
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                out["open_dev_requests"] = db.open_dev_requests()
-            except Exception:  # noqa: BLE001
-                pass
+            out["journal"] = db.recent_journal(limit=20)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            out["open_dev_requests"] = db.open_dev_requests()
+        except Exception:  # noqa: BLE001
+            pass
     return out
+
+
+def snapshot(broker=None, symbols: list[str] | None = None, interval: str = "5m") -> dict:
+    """Full market + account snapshot for a single team (convenience wrapper)."""
+    return with_account(market_only(symbols, interval), broker)

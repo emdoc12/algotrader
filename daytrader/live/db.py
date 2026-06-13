@@ -111,9 +111,37 @@ class LiveDB:
                 action TEXT,
                 detail TEXT
             );
+            CREATE TABLE IF NOT EXISTS chat (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts      TEXT NOT NULL,
+                role    TEXT NOT NULL,
+                content TEXT NOT NULL
+            );
             """
         )
         self.conn.commit()
+
+    # ------------------------------------------------------------------ #
+    # chat (owner <-> team leader)                                        #
+    # ------------------------------------------------------------------ #
+    def add_chat(self, role: str, content: str) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO chat (ts, role, content) VALUES (?,?,?)",
+            (_now_iso(), role, content),
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def recent_chat(self, limit: int = 50) -> list[dict]:
+        cur = self.conn.execute(
+            "SELECT * FROM chat ORDER BY id DESC LIMIT ?", (limit,))
+        return [dict(r) for r in cur.fetchall()][::-1]  # oldest first
+
+    def equity_curve(self, limit: int = 500) -> list[dict]:
+        cur = self.conn.execute(
+            "SELECT ts, equity, cash, drawdown_pct FROM equity_snapshots "
+            "ORDER BY id DESC LIMIT ?", (limit,))
+        return [dict(r) for r in cur.fetchall()][::-1]
 
     # ------------------------------------------------------------------ #
     # trades                                                             #
