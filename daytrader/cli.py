@@ -28,6 +28,8 @@ def _config(args) -> EngineConfig:
         daily_loss_limit_pct=args.daily_loss_limit,
         max_concurrent_positions=args.max_positions,
         allow_short=not args.long_only,
+        breakeven_at_r=args.breakeven_r,
+        trail_atr_mult=args.trail_atr,
     )
 
 
@@ -41,7 +43,7 @@ def _sizer(args):
 def cmd_backtest(args):
     cfg = _config(args)
     sizer = _sizer(args)
-    book = build_book(adx_threshold=args.adx)
+    book = build_book(adx_threshold=args.adx, market_filter=args.market_filter)
     symbols = args.symbols.split(",") if args.symbols else loader.DEFAULT_UNIVERSE
     res = run_backtest(ensemble=book, symbols=symbols, interval=args.interval,
                        rng=args.range, config=cfg, sizer=sizer)
@@ -55,7 +57,7 @@ def cmd_backtest(args):
 def cmd_walkforward(args):
     cfg = _config(args)
     sizer = _sizer(args)
-    book = build_book(adx_threshold=args.adx)
+    book = build_book(adx_threshold=args.adx, market_filter=args.market_filter)
     symbols = args.symbols.split(",") if args.symbols else loader.DEFAULT_UNIVERSE
     data = loader.load_many(symbols, interval=args.interval, rng=args.range)
     wf = walk_forward(book, data, config=cfg, sizer=sizer, oos_fraction=args.oos)
@@ -108,6 +110,10 @@ def build_parser():
         sp.add_argument("--adx", type=float, default=25.0, help="trend/range ADX threshold")
         sp.add_argument("--pessimistic", action="store_true", help="0.4%% slippage stress test")
         sp.add_argument("--long-only", action="store_true")
+        sp.add_argument("--breakeven-r", type=float, default=0.0, help="move stop to breakeven after +N*R")
+        sp.add_argument("--trail-atr", type=float, default=0.0, help="trail stop at N*ATR (0=off)")
+        sp.add_argument("--market-filter", action="store_true",
+                        help="only trade in the direction of SPY's trend")
         sp.add_argument("--html", default=None, help="write HTML report to this path")
 
     b = sub.add_parser("backtest"); common(b); b.set_defaults(func=cmd_backtest)

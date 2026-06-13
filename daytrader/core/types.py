@@ -127,6 +127,8 @@ class Position:
     strategy: str
     stop: Optional[float] = None
     target: Optional[float] = None
+    init_stop: Optional[float] = None     # original stop, for R-multiple math
+    breakeven_done: bool = False          # breakeven stop already applied
     commission_paid: float = 0.0
     slippage_paid: float = 0.0
     mae: float = 0.0

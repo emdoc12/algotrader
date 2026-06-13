@@ -16,8 +16,8 @@ from enum import Enum
 
 import pandas as pd
 
-from daytrader.core.indicators import adx
-from daytrader.core.types import Signal
+from daytrader.core.indicators import adx, ema
+from daytrader.core.types import Side, Signal
 from daytrader.strategies.base import Strategy
 
 
@@ -45,13 +45,27 @@ class Allocation:
 
 
 class Ensemble:
-    def __init__(self, allocations: list[Allocation], adx_threshold: float = 25.0):
+    def __init__(self, allocations: list[Allocation], adx_threshold: float = 25.0,
+                 market_filter: bool = False, market_symbol: str = "SPY",
+                 market_ema: int = 50):
         self.allocations = [a for a in allocations if a.enabled]
         self.adx_threshold = adx_threshold
+        self.market_filter = market_filter
+        self.market_symbol = market_symbol
+        self.market_ema = market_ema
+
+    def _market_trend(self, data: dict[str, pd.DataFrame]) -> pd.Series | None:
+        """+1 when the market is above its EMA (uptrend), -1 below. Causal."""
+        df = data.get(self.market_symbol)
+        if df is None or len(df) < self.market_ema:
+            return None
+        up = df["close"] > ema(df["close"], self.market_ema)
+        return up.map({True: 1, False: -1})
 
     def generate(self, data: dict[str, pd.DataFrame]) -> list[Signal]:
         signals: list[Signal] = []
         regime_cache: dict[str, pd.Series] = {}
+        market = self._market_trend(data) if self.market_filter else None
 
         for alloc in self.allocations:
             allow_any = Regime.ANY.value in alloc.regimes
@@ -73,6 +87,16 @@ class Ensemble:
                     if not allow_any:
                         bar_regime = reg.get(s.ts)
                         if bar_regime is None or bar_regime not in alloc.regimes:
+                            continue
+                    if market is not None:
+                        # Only trade with the prevailing market direction.
+                        try:
+                            trend = market.asof(s.ts)
+                        except Exception:  # noqa: BLE001
+                            trend = None
+                        if trend == 1 and s.side == Side.SHORT:
+                            continue
+                        if trend == -1 and s.side == Side.LONG:
                             continue
                     s.strength = max(0.0, min(1.0, s.strength * alloc.weight))
                     signals.append(s)

@@ -41,7 +41,8 @@ def _load(spec):
 
 def build_book(weights: dict[str, float] | None = None,
                regime_overrides: dict[str, set] | None = None,
-               adx_threshold: float = 25.0) -> Ensemble:
+               adx_threshold: float = 25.0,
+               market_filter: bool = False) -> Ensemble:
     spec = []
     for module, cls, regimes, weight in _SPEC:
         if regime_overrides and cls in regime_overrides:
@@ -51,7 +52,7 @@ def build_book(weights: dict[str, float] | None = None,
         if weight <= 0:
             continue
         spec.append((module, cls, regimes, weight))
-    return Ensemble(_load(spec), adx_threshold=adx_threshold)
+    return Ensemble(_load(spec), adx_threshold=adx_threshold, market_filter=market_filter)
 
 
 def all_strategies() -> Ensemble:

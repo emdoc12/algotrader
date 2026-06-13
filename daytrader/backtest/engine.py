@@ -63,6 +63,8 @@ class EngineConfig:
     daily_loss_limit_pct: float = 2.0     # halt trading for the day past this loss
     max_concurrent_positions: int = 4     # cap simultaneous open positions
     allow_short: bool = True
+    breakeven_at_r: float = 0.0           # move stop to entry after +N*R (0=off)
+    trail_atr_mult: float = 0.0           # trail stop at close -/+ mult*ATR (0=off)
 
 
 # A sizing function: (equity, signal, entry_price, atr) -> share quantity (>=0)
@@ -196,7 +198,8 @@ class BacktestEngine:
                 self._halted_day = False
 
             # 1) Manage an existing position in this symbol (stops/targets/EOD).
-            self._manage_position(ts, sym, o, h, l, c)
+            atr_now = float(atr_map[sym].get(ts, np.nan)) if ts in atr_map[sym].index else np.nan
+            self._manage_position(ts, sym, o, h, l, c, atr_now)
 
             # 2) Daily loss-limit check (halts new entries, flattens book).
             cur_eq = self._equity(marks)
@@ -276,12 +279,12 @@ class BacktestEngine:
         self.positions[sig.symbol] = Position(
             symbol=sig.symbol, side=sig.side, qty=qty, entry_price=fill_px,
             entry_ts=ts, strategy=sig.strategy, stop=sig.stop, target=sig.target,
-            commission_paid=commission, slippage_paid=slip,
+            init_stop=sig.stop, commission_paid=commission, slippage_paid=slip,
         )
         self.fills.append(Fill(ts, sig.symbol, sig.side, qty, fill_px, commission, slip,
                                sig.strategy, sig.reason))
 
-    def _manage_position(self, ts, sym, o, h, l, c):
+    def _manage_position(self, ts, sym, o, h, l, c, atr_now: float = float("nan")):
         pos = self.positions.get(sym)
         if pos is None:
             return
@@ -292,6 +295,9 @@ class BacktestEngine:
         else:
             pos.mfe = max(pos.mfe, (pos.entry_price - l) * pos.qty)
             pos.mae = min(pos.mae, (pos.entry_price - h) * pos.qty)
+
+        # Dynamic stop adjustments BEFORE testing for a stop hit this bar.
+        self._adjust_stop(pos, h, l, c, atr_now)
 
         stop, target = pos.stop, pos.target
         hit_stop = hit_target = False
@@ -316,6 +322,34 @@ class BacktestEngine:
             self._close_position(ts, sym, stop_px, reason="stop", market=True)
         elif hit_target:
             self._close_position(ts, sym, target_px, reason="target", market=False)
+
+    def _adjust_stop(self, pos: Position, h, l, c, atr_now: float):
+        """Apply breakeven and/or ATR-trailing stop logic (both optional).
+
+        Stops only ever move in the favorable direction (never loosened).
+        """
+        be_r = self.cfg.breakeven_at_r
+        trail = self.cfg.trail_atr_mult
+
+        if be_r > 0 and not pos.breakeven_done and pos.init_stop is not None:
+            init_risk = abs(pos.entry_price - pos.init_stop)
+            if init_risk > 0:
+                if pos.side == Side.LONG and (h - pos.entry_price) >= be_r * init_risk:
+                    new_stop = pos.entry_price
+                    pos.stop = max(pos.stop, new_stop) if pos.stop is not None else new_stop
+                    pos.breakeven_done = True
+                elif pos.side == Side.SHORT and (pos.entry_price - l) >= be_r * init_risk:
+                    new_stop = pos.entry_price
+                    pos.stop = min(pos.stop, new_stop) if pos.stop is not None else new_stop
+                    pos.breakeven_done = True
+
+        if trail > 0 and not np.isnan(atr_now) and atr_now > 0:
+            if pos.side == Side.LONG:
+                trail_stop = c - trail * atr_now
+                pos.stop = max(pos.stop, trail_stop) if pos.stop is not None else trail_stop
+            else:
+                trail_stop = c + trail * atr_now
+                pos.stop = min(pos.stop, trail_stop) if pos.stop is not None else trail_stop
 
     def _close_position(self, ts, sym, raw_price: float, reason: str, market: bool = True):
         pos = self.positions.pop(sym, None)
