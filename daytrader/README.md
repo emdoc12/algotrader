@@ -68,22 +68,30 @@ in trends and trend-followers don't fire in chop.
 
 ## Usage
 
+The default book is the validated `trend` profile with the SPY market-direction
+filter on. See `RESULTS.md` for the honest scorecard and what the targets
+actually achieved.
+
 ```bash
+# full honest scorecard: 5m walk-forward + 1h multi-regime check
+python -m daytrader.evaluate
+
 # headline backtest on 60 days of 5-minute bars, with HTML report
 python -m daytrader backtest --interval 5m --html report.html
-
-# stress test at 0.4% slippage
-python -m daytrader backtest --interval 5m --pessimistic
 
 # out-of-sample validation + Monte-Carlo drawdown
 python -m daytrader walkforward --interval 5m --oos 0.35 --html report.html
 
-# 2-year run on hourly bars (more regimes, coarser fills)
-python -m daytrader backtest --interval 1h
+# include every strategy (adds mean-reversion — drags in a trend), or go long-only
+python -m daytrader backtest --interval 5m --profile all
+python -m daytrader backtest --interval 5m --long-only
+
+# stress test at 0.4% slippage; disable the market filter
+python -m daytrader backtest --interval 5m --pessimistic --no-market-filter
 
 # diagnostics
 python -m daytrader strategies
-python -m daytrader correlation --interval 5m
+python -m daytrader correlation --interval 5m --profile all
 ```
 
 ### Key knobs

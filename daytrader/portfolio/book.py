@@ -39,16 +39,40 @@ def _load(spec):
     return allocs
 
 
+# Profiles select which strategies make up the book.
+#   "trend"    — the validated production default: four trend/momentum
+#                strategies, market-filtered. Best out-of-sample robustness.
+#   "momentum" — trend strategies plus gap-and-go.
+#   "all"      — every strategy (includes mean-reversion, which has no edge in
+#                a trending regime; kept for diagnostics and other regimes).
+PROFILES = {
+    "trend": {"OpeningRangeBreakout", "VwapTrend", "EmaPullback", "MacdTrend"},
+    "momentum": {"OpeningRangeBreakout", "VwapTrend", "EmaPullback", "MacdTrend", "GapFade"},
+    "all": {c for _, c, _, _ in _SPEC},
+}
+
+
 def build_book(weights: dict[str, float] | None = None,
                regime_overrides: dict[str, set] | None = None,
                adx_threshold: float = 25.0,
-               market_filter: bool = False) -> Ensemble:
+               market_filter: bool = True,
+               profile: str = "trend") -> Ensemble:
+    """Assemble the strategy book.
+
+    Defaults to the `trend` profile with the SPY market-direction filter on —
+    the configuration that held up out-of-sample (PF ~1.6, max DD <2%, positive
+    alpha). Pass profile="all" to include every strategy, or supply explicit
+    `weights` to override membership (weight 0 drops a strategy).
+    """
+    selected = PROFILES.get(profile, PROFILES["trend"])
     spec = []
     for module, cls, regimes, weight in _SPEC:
+        if weights is not None:
+            weight = weights.get(cls, 0.0)
+        elif cls not in selected:
+            continue
         if regime_overrides and cls in regime_overrides:
             regimes = regime_overrides[cls]
-        if weights and cls in weights:
-            weight = weights[cls]
         if weight <= 0:
             continue
         spec.append((module, cls, regimes, weight))
