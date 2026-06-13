@@ -205,13 +205,13 @@ class OpenAICompatibleProvider(BaseProvider):
             ]
 
             for _ in range(max_iterations):
-                resp = client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    tools=oai_tools,
-                    tool_choice="auto",
-                    max_tokens=max_tokens,
-                )
+                kwargs = {"model": self.model, "messages": messages, "max_tokens": max_tokens}
+                # Only set tools/tool_choice when tools exist — some providers
+                # (e.g. xAI Grok) reject tool_choice when no tools are supplied.
+                if oai_tools:
+                    kwargs["tools"] = oai_tools
+                    kwargs["tool_choice"] = "auto"
+                resp = client.chat.completions.create(**kwargs)
 
                 msg = resp.choices[0].message
                 tool_calls = getattr(msg, "tool_calls", None)

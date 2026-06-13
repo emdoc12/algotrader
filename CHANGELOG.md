@@ -9,6 +9,16 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.4.1] — 2026-06-13
+
+### Fixed
+- **OpenAI-compatible provider** no longer sends `tool_choice` when there are no
+  tools — xAI Grok (and others) reject that, which made the Grok connectivity
+  test and the chat-with-leader feature fail with a 400. Tools/`tool_choice` are
+  now only sent when tools are present.
+
+---
+
 ## [6.4.0] — 2026-06-13
 
 ### Changed
