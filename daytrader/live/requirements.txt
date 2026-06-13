@@ -2,4 +2,4 @@ anthropic
 openai
 pandas
 numpy
-tastytrade<10
+tastytrade>=12

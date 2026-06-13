@@ -11,8 +11,10 @@ reason, but the system NEVER trades on the tastytrade account: all execution
 stays in the internal paper simulator. Accordingly this module touches ONLY the
 tastytrade SDK's data/read surface:
 
-    * tastytrade.Session(login, password)  -- auth + token refresh (read context)
-    * tastytrade.instruments.NestedOptionChain.get_chain  -- read option chains
+    * tastytrade.Session(provider_secret, refresh_token)  -- OAuth auth + token
+      refresh (read context). OAuth is used so a 2FA-protected account can run
+      headless: the refresh token is generated once and never expires.
+    * tastytrade.instruments.get_option_chain  -- read option chains
     * tastytrade.DXLinkStreamer with Quote and Greeks events  -- read quotes/Greeks
 
 There is NO import or call of anything order/trade/account-mutation related
@@ -39,10 +41,10 @@ _session_lock = threading.Lock()
 
 
 def is_configured() -> bool:
-    """True iff both tastytrade credentials are present in the environment."""
+    """True iff the tastytrade OAuth credentials are present in the environment."""
     try:
-        return bool(os.environ.get("TASTYTRADE_USERNAME")) and bool(
-            os.environ.get("TASTYTRADE_PASSWORD")
+        return bool(os.environ.get("TASTYTRADE_CLIENT_SECRET")) and bool(
+            os.environ.get("TASTYTRADE_REFRESH_TOKEN")
         )
     except Exception:  # noqa: BLE001 - never raise out of here
         return False
@@ -66,10 +68,12 @@ def _get_session():
                 pass
             _session = None
         try:
-            from tastytrade import Session  # read/auth only
-            user = os.environ.get("TASTYTRADE_USERNAME") or ""
-            pwd = os.environ.get("TASTYTRADE_PASSWORD") or ""
-            _session = Session(user, pwd)
+            from tastytrade import Session  # read/auth only (OAuth)
+            client_secret = os.environ.get("TASTYTRADE_CLIENT_SECRET") or ""
+            refresh_token = os.environ.get("TASTYTRADE_REFRESH_TOKEN") or ""
+            # OAuth session: provider_secret + refresh_token (refresh handled
+            # automatically by the SDK). No password / no 2FA prompt.
+            _session = Session(client_secret, refresh_token)
             return _session
         except Exception as e:  # noqa: BLE001
             log.info("tastytrade: session unavailable (%s); using Yahoo only", e)
@@ -161,17 +165,17 @@ def get_quotes(symbols: list[str], timeout: float = 8.0) -> dict:
 async def _collect_option_chain(
     session, symbol: str, max_expirations: int, strikes_around_atr: int, timeout: float
 ) -> dict:
+    from datetime import date as _date
+
     from tastytrade import DXLinkStreamer  # read streamer only
     from tastytrade.dxfeed import Greeks, Quote
-    from tastytrade.instruments import NestedOptionChain  # read chain only
+    from tastytrade.instruments import OptionType, get_option_chain  # read chain only
 
-    chains = NestedOptionChain.get_chain(session, symbol)
-    if not chains:
+    # 12.x: get_option_chain(session, symbol) -> {expiration_date: [Option, ...]}
+    chain = get_option_chain(session, symbol)
+    if not chain:
         return {}
-    chain = chains[0]
-    expirations = sorted(
-        chain.expirations, key=lambda e: getattr(e, "days_to_expiration", 9999)
-    )[: max(1, max_expirations)]
+    expirations = sorted(chain.keys())[: max(1, max_expirations)]
 
     # Find an at-the-money anchor from a quick underlying quote so we can keep
     # the subscription small (near-the-money strikes only).
@@ -185,35 +189,33 @@ async def _collect_option_chain(
     # streamer_symbol -> (expiration_key, "call"/"put", strike_price)
     sym_index: dict[str, tuple] = {}
 
-    for exp in expirations:
-        strikes = list(getattr(exp, "strikes", []) or [])
-        if not strikes:
+    for exp_date in expirations:
+        options = chain.get(exp_date) or []
+        if not options:
             continue
-        # Pick the N strikes closest to spot (fallback: middle of the ladder).
+        # Unique strikes, then pick the N closest to spot (fallback: lowest N).
+        strikes = sorted({_q_num(o.strike_price) for o in options if o.strike_price is not None})
         if spot is not None:
-            strikes.sort(key=lambda s: abs(_q_num(s.strike_price) or 0.0) - 0.0)
-            strikes.sort(key=lambda s: abs((_q_num(s.strike_price) or 0.0) - spot))
-        n = max(1, strikes_around_atr)
-        chosen = strikes[:n]
+            strikes.sort(key=lambda s: abs((s or 0.0) - spot))
+        chosen = set(strikes[: max(1, strikes_around_atr)])
 
-        exp_key = str(getattr(exp, "expiration_date", ""))
-        legs = []
-        for s in chosen:
-            strike_px = _q_num(s.strike_price)
-            for side, streamer_sym in (
-                ("call", getattr(s, "call_streamer_symbol", None)),
-                ("put", getattr(s, "put_streamer_symbol", None)),
-            ):
-                if not streamer_sym:
-                    continue
-                streamer_symbols.append(streamer_sym)
-                sym_index[streamer_sym] = (exp_key, side, strike_px)
-                legs.append((streamer_sym, side, strike_px))
-        result[exp_key] = {
-            "expiration": exp_key,
-            "days_to_expiration": getattr(exp, "days_to_expiration", None),
-            "strikes": {},  # filled below keyed by strike price
-        }
+        exp_key = str(exp_date)
+        try:
+            dte = (exp_date - _date.today()).days if isinstance(exp_date, _date) else None
+        except Exception:  # noqa: BLE001
+            dte = None
+        result[exp_key] = {"expiration": exp_key, "days_to_expiration": dte, "strikes": {}}
+
+        for o in options:
+            strike_px = _q_num(o.strike_price)
+            if strike_px not in chosen:
+                continue
+            streamer_sym = getattr(o, "streamer_symbol", None)
+            if not streamer_sym:
+                continue
+            side = "call" if getattr(o, "option_type", None) == OptionType.CALL else "put"
+            streamer_symbols.append(streamer_sym)
+            sym_index[streamer_sym] = (exp_key, side, strike_px)
 
     if not streamer_symbols:
         return result
