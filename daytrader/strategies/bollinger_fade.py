@@ -1,20 +1,28 @@
-"""Bollinger Band fade (mean reversion to the middle band).
+"""Bollinger Band fade (mean reversion toward the middle band).
 
-Fade stretched closes back to the band midline:
+Fade stretched closes back toward the band midline:
 
-  * Long when a bar closes below the lower band (price is statistically
-    stretched to the downside); target the middle band (the rolling mean),
-    protective stop an ATR below the entry.
-  * Short the mirror image: close above the upper band, target the midline,
-    stop an ATR above.
-  * Trend filter: do NOT fade strong trends. We skip when ADX is elevated
-    (directional move underway) or when the bands are expanding hard
-    (band width well above its recent average => volatility breakout, not a
-    fade). Fading those is how mean-reversion books blow up.
+  * Long when a bar closes below the lower band by at least a small ATR margin
+    (price is statistically stretched cheap, not just grazing the band). Target
+    a fraction (``target_frac``) of the distance back to the middle band, with
+    a protective ATR stop below the entry. Targeting *part* of the way to the
+    mean fills as a limit (no exit slippage) and lands far more often than
+    holding out for the full midline, which is what tips the strategy from
+    losing to roughly breakeven-or-better.
+  * Short the mirror image: close above the upper band, target back toward the
+    midline, stop an ATR above.
+  * Trend / expansion filter: do NOT fade strong trends. Skip when ADX is
+    elevated (a directional move is underway) or when the bands are expanding
+    hard (current width well above its recent average => volatility breakout,
+    not a fade). Fading those is how mean-reversion books blow up.
   * Overtrading guard: at most one long and one short fade per symbol per day.
 
-The midline target is recomputed at entry and frozen onto the signal, so the
-fill logic stays causal. Indicators are causal; engine fills at next bar open.
+On a strongly trending universe the long fades carry the edge while upper-band
+shorts fade the prevailing drift and bleed, so ``allow_short`` defaults to
+False; the symmetric short logic is implemented -- flip the flag to enable it.
+
+The midline target is computed at entry and frozen onto the signal, so fills
+stay causal. Indicators are causal; the engine fills at the next bar's open.
 """
 from __future__ import annotations
 
@@ -37,16 +45,19 @@ class BollingerFade(Strategy):
         bb_std: float = 2.0,
         atr_period: int = 14,
         stop_atr_mult: float = 1.5,
+        target_frac: float = 0.7,
+        min_pierce_atr: float = 0.1,
         adx_period: int = 14,
-        max_adx: float = 35.0,
+        max_adx: float = 30.0,
         width_window: int = 50,
         max_width_ratio: float = 1.8,
         no_entry_after: dtime = dtime(15, 0),
-        allow_short: bool = True,
+        allow_short: bool = False,
     ):
         super().__init__(
             bb_window=bb_window, bb_std=bb_std, atr_period=atr_period,
-            stop_atr_mult=stop_atr_mult, adx_period=adx_period, max_adx=max_adx,
+            stop_atr_mult=stop_atr_mult, target_frac=target_frac,
+            min_pierce_atr=min_pierce_atr, adx_period=adx_period, max_adx=max_adx,
             width_window=width_window, max_width_ratio=max_width_ratio,
             no_entry_after=no_entry_after, allow_short=allow_short,
         )
@@ -98,11 +109,12 @@ class BollingerFade(Strategy):
             if not np.isnan(wavg[i]) and wavg[i] > 0 and wv[i] > self.max_width_ratio * wavg[i]:
                 continue
 
-            # ---- LONG fade: close below lower band, target the midline.
+            # ---- LONG fade: close pierces below the lower band by an ATR margin.
             if (not np.isnan(lo) and d not in long_done
-                    and price < lo and m > price):
+                    and price < lo and m > price
+                    and (lo - price) >= self.min_pierce_atr * ai):
                 stop = price - self.stop_atr_mult * ai
-                target = m  # revert to the mean
+                target = price + self.target_frac * (m - price)
                 if stop < price and target > price:
                     signals.append(Signal(
                         ts=idx[i], symbol=symbol, side=Side.LONG, type=SignalType.ENTRY,
@@ -112,11 +124,12 @@ class BollingerFade(Strategy):
                     ))
                     long_done.add(d)
 
-            # ---- SHORT fade: close above upper band, target the midline.
+            # ---- SHORT fade: close pierces above the upper band by an ATR margin.
             if (self.allow_short and not np.isnan(up) and d not in short_done
-                    and price > up and m < price):
+                    and price > up and m < price
+                    and (price - up) >= self.min_pierce_atr * ai):
                 stop = price + self.stop_atr_mult * ai
-                target = m
+                target = price - self.target_frac * (price - m)
                 if stop > price and target < price:
                     signals.append(Signal(
                         ts=idx[i], symbol=symbol, side=Side.SHORT, type=SignalType.ENTRY,
