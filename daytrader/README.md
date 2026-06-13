@@ -94,6 +94,39 @@ python -m daytrader strategies
 python -m daytrader correlation --interval 5m --profile all
 ```
 
+## Autonomous agent desk (paper trading)
+
+On top of the backtester there's an **autonomous, Claude-powered trading desk**
+that paper-trades the same universe during market hours and self-directs. It is
+a *team* of agents sharing one persistent memory:
+
+- **Strategist** (near the open) reads the morning snapshot, performance, and
+  journal, and writes the day's game plan.
+- **Trader** (every interval) reads the live snapshot, the plan, the fresh
+  backtested signals, and open positions, then places/manages paper trades
+  through a small, audited tool surface.
+- **Reviewer** (at the close) journals concrete lessons and files dev requests.
+
+Hard risk limits live in code, not in the model's discretion: a daily-loss
+circuit breaker, one position per symbol, and a forced flat at 15:50 ET. All
+state (trades, positions, journal, equity) persists to SQLite, so a container
+restart resumes mid-day with positions and memory intact. When the team is
+blocked by something only a developer can fix — a missing data source, a bug, a
+strategy it wants built — it **files a GitHub issue** via `request_dev_help`.
+
+```bash
+python -m daytrader.agent status   # what the agents see + account state (no API key needed)
+python -m daytrader.agent once     # run one Trader cycle now (needs ANTHROPIC_API_KEY)
+python -m daytrader.agent plan     # run the Strategist once
+python -m daytrader.agent run      # start the always-on market-hours loop
+```
+
+Deploy as a container with `Dockerfile.agent` (separate from the legacy crypto
+image). Runtime env: `ANTHROPIC_API_KEY` (required), `AGENT_MODEL`
+(default `claude-opus-4-8`), `GITHUB_TOKEN` + `GITHUB_REPO` (for dev requests),
+`DISCORD_WEBHOOK_URL` (optional alerts), `AGENT_INTERVAL_SECONDS` (default 900),
+`DAILY_LOSS_LIMIT_PCT` (default 3), `DAYTRADER_DB_PATH`.
+
 ### Key knobs
 
 - `--risk-per-trade` — % of equity risked entry→stop (default 0.4). The single
