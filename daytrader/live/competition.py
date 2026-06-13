@@ -11,8 +11,10 @@ subset by setting only the keys you have.
 """
 from __future__ import annotations
 
+import json
 import os
 import time
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, time as dtime
 from zoneinfo import ZoneInfo
@@ -38,6 +40,28 @@ DATA_DIR = os.environ.get("DAYTRADER_DATA_DIR") or os.path.dirname(
 def team_db_path(name: str) -> str:
     os.makedirs(DATA_DIR, exist_ok=True)
     return os.path.join(DATA_DIR, f"team_{name}.db")
+
+
+_LAST_NOTIFY: dict[str, float] = {}
+
+
+def _notify(msg: str, throttle_key: str | None = None, throttle_sec: float = 1800):
+    """Best-effort Discord alert (if DISCORD_WEBHOOK_URL is set). Optionally
+    throttled per key so a recurring failure doesn't spam the channel."""
+    url = os.environ.get("DISCORD_WEBHOOK_URL")
+    if not url:
+        return
+    if throttle_key is not None:
+        now = time.time()
+        if now - _LAST_NOTIFY.get(throttle_key, 0) < throttle_sec:
+            return
+        _LAST_NOTIFY[throttle_key] = now
+    try:
+        data = json.dumps({"content": msg[:1900]}).encode()
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=10)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @dataclass
@@ -242,7 +266,10 @@ class Competition:
                 continue
             self._risk_check(t)
             if not t.halted:
-                t.desk.trade_cycle(with_account(market, t.broker))
+                res = t.desk.trade_cycle(with_account(market, t.broker))
+                if getattr(res, "error", None):
+                    _notify(f"⚠️ Team {t.name} ({getattr(t.provider,'model','?')}) cycle error: {res.error}",
+                            throttle_key=f"err_{t.name}")
                 t.broker.db.record_equity(t.broker.cash(), t.broker.equity(),
                                           len(t.broker.positions()), t.broker.drawdown_pct())
 
@@ -261,6 +288,7 @@ class Competition:
             t.halted = True
             t.broker.flatten_all(reason="daily_loss_limit")
             t.db.log_agent("runner", "circuit_breaker", f"{day_pnl:.2f}%")
+            _notify(f"🛑 Team {t.name} hit the daily loss limit ({day_pnl:.1f}%) — flattened and halted for the day.")
 
     def _new_day(self, now):
         self._day = now.date()
@@ -273,6 +301,7 @@ class Competition:
     def run_forever(self):
         print(f"[competition] starting; teams online: {[t.name for t in self.teams]} "
               f"(others activate when their API key is set)")
+        _notify(f"🤖 Trading desk competition online — teams: {[t.name for t in self.teams] or 'none yet'}")
         planned = reviewed = False
         while True:
             try:

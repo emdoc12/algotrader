@@ -128,6 +128,14 @@ class _Handler(BaseHTTPRequestHandler):
             if path == "/api/settings":
                 self._json(settings.masked_status())
                 return
+            if path == "/api/check":
+                from daytrader.live.healthcheck import check_providers
+                self._json({"results": check_providers()})
+                return
+            if path == "/api/health":
+                from daytrader.live.healthcheck import health_snapshot
+                self._json(health_snapshot())
+                return
             if path.startswith("/api/team/"):
                 rest = path[len("/api/team/"):]
                 name = urllib.parse.unquote(rest.strip("/"))
@@ -342,6 +350,7 @@ function buildTabs(){
   };
   mk("overview", "Overview");
   for(const tm of TEAMS) mk(tm, LABELS[tm]);
+  mk("health", "Health");
   mk("settings", "Settings");
 }
 function switchTab(id){
@@ -350,6 +359,7 @@ function switchTab(id){
   buildTabs();
   if(id === "overview") loadOverview();
   else if(id === "settings") loadSettings();
+  else if(id === "health") loadHealth();
   else loadTeam(id);
 }
 
@@ -744,6 +754,105 @@ async function sendChat(name){
   }
 }
 
+// ---- health ------------------------------------------------------------- //
+async function loadHealth(){
+  const main = document.getElementById("main");
+  if(current !== "health") return;
+  let h;
+  try{ h = await getJSON("/api/health"); }
+  catch(e){ main.innerHTML = ""; main.appendChild(el("div",{class:"err"}, "Failed to load: "+e)); return; }
+  if(current !== "health") return;
+  main.innerHTML = "";
+
+  // System status
+  const sys = el("div", {class:"card"});
+  sys.appendChild(el("h2", null, "System"));
+  const mk = (label, val, ok) => {
+    const r = el("div", {style:"display:flex;justify-content:space-between;padding:4px 0;font-size:13px"});
+    r.appendChild(el("span", {class:"muted"}, label));
+    r.appendChild(el("span", {style:"color:"+(ok?"var(--green)":"var(--gray)")}, val));
+    return r;
+  };
+  sys.appendChild(mk("Market", h.market_open ? "OPEN" : "closed", h.market_open));
+  sys.appendChild(mk("Stock/ETF data (Yahoo)", h.data_feed.yahoo ? "ok" : "down", h.data_feed.yahoo));
+  sys.appendChild(mk("tastytrade data", h.data_feed.tastytrade_configured ? "connected" : "not configured", h.data_feed.tastytrade_configured));
+  sys.appendChild(mk("As of", new Date(h.now_et).toLocaleString(), true));
+  main.appendChild(sys);
+
+  // Per-team status
+  const tc = el("div", {class:"card"});
+  tc.appendChild(el("h2", null, "Teams"));
+  const tbl = el("table", {style:"width:100%;border-collapse:collapse;font-size:13px"});
+  const hdr = el("tr");
+  ["Team","Model","Key","Equity","Errors today","Halted","Open","Last activity"].forEach(x =>
+    hdr.appendChild(el("th",{style:"text-align:left;padding:6px 8px;color:var(--gray);border-bottom:1px solid var(--line)"},x)));
+  tbl.appendChild(hdr);
+  (h.teams||[]).forEach(t => {
+    const tr = el("tr");
+    const cells = [
+      t.team, t.model,
+      t.configured ? "✓" : "—",
+      "$"+Number(t.equity).toLocaleString(),
+      String(t.errors_today),
+      t.halted ? "YES" : "no",
+      String(t.open_positions),
+      t.last_cycle ? new Date(t.last_cycle).toLocaleTimeString() : "—",
+    ];
+    cells.forEach((c,i) => {
+      let color = "var(--txt)";
+      if(i===2) color = t.configured ? "var(--green)" : "var(--gray)";
+      if(i===4 && t.errors_today>0) color = "var(--red)";
+      if(i===5 && t.halted) color = "var(--red)";
+      tr.appendChild(el("td",{style:"padding:6px 8px;color:"+color}, c));
+    });
+    tbl.appendChild(tr);
+  });
+  tc.appendChild(tbl);
+  main.appendChild(tc);
+
+  // Live API test
+  const test = el("div", {class:"card"});
+  test.appendChild(el("h2", null, "API connectivity (live test)"));
+  test.appendChild(el("div",{class:"muted",style:"font-size:12px;margin-bottom:10px"},
+    "Pings each team's model with its key. Costs a tiny API call per team."));
+  const tb = el("button", {id:"healthTestBtn", onclick:()=>testConnections("healthTestBtn","healthTestResults")}, "Test APIs now");
+  test.appendChild(tb);
+  test.appendChild(el("div", {id:"healthTestResults", style:"margin-top:12px"}));
+  main.appendChild(test);
+
+  // Recent errors
+  const ec = el("div", {class:"card"});
+  ec.appendChild(el("h2", null, "Recent errors & refusals"));
+  const errs = h.recent_errors || [];
+  if(!errs.length){ ec.appendChild(el("div",{class:"muted",style:"font-size:13px"}, "None recorded. 🎉")); }
+  else errs.forEach(e => {
+    const row = el("div", {style:"padding:6px 0;border-bottom:1px solid var(--line);font-size:12px"});
+    row.appendChild(el("span", {class:"red"}, "["+e.team+"/"+e.agent+"] "));
+    row.appendChild(el("span", {class:"muted"}, (e.ts||"")+" — "));
+    row.appendChild(el("span", null, e.detail||e.action));
+    ec.appendChild(row);
+  });
+  main.appendChild(ec);
+
+  // Dev requests
+  const dc = el("div", {class:"card"});
+  dc.appendChild(el("h2", null, "Open dev requests (agents asking for help)"));
+  const dev = h.open_dev_requests || [];
+  if(!dev.length){ dc.appendChild(el("div",{class:"muted",style:"font-size:13px"}, "None.")); }
+  else dev.forEach(d => {
+    const row = el("div", {style:"padding:6px 0;border-bottom:1px solid var(--line);font-size:13px"});
+    row.appendChild(el("span",{class:"muted"}, "["+d.team+"] "));
+    if(d.url) row.appendChild(el("a",{href:d.url,target:"_blank",style:"color:var(--green)"}, d.title||"(issue)"));
+    else row.appendChild(el("span", null, d.title||"(request)"));
+    dc.appendChild(row);
+  });
+  main.appendChild(dc);
+
+  if(!refreshTimer && current === "health"){
+    refreshTimer = setInterval(() => { if(current==="health") loadHealth(); }, 20000);
+  }
+}
+
 // ---- settings ----------------------------------------------------------- //
 async function loadSettings(){
   const main = document.getElementById("main");
@@ -817,6 +926,17 @@ function renderSettings(main, status){
   keyCard.appendChild(settingsSecretField(status, "DASHSCOPE_API_KEY", "Team Qwen (DASHSCOPE_API_KEY)"));
   main.appendChild(keyCard);
 
+  // Connection test
+  const testCard = el("div", {class:"card"});
+  testCard.appendChild(el("h2", null, "Test team connections"));
+  testCard.appendChild(el("div", {class:"muted", style:"font-size:12px;margin-bottom:10px"},
+    "Pings each team's model with its current key to confirm it responds. Save your keys first."));
+  const testBtn = el("button", {id:"testConnBtn"}, "Test connections");
+  testBtn.addEventListener("click", testConnections);
+  testCard.appendChild(testBtn);
+  testCard.appendChild(el("div", {id:"testResults", style:"margin-top:12px"}));
+  main.appendChild(testCard);
+
   // Model / endpoint overrides
   const modelCard = el("div", {class:"card"});
   modelCard.appendChild(el("h2", null, "Model / endpoint overrides (optional)"));
@@ -868,6 +988,37 @@ function renderSettings(main, status){
   saveCard.appendChild(el("div", {class:"muted", style:"font-size:11px;margin-top:12px"},
     "Keys are stored locally in this container's data volume (paper trading only) and are never committed or logged."));
   main.appendChild(saveCard);
+}
+
+async function testConnections(btnId, outId){
+  if(typeof btnId !== "string") btnId = "testConnBtn";
+  if(typeof outId !== "string") outId = "testResults";
+  const btn = document.getElementById(btnId);
+  const out = document.getElementById(outId);
+  if(btn){ btn.disabled = true; btn.textContent = "Testing… (a few seconds)"; }
+  if(out) out.innerHTML = "";
+  try{
+    const r = await getJSON("/api/check");
+    const rows = (r && r.results) || [];
+    const tbl = el("table", {style:"width:100%;border-collapse:collapse;font-size:13px"});
+    const hdr = el("tr");
+    ["Team","Model","Status","Latency","Detail"].forEach(h =>
+      hdr.appendChild(el("th", {style:"text-align:left;padding:6px 8px;color:var(--gray);border-bottom:1px solid var(--line)"}, h)));
+    tbl.appendChild(hdr);
+    rows.forEach(row => {
+      const tr = el("tr");
+      const status = row.ok ? "✓ OK" : (row.configured ? "✗ FAIL" : "— no key");
+      const color = row.ok ? "var(--green)" : (row.configured ? "var(--red)" : "var(--gray)");
+      tr.appendChild(el("td", {style:"padding:6px 8px"}, row.team));
+      tr.appendChild(el("td", {style:"padding:6px 8px"}, row.model));
+      tr.appendChild(el("td", {style:"padding:6px 8px;color:"+color}, status));
+      tr.appendChild(el("td", {style:"padding:6px 8px"}, row.configured ? (row.latency_ms+"ms") : "-"));
+      tr.appendChild(el("td", {style:"padding:6px 8px;color:var(--gray)"}, row.detail || ""));
+      tbl.appendChild(tr);
+    });
+    if(out){ out.innerHTML = ""; out.appendChild(tbl); }
+  }catch(e){ if(out) out.appendChild(el("div", {class:"err"}, "Test failed: "+e)); }
+  finally{ if(btn){ btn.disabled = false; btn.textContent = "Test connections"; } }
 }
 
 async function saveSettings(){

@@ -45,6 +45,18 @@ def cmd_leaderboard(_args):
               f"{r['profit_factor']:>5.2f} {r['win_rate']:>5.1f}% {r['n_trades']:>7} {r['open_positions']:>5}")
 
 
+def cmd_check(_args):
+    from daytrader.live.healthcheck import check_providers
+    rows = check_providers()
+    print(f"{'TEAM':<8} {'MODEL':<22} {'STATUS':<8} {'LATENCY':>8}  DETAIL")
+    for r in rows:
+        status = "OK" if r["ok"] else ("— " if not r["configured"] else "FAIL")
+        lat = f"{r['latency_ms']}ms" if r["configured"] else "-"
+        print(f"{r['team']:<8} {r['model'][:22]:<22} {status:<8} {lat:>8}  {r['detail']}")
+    working = [r["team"] for r in rows if r["ok"]]
+    print(f"\nWorking teams: {working or 'none'}")
+
+
 def cmd_status(_args):
     from daytrader.live.db import LiveDB
     from daytrader.live.market_state import snapshot
@@ -60,6 +72,7 @@ def main(argv=None):
     s = sub.add_parser("serve"); s.add_argument("--port", type=int, default=DEFAULT_PORT); s.set_defaults(func=cmd_serve)
     sub.add_parser("compete").set_defaults(func=cmd_compete)
     sub.add_parser("leaderboard").set_defaults(func=cmd_leaderboard)
+    sub.add_parser("check").set_defaults(func=cmd_check)
     sub.add_parser("status").set_defaults(func=cmd_status)
     args = p.parse_args(argv)
     args.func(args)

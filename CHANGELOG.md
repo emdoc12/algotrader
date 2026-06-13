@@ -9,6 +9,28 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.3.0] — 2026-06-13
+
+### Added
+- **Health tab** in the dashboard — at-a-glance monitoring: market/data-feed
+  status, per-team status (key configured, equity, errors today, halted,
+  open positions, last activity), a recent-errors/refusals feed, and the agents'
+  open dev requests. Auto-refreshes (DB-only, no API cost).
+- **Live API connectivity test** — `GET /api/check`, a "Test APIs now" button on
+  the Health tab (and Settings), and a CLI `python -m daytrader.agent check`.
+  Pings each team's model with its current key and reports ✓/✗ + latency +
+  error detail (surfaces dead keys *and* wrong model IDs).
+- **Discord breakage alerts** — when a team's cycle errors, a daily-loss circuit
+  breaker trips, or the competition starts, an alert is pushed to
+  `DISCORD_WEBHOOK_URL` (throttled). New module `daytrader/live/healthcheck.py`.
+
+### How failures surface
+Agent errors/refusals are logged per team (visible in the Health tab and team
+thinking feed); the agents file GitHub issues via `request_dev_help` for things
+needing a developer; and with a Discord webhook set, breakages are pushed to you.
+
+---
+
 ## [6.2.1] — 2026-06-13
 
 ### Fixed
