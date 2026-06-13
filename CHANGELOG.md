@@ -9,6 +9,22 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.1.0] — 2026-06-13
+
+### Added
+- **Settings page** in the dashboard — enter API keys (Claude/OpenAI/Grok/Qwen,
+  plus Alpaca) and model/endpoint overrides from the browser. Stored in a
+  gitignored `settings.json` in the data volume (chmod 600), masked in the UI,
+  never logged. New keys **activate their team within the next cycle, no restart**
+  (`Competition._sync_teams`). New module `daytrader/live/settings.py`.
+
+### Fixed
+- **Dashboard port.** The new service listens on 8787 (the old crypto dashboard
+  used 3737). Added `DASHBOARD_PORT` env support so an existing container/port
+  mapping keeps working — set `DASHBOARD_PORT=3737` to reuse the old mapping.
+
+---
+
 ## [6.0.0] — 2026-06-13
 
 **Crypto removed. Multi-model competition + web dashboard. $10k per team.**

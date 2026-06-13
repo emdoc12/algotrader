@@ -22,6 +22,7 @@ from daytrader.live.db import LiveDB
 from daytrader.live.market_state import market_only, with_account
 from daytrader.live.paper_broker import PaperBroker
 from daytrader.live.providers import default_team_providers, has_key
+from daytrader.live import settings as _settings
 
 ET = ZoneInfo("America/New_York")
 OPEN, PLAN_BY, EOD_FLAT, CLOSE = dtime(9, 30), dtime(9, 45), dtime(15, 50), dtime(16, 0)
@@ -50,8 +51,17 @@ class Team:
     halted: bool = False
 
 
+def _build_team(name: str, provider) -> Team:
+    db = LiveDB(team_db_path(name))
+    broker = PaperBroker(db, starting_equity=START_CASH)
+    desk = TradingTeam(broker, db, provider=provider)
+    return Team(name=name, provider=provider, db=db, broker=broker, desk=desk,
+                day_start_equity=broker.equity())
+
+
 def build_teams(only_with_keys: bool = True) -> list[Team]:
     """Instantiate every contestant that has its API key configured."""
+    _settings.apply_to_env()
     teams: list[Team] = []
     for name, provider in default_team_providers().items():
         if only_with_keys and not has_key(provider):
@@ -206,6 +216,16 @@ class Competition:
         self.teams = build_teams()
         self._day = None
 
+    def _sync_teams(self):
+        """Activate any team whose API key has appeared (e.g. entered via the
+        settings page) since startup — no restart needed."""
+        _settings.apply_to_env()
+        have = {t.name for t in self.teams}
+        for name, provider in default_team_providers().items():
+            if name not in have and has_key(provider):
+                self.teams.append(_build_team(name, provider))
+                print(f"[competition] activated team '{name}' ({getattr(provider,'model','?')})")
+
     # -- shared-cycle phases --------------------------------------------
     def _market(self):
         return market_only(symbols=None if WATCHLIST_SIZE else None)
@@ -251,14 +271,12 @@ class Competition:
 
     # -- the always-on loop ---------------------------------------------
     def run_forever(self):
-        if not self.teams:
-            print("[competition] No teams have API keys configured. Set at least one of "
-                  "ANTHROPIC_API_KEY / OPENAI_API_KEY / XAI_API_KEY / DASHSCOPE_API_KEY.")
-            return
-        print(f"[competition] {len(self.teams)} teams online: {[t.name for t in self.teams]}")
+        print(f"[competition] starting; teams online: {[t.name for t in self.teams]} "
+              f"(others activate when their API key is set)")
         planned = reviewed = False
         while True:
             try:
+                self._sync_teams()
                 now = datetime.now(ET)
                 if self._day != now.date():
                     self._new_day(now)
