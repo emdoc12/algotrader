@@ -1,29 +1,35 @@
-"""Gap Fade (with optional Gap-and-Go) — trade the opening gap.
+"""Gap strategy — opening gap vs. the prior close, momentum-aware.
 
 Each morning the first RTH bar opens some distance from the PRIOR day's close.
-That gap, measured in ATR, drives two opposite plays:
+That gap, measured in ATR, drives two opposite plays. Critically, in liquid
+momentum names (SPY + Mag7) the dominant edge is to go *with* a gap that keeps
+running, not to fade it -- naive gap-fades stand in front of momentum and bleed.
+So this strategy leads with gap-and-go and keeps a conservative, regime-gated
+fade as a secondary path.
 
-  * MODERATE gap (gap_min_atr .. gap_max_atr): statistically prone to fill.
-    Fade it back toward the prior close.
-      - Gap UP  -> SHORT, target = prior close.
-      - Gap DOWN -> LONG, target = prior close.
-    We wait for the first few bars and require the early action to confirm a
-    pullback toward the close (i.e. momentum is fading, not extending).
+  * GAP-AND-GO (primary): a gap (>= `go_min_atr`) whose first bars extend in the
+    gap's direction tends to continue. Go WITH it, but only when it agrees with
+    the higher-timeframe trend regime (prior daily close vs. its EMA):
+      - Gap UP   + early bars pushing higher + uptrend  -> LONG.
+      - Gap DOWN + early bars pushing lower  + downtrend -> SHORT.
+    Stop is an ATR multiple beyond the gap base (open / bar extreme); target is
+    an RR multiple of that risk.
 
-  * LARGE gap (>= go_min_atr) WITH momentum: gaps this big rarely fill same
-    day; instead they often run. Go WITH the gap (gap-and-go).
-      - Gap UP   + opening bars pushing higher  -> LONG.
-      - Gap DOWN + opening bars pushing lower    -> SHORT.
-    Target is an RR multiple of the ATR stop (no fill target).
+  * GAP-FILL FADE (secondary, optional via `allow_fade`): a MODERATE gap
+    (`fade_min_atr`..`fade_max_atr`) that is fighting the trend -- a gap UP in a
+    downtrending name, or a gap DOWN in an uptrending name -- is statistically
+    prone to fill. Fade it back to the prior close once the early bars roll over
+    toward that close.
 
-Stops are an ATR multiple beyond entry. One trade per symbol per day; decisions
-are made on the close of an early bar (within the first `confirm_bars`) and the
-engine fills at the next bar's open.
+Both decisions are made on the close of an early bar (within the first
+`confirm_bars`); the engine fills at the next bar's open. One trade per symbol
+per day; no entries after `no_entry_after` (the gap edge lives in the morning).
 
-CAUSALITY: the only prior-day input is yesterday's completed close, obtained by
-aggregating `groupby(normalize()).last()` and `.shift(1)`. Today's open is the
-FIRST bar's open and the confirmation uses only bars at/after the open up to the
-current bar i — never a later bar, never today's full-day high/low/close.
+CAUSALITY: prior-day inputs are yesterday's completed close and an EMA over
+PRIOR daily closes, both obtained via `groupby(normalize())` aggregates and
+`.shift(1)`. Today's open is the FIRST bar's open; momentum confirmation uses
+only bars at/after the open up to the current bar i -- never a later bar, never
+today's full-day high/low/close, never today's own close as a "prior" close.
 """
 from __future__ import annotations
 
@@ -32,7 +38,7 @@ from datetime import time as dtime
 import numpy as np
 import pandas as pd
 
-from daytrader.core.indicators import atr
+from daytrader.core.indicators import atr, ema
 from daytrader.core.types import Side, Signal, SignalType
 from daytrader.strategies.base import Strategy
 
@@ -43,21 +49,24 @@ class GapFade(Strategy):
     def __init__(
         self,
         atr_period: int = 14,
-        gap_min_atr: float = 0.5,    # below this: no tradeable gap (fade)
-        gap_max_atr: float = 3.0,    # above this: too big to fade -> go regime
-        go_min_atr: float = 3.0,     # gap >= this is a gap-and-go candidate
+        go_min_atr: float = 0.5,     # gap >= this (in ATR) is a gap-and-go candidate
+        go_rr: float = 2.0,          # reward:risk target for gap-and-go
         confirm_bars: int = 3,       # decide within the first N bars after open
-        stop_atr_mult: float = 1.0,
-        go_rr: float = 1.5,          # reward:risk target for gap-and-go
+        stop_atr_mult: float = 0.8,  # stop this many ATR beyond the gap base
+        trend_ema: int = 20,         # daily-close EMA span for the regime gate
+        regime: bool = True,         # require the gap to agree with the trend
+        allow_fade: bool = True,     # enable the secondary gap-fill fade path
+        fade_min_atr: float = 0.5,   # moderate-gap fade window (lower bound)
+        fade_max_atr: float = 1.2,   # moderate-gap fade window (upper bound)
         no_entry_after: dtime = dtime(11, 0),  # gap edge lives in the morning
         allow_short: bool = True,
-        allow_go: bool = True,       # enable the gap-and-go side
     ):
         super().__init__(
-            atr_period=atr_period, gap_min_atr=gap_min_atr, gap_max_atr=gap_max_atr,
-            go_min_atr=go_min_atr, confirm_bars=confirm_bars, stop_atr_mult=stop_atr_mult,
-            go_rr=go_rr, no_entry_after=no_entry_after, allow_short=allow_short,
-            allow_go=allow_go,
+            atr_period=atr_period, go_min_atr=go_min_atr, go_rr=go_rr,
+            confirm_bars=confirm_bars, stop_atr_mult=stop_atr_mult,
+            trend_ema=trend_ema, regime=regime, allow_fade=allow_fade,
+            fade_min_atr=fade_min_atr, fade_max_atr=fade_max_atr,
+            no_entry_after=no_entry_after, allow_short=allow_short,
         )
 
     def generate(self, df: pd.DataFrame) -> list[Signal]:
@@ -65,11 +74,15 @@ class GapFade(Strategy):
             return []
         symbol = df["symbol"].iloc[0]
 
-        # --- prior-day close (causal) ----------------------------------
+        # --- prior-day close + daily-trend regime (causal) -------------
         day = df.index.normalize()
         daily_close = df.groupby(day)["close"].last()
         pc = daily_close.shift(1)        # each day -> prior day's close
         pcv = day.map(pc).to_numpy()
+
+        daily_ema = ema(daily_close, self.trend_ema).shift(1)
+        up_regime = pc > daily_ema       # prior close above its trend EMA
+        upv = day.map(up_regime).to_numpy()
 
         # Today's open = the first bar's open for each day; mapped to all bars.
         day_open = df.groupby(day)["open"].first()
@@ -97,8 +110,8 @@ class GapFade(Strategy):
             t = idx[i].time()
             if t >= self.no_entry_after:
                 continue
-            # Only decide within the first `confirm_bars` bars (need >=1 to
-            # confirm, so skip the raw open bar itself).
+            # Decide within the first `confirm_bars` bars (need >=1 bar of action
+            # to confirm momentum, so skip the raw 09:30 open bar itself).
             k = bar_in_day[i]
             if k < 1 or k >= self.confirm_bars:
                 continue
@@ -110,44 +123,58 @@ class GapFade(Strategy):
             today_open = tov[i]
             gap = today_open - pcv[i]
             gap_atr = abs(gap) / av
-            if gap_atr < self.gap_min_atr:
+            if gap_atr < min(self.go_min_atr, self.fade_min_atr):
                 continue
 
             cl = close[i]
+            up = bool(upv[i])
 
-            # ---- GAP-AND-GO: very large gap, price extending --------
-            if self.allow_go and gap_atr >= self.go_min_atr:
-                if gap > 0 and cl > today_open:   # gap up, pushing higher
-                    stop = low[i] - self.stop_atr_mult * av
-                    risk = cl - stop
-                    if risk > 0:
-                        signals.append(Signal(
-                            ts=idx[i], symbol=symbol, side=Side.LONG,
-                            type=SignalType.ENTRY, strategy=self.name,
-                            stop=stop, target=cl + self.go_rr * risk,
-                            reason=f"gap-and-go up {gap_atr:.1f}ATR",
-                        ))
-                        done.add(d)
-                elif gap < 0 and cl < today_open and self.allow_short:
-                    stop = high[i] + self.stop_atr_mult * av
-                    risk = stop - cl
-                    if risk > 0:
-                        signals.append(Signal(
-                            ts=idx[i], symbol=symbol, side=Side.SHORT,
-                            type=SignalType.ENTRY, strategy=self.name,
-                            stop=stop, target=cl - self.go_rr * risk,
-                            reason=f"gap-and-go down {gap_atr:.1f}ATR",
-                        ))
-                        done.add(d)
-                continue
+            # ---- GAP-AND-GO LONG: gap up, extending, uptrend ----------
+            if (gap > 0 and gap_atr >= self.go_min_atr
+                    and cl > today_open and cl > o[i]
+                    and (up or not self.regime)):
+                stop = min(low[i], today_open) - self.stop_atr_mult * av
+                risk = cl - stop
+                if risk > 0:
+                    signals.append(Signal(
+                        ts=idx[i], symbol=symbol, side=Side.LONG,
+                        type=SignalType.ENTRY, strategy=self.name,
+                        stop=stop, target=cl + self.go_rr * risk,
+                        strength=min(1.0, gap_atr / 2.0),
+                        reason=f"gap-and-go up {gap_atr:.1f}ATR",
+                    ))
+                    done.add(d)
+                    continue
 
-            # ---- GAP-FADE: moderate gap, fade back to prior close ---
-            if gap_atr > self.gap_max_atr:
+            # ---- GAP-AND-GO SHORT: gap down, extending, downtrend -----
+            if (gap < 0 and gap_atr >= self.go_min_atr
+                    and cl < today_open and cl < o[i]
+                    and self.allow_short and ((not up) or not self.regime)):
+                stop = max(high[i], today_open) + self.stop_atr_mult * av
+                risk = stop - cl
+                if risk > 0:
+                    signals.append(Signal(
+                        ts=idx[i], symbol=symbol, side=Side.SHORT,
+                        type=SignalType.ENTRY, strategy=self.name,
+                        stop=stop, target=cl - self.go_rr * risk,
+                        strength=min(1.0, gap_atr / 2.0),
+                        reason=f"gap-and-go down {gap_atr:.1f}ATR",
+                    ))
+                    done.add(d)
+                    continue
+
+            # ---- GAP-FILL FADE (secondary): moderate, counter-trend ---
+            # Only fade gaps that fight the prevailing trend -- those revert;
+            # gaps that agree with the trend are handled by gap-and-go above.
+            if not self.allow_fade:
                 continue
-            target = pcv[i]
-            if gap > 0 and self.allow_short:
-                # gap up: fade short only if the early bars are rolling over
-                if cl < today_open and cl > target:
+            if not (self.fade_min_atr <= gap_atr <= self.fade_max_atr):
+                continue
+            target = pcv[i]  # prior close = the gap-fill objective
+
+            # Gap UP fighting a DOWN trend -> short back toward prior close.
+            if gap > 0 and self.allow_short and ((not up) or not self.regime):
+                if cl < today_open and cl > target:  # early bars rolling over
                     stop = high[i] + self.stop_atr_mult * av
                     risk = stop - cl
                     if risk > 0 and cl - target > 0:
@@ -158,9 +185,9 @@ class GapFade(Strategy):
                             reason=f"gap-fill short {gap_atr:.1f}ATR -> {target:.2f}",
                         ))
                         done.add(d)
-            elif gap < 0:
-                # gap down: fade long only if early bars are bouncing
-                if cl > today_open and cl < target:
+            # Gap DOWN fighting an UP trend -> long back toward prior close.
+            elif gap < 0 and (up or not self.regime):
+                if cl > today_open and cl < target:  # early bars bouncing
                     stop = low[i] - self.stop_atr_mult * av
                     risk = cl - stop
                     if risk > 0 and target - cl > 0:
