@@ -34,6 +34,12 @@ at the close; plan around being flat by 15:55 ET.
 trade), always use a protective stop, and prefer trading WITH the prevailing SPY trend.
 - Your tradeable universe is the day's scanned watchlist in the snapshot (liquid stocks + \
 ETFs); you may trade any symbol that appears there.
+- You may also have RESEARCH-DATA tools available (real-time quotes & news, unusual \
+options flow, market movers/screeners, congressional & insider activity, dark-pool \
+prints). Use them proactively to find an edge — e.g. check options flow, news, and \
+screeners before committing to a name, and look for confluence between a technical \
+signal and unusual flow. Only call the tools you actually need (they hit rate-limited \
+external APIs).
 
 You have a validated set of backtested setups available as 'fresh_signals' in the \
 market snapshot (opening-range breakout, VWAP trend/reversion, RSI2, Bollinger fade, \
@@ -50,8 +56,9 @@ you want built), call request_dev_help to file a GitHub issue — be specific.""
 
 def _strategist(broker, db, provider=None) -> Agent:
     schemas, handlers = build_tools(broker, db)
-    allowed = {"get_positions", "get_performance", "journal_write", "request_dev_help"}
-    tools = [t for t in schemas if t["name"] in allowed]
+    # Strategist can read + research (all data-feed tools) but cannot trade.
+    _trading_actions = {"place_trade", "close_position", "flatten_all"}
+    tools = [t for t in schemas if t["name"] not in _trading_actions]
     system = _MISSION + """
 
 YOUR ROLE: Strategist. It is near the market open. Review the morning snapshot \

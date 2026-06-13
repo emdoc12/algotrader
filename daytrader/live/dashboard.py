@@ -970,6 +970,18 @@ function renderSettings(main, status){
   ttCard.appendChild(settingsSecretField(status, "TASTYTRADE_REFRESH_TOKEN", "TASTYTRADE_REFRESH_TOKEN"));
   main.appendChild(ttCard);
 
+  // Research data providers (optional — the desks call these on demand)
+  const dataCard = el("div", {class:"card"});
+  dataCard.appendChild(el("h2", null, "Research data providers (optional)"));
+  dataCard.appendChild(el("div", {class:"muted", style:"font-size:12px;margin-bottom:12px"},
+    "Extra data the desks can look up on demand to find an edge: options flow, news, screeners, congressional/insider activity. Add a key to enable that source for all teams; leave blank to skip."));
+  dataCard.appendChild(settingsSecretField(status, "POLYGON_API_KEY", "POLYGON_API_KEY (quotes / news / aggregates / movers)"));
+  dataCard.appendChild(settingsSecretField(status, "UNUSUAL_WHALES_API_KEY", "UNUSUAL_WHALES_API_KEY (options flow / dark pool)"));
+  dataCard.appendChild(settingsSecretField(status, "BULLFLOW_API_KEY", "BULLFLOW_API_KEY (options flow alerts)"));
+  dataCard.appendChild(settingsSecretField(status, "QUIVER_API_KEY", "QUIVER_API_KEY (congress / insider / WSB / gov contracts)"));
+  dataCard.appendChild(settingsSecretField(status, "FINVIZ_AUTH_TOKEN", "FINVIZ_AUTH_TOKEN (Elite screener export)"));
+  main.appendChild(dataCard);
+
   // Other
   const otherCard = el("div", {class:"card"});
   otherCard.appendChild(el("h2", null, "Other (optional)"));
