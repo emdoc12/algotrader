@@ -6,17 +6,27 @@ session-VWAP standard-deviation band *without* a strong directional trend,
 it often snaps back toward VWAP. This strategy fades those extensions:
 
   * Compute session VWAP and +/- n_std intraday bands.
-  * Go LONG when price pokes below the lower band (stretched cheap) and starts
-    to curl back up; go SHORT when it pokes above the upper band and curls down.
-  * Only trade in a *non-trending* regime (ADX below a ceiling) -- mean
-    reversion is dangerous in strong trends.
-  * Target VWAP (or a partial fraction of the distance back to it); protective
-    stop an ATR multiple beyond the entry. Flat by EOD.
-  * At most one long and one short re-entry per symbol per day, gated to avoid
-    the very open and the last hour.
+  * Go LONG when the prior bar pokes below the lower band (stretched cheap) and
+    the current bar curls back up while still below VWAP (room to run); go SHORT
+    when the prior bar pokes above the upper band and the current bar curls down
+    while still above VWAP.
+  * Only trade a genuinely *balanced* regime. Two filters do this:
+      - ADX below a tight ceiling (no directional trend in force), and
+      - price has crossed VWAP at least `min_crosses` times in the trailing
+        window -- i.e. the tape is oscillating around VWAP, not running away
+        from it. Empirically, fading extensions on Mag7 names is a money-loser
+        unless this "two-sided / mean-reverting tape" condition holds: the most
+        extreme extensions tend to be the strongest momentum (which keep going),
+        so we deliberately fade *moderate* extensions in quiet, balanced tape.
+  * Target a fraction of the distance back to VWAP (a partial revert, which
+    fills far more reliably than a full snap-back); protective stop an ATR
+    multiple beyond entry. Flat by EOD (engine force-flattens).
+  * At most a couple of long / short entries per symbol per day, gated away from
+    the open and the close.
 
 Causal: every level used at bar i is built from data up to and including i
-(session VWAP/bands and ATR are cumulative/causal by construction).
+(session VWAP/bands, ATR and ADX are cumulative/causal; the VWAP-cross count
+looks only at the trailing window ending at i).
 """
 from __future__ import annotations
 
@@ -35,23 +45,26 @@ class VwapReversion(Strategy):
 
     def __init__(
         self,
-        n_std: float = 2.2,
+        n_std: float = 2.0,
         atr_period: int = 14,
-        stop_atr_mult: float = 0.8,
-        target_frac: float = 0.9,
-        min_rr: float = 1.3,
+        stop_atr_mult: float = 1.5,
+        target_frac: float = 0.6,
+        min_rr: float = 0.4,
         adx_period: int = 14,
-        adx_max: float = 25.0,
+        adx_max: float = 18.0,
         min_atr_frac: float = 0.0005,
+        cross_lookback: int = 12,
+        min_crosses: int = 2,
         no_entry_before: dtime = dtime(10, 0),
-        no_entry_after: dtime = dtime(15, 0),
-        max_per_dir: int = 1,
+        no_entry_after: dtime = dtime(15, 30),
+        max_per_dir: int = 2,
         allow_short: bool = True,
     ):
         super().__init__(
             n_std=n_std, atr_period=atr_period, stop_atr_mult=stop_atr_mult,
             target_frac=target_frac, min_rr=min_rr, adx_period=adx_period,
             adx_max=adx_max, min_atr_frac=min_atr_frac,
+            cross_lookback=cross_lookback, min_crosses=min_crosses,
             no_entry_before=no_entry_before, no_entry_after=no_entry_after,
             max_per_dir=max_per_dir, allow_short=allow_short,
         )
@@ -76,6 +89,12 @@ class VwapReversion(Strategy):
         av = a.values
         adv = adx_.values
 
+        # Count VWAP crossings in the trailing window as a "balanced tape" proxy.
+        # cross[i] == 1 when price flipped sides of VWAP between bar i-1 and i.
+        # This is causal: the rolling sum at i uses only bars <= i.
+        above = (close > vwv).astype(float)
+        cross = np.abs(np.diff(above, prepend=above[0]))
+
         signals: list[Signal] = []
         long_count: dict = {}
         short_count: dict = {}
@@ -90,8 +109,12 @@ class VwapReversion(Strategy):
             # Skip dead tape: require ATR to be a sane fraction of price.
             if av[i] / close[i] < self.min_atr_frac:
                 continue
-            # Mean reversion only in balanced (non-trending) regime.
+            # Mean reversion only in a non-trending regime.
             if adv[i] > self.adx_max:
+                continue
+            # Require an oscillating, two-sided tape around VWAP.
+            lb = max(0, i - self.cross_lookback)
+            if cross[lb:i + 1].sum() < self.min_crosses:
                 continue
 
             d = day[i]

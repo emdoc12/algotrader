@@ -4,17 +4,25 @@ In a trending intraday session, session VWAP acts as dynamic support/resistance:
 price stays on one side of VWAP and repeatedly pulls back to it before resuming.
 This strategy trades those continuation pullbacks in the trend direction:
 
-  * Require an established intraday trend: price persistently above (below) a
-    *rising* (falling) session VWAP, confirmed by ADX above a floor.
-  * Wait for a pullback that touches/penetrates VWAP, then a resumption bar that
-    closes back in the trend direction. Enter on that resumption.
+  * Require an established intraday trend. Three things must agree:
+      - ADX above a floor (a directional move is genuinely underway),
+      - session VWAP is sloping in the trade direction by at least
+        `slope_atr_min` ATRs over the trailing window (a real drift, not noise),
+      - price is on the trend side of a trend EMA (close > EMA for longs).
+  * Wait for a pullback that touches/penetrates VWAP, then a *strong resumption
+    bar*: price closes back across VWAP in the trend direction, prints a higher
+    (lower) close than the prior bar, and closes in the upper (lower) portion of
+    its own range (`strong_close`) -- i.e. buyers/sellers clearly stepped back in.
   * Protective stop an ATR multiple beyond VWAP (the level we expect to hold);
-    profit target a fixed reward-to-risk multiple. Flat by EOD.
-  * At most one long / one short re-entry per symbol per day, gated away from
-    the open and the last hour.
+    profit target a modest reward-to-risk multiple (continuation pops are taken
+    quickly -- a tight, high-fill-rate target beats a distant one that the EOD
+    flatten never lets reach). Flat by EOD (engine force-flattens).
+  * At most one long / one short entry per symbol per day, gated away from the
+    open and the close.
 
-Causal: VWAP and its slope use only completed bars up to and including i; the
-"rising VWAP" check compares vwap[i] to vwap a few bars earlier, never future.
+Causal: VWAP, its slope, ATR, ADX and the EMA use only completed bars up to and
+including i; the slope check compares vwap[i] to vwap `slope_lookback` bars
+earlier, never future. The engine fills at the next bar's open.
 """
 from __future__ import annotations
 
@@ -23,7 +31,7 @@ from datetime import time as dtime
 import numpy as np
 import pandas as pd
 
-from daytrader.core.indicators import adx, atr, vwap_session
+from daytrader.core.indicators import adx, atr, ema, vwap_session
 from daytrader.core.types import Side, Signal, SignalType
 from daytrader.strategies.base import Strategy
 
@@ -33,14 +41,16 @@ class VwapTrend(Strategy):
 
     def __init__(
         self,
-        rr: float = 2.0,
+        rr: float = 0.8,
         atr_period: int = 14,
         stop_atr_mult: float = 1.0,
         adx_period: int = 14,
-        adx_min: float = 22.0,
+        adx_min: float = 28.0,
         slope_lookback: int = 6,
+        slope_atr_min: float = 0.15,
+        trend_ema: int = 20,
         touch_atr: float = 0.25,
-        resume_atr: float = 0.05,
+        strong_close: float = 0.55,
         min_atr_frac: float = 0.0005,
         no_entry_before: dtime = dtime(10, 0),
         no_entry_after: dtime = dtime(15, 0),
@@ -50,19 +60,21 @@ class VwapTrend(Strategy):
         super().__init__(
             rr=rr, atr_period=atr_period, stop_atr_mult=stop_atr_mult,
             adx_period=adx_period, adx_min=adx_min, slope_lookback=slope_lookback,
-            touch_atr=touch_atr, resume_atr=resume_atr, min_atr_frac=min_atr_frac,
+            slope_atr_min=slope_atr_min, trend_ema=trend_ema, touch_atr=touch_atr,
+            strong_close=strong_close, min_atr_frac=min_atr_frac,
             no_entry_before=no_entry_before, no_entry_after=no_entry_after,
             max_per_dir=max_per_dir, allow_short=allow_short,
         )
 
     def generate(self, df: pd.DataFrame) -> list[Signal]:
-        if len(df) < self.atr_period + self.slope_lookback + 5:
+        if len(df) < self.trend_ema + self.slope_lookback + 5:
             return []
         symbol = df["symbol"].iloc[0]
 
         vw = vwap_session(df)
         a = atr(df, self.atr_period)
         adx_ = adx(df, self.adx_period)
+        em = ema(df["close"], self.trend_ema)
 
         idx = df.index
         day = df.index.normalize()
@@ -72,6 +84,7 @@ class VwapTrend(Strategy):
         vwv = vw.values
         av = a.values
         adv = adx_.values
+        emv = em.values
 
         lb = self.slope_lookback
         signals: list[Signal] = []
@@ -82,7 +95,8 @@ class VwapTrend(Strategy):
             t = idx[i].time()
             if t < self.no_entry_before or t >= self.no_entry_after:
                 continue
-            if np.isnan(vwv[i]) or np.isnan(vwv[i - lb]) or np.isnan(av[i]) or av[i] <= 0:
+            if (np.isnan(vwv[i]) or np.isnan(vwv[i - lb]) or np.isnan(av[i])
+                    or av[i] <= 0 or np.isnan(emv[i])):
                 continue
             if av[i] / close[i] < self.min_atr_frac:
                 continue
@@ -92,17 +106,25 @@ class VwapTrend(Strategy):
 
             d = day[i]
             touch = self.touch_atr * av[i]
-            vwap_rising = vwv[i] > vwv[i - lb]
-            vwap_falling = vwv[i] < vwv[i - lb]
+            # VWAP drift over the lookback, normalized by ATR (a unitless slope).
+            slope = (vwv[i] - vwv[i - lb]) / av[i]
+            rng = high[i] - low[i]
+            if rng <= 0:
+                continue
+            close_pos = (close[i] - low[i]) / rng  # 0=closed on low, 1=on high
 
-            # LONG: rising VWAP, prior bar pulled back to within `touch` of VWAP
-            # (or below it), current bar resumes up and closes back above VWAP.
+            up_trend = slope >= self.slope_atr_min and close[i] > emv[i]
+            down_trend = slope <= -self.slope_atr_min and close[i] < emv[i]
+
+            # LONG: rising VWAP + price above trend EMA; prior bar pulled back to
+            # within `touch` of VWAP (or below); this bar resumes up -- closes
+            # back above VWAP, higher than the prior close, strong into the high.
             if (long_count.get(d, 0) < self.max_per_dir
-                    and vwap_rising
+                    and up_trend
                     and low[i - 1] <= vwv[i - 1] + touch
-                    and close[i - 1] > vwv[i - 1] - touch  # was hugging VWAP, not collapsed through it
                     and close[i] > vwv[i]
-                    and close[i] > close[i - 1]):
+                    and close[i] > close[i - 1]
+                    and close_pos >= self.strong_close):
                 stop = vwv[i] - self.stop_atr_mult * av[i]
                 risk = close[i] - stop
                 if risk > 0:
@@ -115,15 +137,16 @@ class VwapTrend(Strategy):
                     ))
                     long_count[d] = long_count.get(d, 0) + 1
 
-            # SHORT: falling VWAP, prior bar rallied up to VWAP, current bar
-            # resumes down and closes back below VWAP.
+            # SHORT: falling VWAP + price below trend EMA; prior bar rallied up to
+            # VWAP, this bar resumes down -- closes back below VWAP, lower than the
+            # prior close, weak into the low.
             if (self.allow_short
                     and short_count.get(d, 0) < self.max_per_dir
-                    and vwap_falling
+                    and down_trend
                     and high[i - 1] >= vwv[i - 1] - touch
-                    and close[i - 1] < vwv[i - 1] + touch
                     and close[i] < vwv[i]
-                    and close[i] < close[i - 1]):
+                    and close[i] < close[i - 1]
+                    and (1.0 - close_pos) >= self.strong_close):
                 stop = vwv[i] + self.stop_atr_mult * av[i]
                 risk = stop - close[i]
                 if risk > 0:
