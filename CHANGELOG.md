@@ -9,6 +9,41 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [5.1.0] — 2026-06-13
+
+**Autonomous, Claude-powered agent desk for paper trading.** A team of agents
+that day-trades SPY + Mag7 during market hours, self-directs, and asks the
+developer for help via GitHub issues when blocked. All paper mode.
+
+### Added
+- **Agent team** (`daytrader/live/agents.py`) — Strategist (sets the day's plan),
+  Trader (runs each intraday cycle and places trades), Reviewer (journals
+  lessons, files dev requests). All share one persistent journal as memory.
+- **LLM client** (`daytrader/live/llm_client.py`) — official Anthropic SDK,
+  manual tool-use loop, adaptive thinking, refusal handling. Default model
+  `claude-opus-4-8` (configurable via `AGENT_MODEL`).
+- **Audited tool surface** (`daytrader/live/tools.py`) — the only ways an agent
+  can act: place_trade, close_position, flatten_all, get_positions,
+  get_performance, journal_write, request_dev_help.
+- **Paper broker + SQLite persistence** (`daytrader/live/paper_broker.py`,
+  `db.py`) — simulated market fills at live prices with realistic slippage,
+  long/short accounting, restart-safe state (positions, cash, journal, equity).
+- **Market-state snapshot** (`daytrader/live/market_state.py`) — live prices,
+  indicators, regime, fresh signals from the validated book, account state.
+- **Dev-request channel** (`daytrader/live/dev_requests.py`) — files GitHub
+  issues (`GITHUB_TOKEN`/`GITHUB_REPO`), with a DB fallback.
+- **Market-hours runner** (`daytrader/live/runner.py`) — open→plan,
+  interval→trade, close→flatten+review; hard daily-loss circuit breaker and
+  forced EOD flat enforced in code. CLI: `python -m daytrader.agent {run,once,plan,review,status}`.
+- **`Dockerfile.agent`** — container for the agent service (separate from the
+  legacy crypto image). Requires `ANTHROPIC_API_KEY` at runtime.
+
+### Notes
+- `status` runs with no API key (shows what the agents see). The trading
+  commands require `ANTHROPIC_API_KEY` and degrade gracefully without it.
+
+---
+
 ## [5.0.0] — 2026-06-13
 
 **Ground-up rewrite: SPY / Mag7 intraday day-trading system.** A new, independent

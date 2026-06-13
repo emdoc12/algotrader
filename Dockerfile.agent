@@ -1,0 +1,53 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# AlgoTrader — Autonomous Equity Day-Trading Agent Service
+#
+# This is the autonomous paper-trading agent service: a set of LLM trading
+# agents that research, decide, and place simulated equity day trades, and that
+# can file "dev requests" (GitHub issues) when they need a human developer's
+# help (a new data source, a bug fix, a feature).
+#
+# This Dockerfile is SEPARATE from the legacy ./Dockerfile (the 24/7 crypto bot)
+# and does not replace it.
+#
+# Required at runtime:
+#   ANTHROPIC_API_KEY        — the Claude API key the agents use to think
+# Optional at runtime:
+#   GITHUB_TOKEN             — enables filing dev requests as real GitHub issues
+#                              (without it, requests fall back to DB-only)
+#   DISCORD_WEBHOOK_URL      — push alerts/notifications to Discord
+#
+# Build:  docker build -f Dockerfile.agent -t emdoc12/algotrader-agent:latest .
+# Run:    docker run --env ANTHROPIC_API_KEY=... \
+#                    -v /path/to/data:/app/data \
+#                    emdoc12/algotrader-agent:latest
+# ─────────────────────────────────────────────────────────────────────────────
+
+FROM python:3.12-slim
+
+LABEL maintainer="emdoc12"
+LABEL org.opencontainers.image.title="AlgoTrader Agent"
+LABEL org.opencontainers.image.description="Autonomous equity day-trading agent service"
+
+WORKDIR /app
+
+# ── Python dependencies ──────────────────────────────────────────────────────
+COPY daytrader/live/requirements.txt ./daytrader/live/requirements.txt
+RUN pip install --no-cache-dir -r daytrader/live/requirements.txt
+
+# ── Agent / trading code ─────────────────────────────────────────────────────
+COPY daytrader/ ./daytrader/
+
+# ── Persistent data directory (SQLite live DB) ───────────────────────────────
+RUN mkdir -p /app/data
+VOLUME ["/app/data"]
+
+# ── Environment defaults ─────────────────────────────────────────────────────
+ENV DAYTRADER_DB_PATH=/app/data/daytrader_live.db
+ENV AGENT_MODEL=claude-opus-4-8
+ENV GITHUB_REPO=emdoc12/algotrader
+ENV PYTHONUNBUFFERED=1
+
+# ── Run the autonomous agent loop ────────────────────────────────────────────
+# NOTE: the daytrader.agent entrypoint is implemented separately; this only
+# wires the CMD.
+CMD ["python3", "-m", "daytrader.agent", "run"]
