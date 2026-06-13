@@ -965,9 +965,9 @@ function renderSettings(main, status){
   const ttCard = el("div", {class:"card"});
   ttCard.appendChild(el("h2", null, "Brokerage data — tastytrade (READ-ONLY market data)"));
   ttCard.appendChild(el("div", {class:"muted", style:"font-size:12px;margin-bottom:12px"},
-    "Live stock + option quotes and Greeks for the teams. READ-ONLY — the desks never place trades on your tastytrade account; all orders are simulated in the paper books."));
-  ttCard.appendChild(settingsTextField(status, "TASTYTRADE_USERNAME", "TASTYTRADE_USERNAME"));
-  ttCard.appendChild(settingsSecretField(status, "TASTYTRADE_PASSWORD", "TASTYTRADE_PASSWORD"));
+    "Live stock + option quotes and Greeks for the teams. READ-ONLY — the desks never place trades on your tastytrade account; all orders are simulated in the paper books. Uses OAuth (works with 2FA accounts; no rolling code needed). On tastytrade.com: My Profile → API → OAuth Applications → Manage → Create Grant — copy the client secret and the generated refresh token here."));
+  ttCard.appendChild(settingsSecretField(status, "TASTYTRADE_CLIENT_SECRET", "TASTYTRADE_CLIENT_SECRET"));
+  ttCard.appendChild(settingsSecretField(status, "TASTYTRADE_REFRESH_TOKEN", "TASTYTRADE_REFRESH_TOKEN"));
   main.appendChild(ttCard);
 
   // Other

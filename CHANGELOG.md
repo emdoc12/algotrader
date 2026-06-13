@@ -9,6 +9,19 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.4.0] — 2026-06-13
+
+### Changed
+- **tastytrade auth switched to OAuth** so 2FA-protected accounts work headless
+  (no rolling/one-time code to enter). Settings now takes
+  `TASTYTRADE_CLIENT_SECRET` + `TASTYTRADE_REFRESH_TOKEN` (generate once on
+  tastytrade.com → API → OAuth Applications → Create Grant; the refresh token
+  never expires) instead of username/password. Unpinned to `tastytrade>=12`
+  (latest SDK is OAuth-only) and migrated the option-chain call to the 12.x
+  `get_option_chain` API. Still strictly READ-ONLY — no order code path.
+
+---
+
 ## [6.3.0] — 2026-06-13
 
 ### Added
