@@ -9,6 +9,45 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [5.0.0] — 2026-06-13
+
+**Ground-up rewrite: SPY / Mag7 intraday day-trading system.** A new, independent
+engine that day-trades SPY and the Mag7 (AAPL, MSFT, GOOGL, AMZN, NVDA, META,
+TSLA) with a backtester built to be honest rather than flattering. The legacy
+crypto bot is untouched and still lives under `engine/`; the new system lives
+entirely under `daytrader/`. Major version bump because this is a new product
+surface, not an iteration on the crypto bot.
+
+### Added
+- **Realistic backtest engine** (`daytrader/backtest/engine.py`) — next-bar
+  execution (no look-ahead), slippage + half-spread, gap-through-stop fills,
+  forced end-of-day flat, daily loss limit, optional breakeven/trailing stops.
+- **Nine intraday strategies** (`daytrader/strategies/`) — Opening Range
+  Breakout, VWAP reversion, VWAP-trend pullback, Connors RSI(2), Bollinger fade,
+  EMA pullback, MACD continuation, pivot reversal, gap-and-go. All causal and
+  lookahead-verified.
+- **Regime-gated ensemble + SPY market-direction filter** (`daytrader/portfolio/`)
+  — strategies fire only in their suited ADX regime and only with SPY's trend.
+- **Validation** (`daytrader/backtest/validate.py`) — walk-forward in-sample /
+  out-of-sample split, Monte-Carlo drawdown distribution, strategy correlation.
+- **Risk-based position sizing, full metric suite, HTML report** with an inline
+  equity-vs-SPY chart and a reality score, plus a CLI (`python -m daytrader …`).
+- **Free data loader** (Yahoo Finance) with on-disk caching: 5m/15m (~60d),
+  1h (~2y), daily (full history).
+
+### Results (honest)
+- Validated `trend` book (5m, market filter): out-of-sample profit factor 1.60,
+  max drawdown ~1.7% (Monte-Carlo p95 1.5%), beat SPY out-of-sample by +4.5 pts.
+- The 2:1 profit-factor target was **not** robustly met; the sub-10% drawdown
+  target was met by a wide margin. Full scorecard and reasoning in
+  `daytrader/RESULTS.md`.
+
+### Notes
+- The new day trader is CLI-only for now; the Docker image (`docker.yml`) still
+  builds and runs the legacy crypto `engine/`.
+
+---
+
 ## [4.3.0] — 2026-05-01
 
 Joint Codex + Claude code review pass. Closes four real money-affecting bugs,
