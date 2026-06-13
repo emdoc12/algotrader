@@ -3,3 +3,5 @@ __pycache__/
 *.pyo
 .env
 bot_data.db
+cache/
+*.pkl
