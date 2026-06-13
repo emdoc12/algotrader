@@ -1,12 +1,15 @@
-# daytrader — SPY / Mag7 intraday backtesting system
+# daytrader — intraday backtester + competing AI trading desks
 
-A ground-up rewrite focused on **day-trading SPY and the Mag7** (AAPL, MSFT,
-GOOGL, AMZN, NVDA, META, TSLA) with an honest, realistic backtester. The goal
-is a strategy *book* with **profit factor ≥ 2.0**, **max drawdown < 10%**, and
-positive alpha versus buy-and-hold SPY.
+An honest intraday **backtester** for liquid US stocks + ETFs, plus a live
+**competition** in which four AI desks (Claude, OpenAI, Grok, Qwen) each trade an
+identical **$10,000** paper account and a web dashboard shows who's winning.
 
-> The legacy crypto bot still lives under `engine/` and in git history. This new
-> system is independent and lives entirely under `daytrader/`.
+The backtester targets a strategy *book* with **profit factor ≥ 2.0**, **max
+drawdown < 10%**, and positive alpha versus buy-and-hold SPY.
+
+> The legacy crypto bot has been removed; everything lives under `daytrader/`.
+
+Jump to the live competition: [Competing AI trading desks](#competing-ai-trading-desks-paper).
 
 ## Why you can trust the numbers
 
@@ -94,38 +97,67 @@ python -m daytrader strategies
 python -m daytrader correlation --interval 5m --profile all
 ```
 
-## Autonomous agent desk (paper trading)
+## Competing AI trading desks (paper)
 
-On top of the backtester there's an **autonomous, Claude-powered trading desk**
-that paper-trades the same universe during market hours and self-directs. It is
-a *team* of agents sharing one persistent memory:
+Four AI desks compete on an even field. Each is a **full multi-agent team** —
+**Strategist** (plans the day), **Trader** (runs each cycle and places trades),
+**Reviewer** (journals lessons, files dev requests) — and **every member runs on
+that team's own model**:
 
-- **Strategist** (near the open) reads the morning snapshot, performance, and
-  journal, and writes the day's game plan.
-- **Trader** (every interval) reads the live snapshot, the plan, the fresh
-  backtested signals, and open positions, then places/manages paper trades
-  through a small, audited tool surface.
-- **Reviewer** (at the close) journals concrete lessons and files dev requests.
+| Team | Model (default) | Endpoint | API key env |
+|------|-----------------|----------|-------------|
+| claude | `claude-opus-4-8` | Anthropic | `ANTHROPIC_API_KEY` |
+| openai | `gpt-5.1` | OpenAI | `OPENAI_API_KEY` |
+| grok | `grok-4` | xAI (`https://api.x.ai/v1`) | `XAI_API_KEY` |
+| qwen | `qwen3.6` | DashScope (OpenAI-compatible) | `DASHSCOPE_API_KEY` |
 
-Hard risk limits live in code, not in the model's discretion: a daily-loss
+Every team starts with an identical **$10,000**, the same tools, and the same
+data — the only variable is the model. Teams whose API key isn't set are skipped,
+so you can run any subset. They trade the day's **scanned watchlist** of liquid
+US stocks + ETFs (148-name universe; options come online once a brokerage is
+connected). Model, endpoint, and key are all env-overridable (`OPENAI_MODEL`,
+`XAI_MODEL`, `QWEN_MODEL`, `OPENAI_BASE_URL`, `XAI_BASE_URL`, `QWEN_BASE_URL`, …).
+
+Hard risk limits live in code, not the model's discretion: a per-team daily-loss
 circuit breaker, one position per symbol, and a forced flat at 15:50 ET. All
-state (trades, positions, journal, equity) persists to SQLite, so a container
-restart resumes mid-day with positions and memory intact. When the team is
-blocked by something only a developer can fix — a missing data source, a bug, a
-strategy it wants built — it **files a GitHub issue** via `request_dev_help`.
+state persists to per-team SQLite DBs, so a restart resumes mid-day with positions
+and memory intact. When a team is blocked by something only a developer can fix,
+it **files a GitHub issue** via `request_dev_help`.
+
+### Web dashboard
+
+`python -m daytrader.agent serve` starts the trading loop **and** a dashboard at
+`http://localhost:8787`:
+- **Overview** — live leaderboard plus an equity-curve chart overlaying all four
+  teams against the $10k line.
+- **Per-team tabs** — positions, trades, the team's full thinking feed
+  (journal + agent log), and dev requests.
+- **Chat with the team leader** — message any desk's lead (runs on that team's
+  model with its trading context) to ask about trades or suggest changes.
 
 ```bash
-python -m daytrader.agent status   # what the agents see + account state (no API key needed)
-python -m daytrader.agent once     # run one Trader cycle now (needs ANTHROPIC_API_KEY)
-python -m daytrader.agent plan     # run the Strategist once
-python -m daytrader.agent run      # start the always-on market-hours loop
+python -m daytrader.agent serve         # dashboard + run all teams (the default service)
+python -m daytrader.agent compete       # headless competition loop
+python -m daytrader.agent leaderboard   # print standings and exit
+python -m daytrader.agent status        # what a desk sees (no API key needed)
 ```
 
-Deploy as a container with `Dockerfile.agent` (separate from the legacy crypto
-image). Runtime env: `ANTHROPIC_API_KEY` (required), `AGENT_MODEL`
-(default `claude-opus-4-8`), `GITHUB_TOKEN` + `GITHUB_REPO` (for dev requests),
-`DISCORD_WEBHOOK_URL` (optional alerts), `AGENT_INTERVAL_SECONDS` (default 900),
-`DAILY_LOSS_LIMIT_PCT` (default 3), `DAYTRADER_DB_PATH`.
+Deploy with the top-level `Dockerfile` (exposes 8787, persists per-team DBs under
+`/app/data`). Set the API keys for whichever teams you want to run.
+
+**Running Qwen locally:** point it at any OpenAI-compatible local server (vLLM,
+Ollama, LM Studio) — e.g. `QWEN_BASE_URL=http://host:11434/v1`,
+`QWEN_MODEL=qwen3.6`, and any non-empty placeholder in `DASHSCOPE_API_KEY`.
+
+## Brokerage (going live)
+
+For an options-capable automated bot, the researched recommendation is **Alpaca**
+(#1 — API-first, free paper that mirrors live, native multi-leg options L3, $0
+commissions, official MCP server), **tastytrade** (options-native runner-up), and
+**IBKR** (serious-money alternative). The US Pattern-Day-Trader $25k minimum was
+eliminated on 2026-06-04, so a small automated account is no longer frozen for day
+trading — though a margin account above $25k is the safest structure during the
+broker rollout. Full comparison in the project notes.
 
 ### Key knobs
 

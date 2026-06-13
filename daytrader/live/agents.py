@@ -21,15 +21,19 @@ import json
 from daytrader.live.llm_client import Agent
 from daytrader.live.tools import build_tools
 
-_MISSION = """You are part of an autonomous trading desk that DAY-TRADES SPY and the \
-Mag7 (AAPL, MSFT, GOOGL, AMZN, NVDA, META, TSLA) in PAPER mode — no real money is at risk, \
-but trade as if it were. The desk's mandate:
-- Beat a buy-and-hold of SPY on a risk-adjusted basis.
+_MISSION = """You are the leader of an autonomous trading desk competing against rival \
+desks run by other AI models. Each desk starts with the SAME $10,000 and the SAME tools \
+and data — the goal is to finish ahead of the others. You DAY-TRADE liquid US stocks and \
+ETFs in PAPER mode (options are coming once a brokerage is connected). No real money is at \
+risk, but trade as if it were your own. Your mandate:
+- Grow the $10k and beat both a buy-and-hold of SPY and the rival desks on a risk-adjusted basis.
 - Target a profit factor of 2:1 or better and keep max drawdown under 10%.
 - This is intraday trading: never hold overnight. The system flattens everything \
 at the close; plan around being flat by 15:55 ET.
-- Risk is the priority. Size small (risk well under 1% of equity per trade), always \
-use a protective stop, and prefer trading WITH the prevailing SPY trend.
+- Risk is the priority on a small account. Size small (risk well under 1% of equity per \
+trade), always use a protective stop, and prefer trading WITH the prevailing SPY trend.
+- Your tradeable universe is the day's scanned watchlist in the snapshot (liquid stocks + \
+ETFs); you may trade any symbol that appears there.
 
 You have a validated set of backtested setups available as 'fresh_signals' in the \
 market snapshot (opening-range breakout, VWAP trend/reversion, RSI2, Bollinger fade, \
@@ -44,7 +48,7 @@ blocked by something only a developer can fix (a missing data source, a bug, a s
 you want built), call request_dev_help to file a GitHub issue — be specific."""
 
 
-def _strategist(broker, db) -> Agent:
+def _strategist(broker, db, provider=None) -> Agent:
     schemas, handlers = build_tools(broker, db)
     allowed = {"get_positions", "get_performance", "journal_write", "request_dev_help"}
     tools = [t for t in schemas if t["name"] in allowed]
@@ -57,10 +61,10 @@ favor, whether the tape favors trend or range, and how aggressive to be given re
 results and drawdown. Write a concise, concrete game plan to the journal (topic \
 'plan') that the Trader will follow. Do NOT place trades. If you notice a recurring \
 gap that needs developer help, file one dev request. Keep it tight."""
-    return Agent("strategist", system, tools, handlers, max_tokens=4000, max_iterations=6)
+    return Agent("strategist", system, tools, handlers, provider=provider, max_tokens=4000, max_iterations=6)
 
 
-def _trader(broker, db) -> Agent:
+def _trader(broker, db, provider=None) -> Agent:
     schemas, handlers = build_tools(broker, db)
     system = _MISSION + """
 
@@ -74,10 +78,10 @@ trend. Only take high-quality setups; it is fine to do nothing this cycle.
 fraction of equity. Respect one position per symbol.
 Act through the tools. Be decisive and brief. If nothing is worth doing, say so and \
 stop without trading."""
-    return Agent("trader", system, schemas, handlers, max_tokens=6000, max_iterations=14)
+    return Agent("trader", system, schemas, handlers, provider=provider, max_tokens=6000, max_iterations=14)
 
 
-def _reviewer(broker, db) -> Agent:
+def _reviewer(broker, db, provider=None) -> Agent:
     schemas, handlers = build_tools(broker, db)
     allowed = {"get_positions", "get_performance", "journal_write", "request_dev_help"}
     tools = [t for t in schemas if t["name"] in allowed]
@@ -88,13 +92,14 @@ Review today's trades and performance. Write 2-4 concrete lessons to the journal
 (topic 'lesson') — reference real trades and numbers, not platitudes — plus a one-line \
 plan note for tomorrow. If the data, tooling, or available strategies limited the desk \
 today, file a specific dev request. Do not trade."""
-    return Agent("reviewer", system, tools, handlers, max_tokens=4000, max_iterations=6)
+    return Agent("reviewer", system, tools, handlers, provider=provider, max_tokens=4000, max_iterations=6)
 
 
 class TradingTeam:
-    def __init__(self, broker, db):
+    def __init__(self, broker, db, provider=None):
         self.broker = broker
         self.db = db
+        self.provider = provider
 
     @staticmethod
     def _prompt(snapshot: dict, instruction: str) -> str:
@@ -104,19 +109,19 @@ class TradingTeam:
         )
 
     def plan_day(self, snapshot: dict):
-        agent = _strategist(self.broker, self.db)
+        agent = _strategist(self.broker, self.db, self.provider)
         res = agent.run(self._prompt(snapshot, "Set today's trading plan."))
         self._log(agent.name, res)
         return res
 
     def trade_cycle(self, snapshot: dict):
-        agent = _trader(self.broker, self.db)
+        agent = _trader(self.broker, self.db, self.provider)
         res = agent.run(self._prompt(snapshot, "Run this intraday trading cycle."))
         self._log(agent.name, res)
         return res
 
     def review_day(self, snapshot: dict):
-        agent = _reviewer(self.broker, self.db)
+        agent = _reviewer(self.broker, self.db, self.provider)
         res = agent.run(self._prompt(snapshot, "Review the trading day."))
         self._log(agent.name, res)
         return res

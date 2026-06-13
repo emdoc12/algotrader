@@ -9,6 +9,43 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.0.0] — 2026-06-13
+
+**Crypto removed. Multi-model competition + web dashboard. $10k per team.**
+A breaking, ground-clearing release: the legacy crypto bot and its data are gone;
+the project is now purely an equity day-trading backtester plus a live competition
+between AI trading desks.
+
+### Removed
+- The entire legacy crypto bot (`engine/`), its old databases (`data.db*`,
+  `sqlite.db*`), and the crypto Dockerfile. Not coming back.
+
+### Added
+- **Model competition** (`daytrader/live/competition.py`) — four desks (Claude,
+  OpenAI, Grok, Qwen), each a full multi-agent team running entirely on its own
+  model, each with an identical **$10,000** paper account, same tools, same data.
+  Per-team daily-loss circuit breaker; teams without an API key are skipped.
+- **Provider abstraction** (`daytrader/live/providers.py`) — `AnthropicProvider`
+  + `OpenAICompatibleProvider` (covers OpenAI, xAI Grok, and Qwen, including
+  local OpenAI-compatible servers via env-overridable base URL).
+- **Broadened universe** (`daytrader/data/universe.py`) — 148 liquid US stocks +
+  ETFs with a daily liquidity/volatility/momentum scanner that picks each day's
+  watchlist (replaces the fixed SPY+Mag7 list).
+- **Web dashboard** (`daytrader/live/dashboard.py`) — overview leaderboard +
+  equity-curve comparison chart, per-team tabs (positions, trades, full thinking
+  feed, dev requests), and chat-with-team-leader. Stdlib-only, offline-capable.
+  `python -m daytrader.agent serve` runs the dashboard + competition together.
+- **Brokerage recommendation** (PROJECT_NOTES) — Alpaca (#1), tastytrade,
+  IBKR for an options-capable automated bot; note that the PDT $25k rule was
+  eliminated 2026-06-04.
+
+### Changed
+- Starting equity default 100k → **10k**. Agent is now a team of members on a
+  per-team model. The top-level `Dockerfile` builds the competition+dashboard
+  service (port 8787); CLI is `python -m daytrader.agent {serve,compete,leaderboard,status}`.
+
+---
+
 ## [5.1.0] — 2026-06-13
 
 **Autonomous, Claude-powered agent desk for paper trading.** A team of agents

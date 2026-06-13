@@ -1,59 +1,60 @@
-"""CLI entrypoint for the autonomous paper-trading desk.
+"""CLI entrypoint for the autonomous, competing paper-trading desks.
 
-    python -m daytrader.agent run        # start the always-on market-hours loop
-    python -m daytrader.agent once        # run a single trade cycle now (testing)
-    python -m daytrader.agent plan         # run the Strategist once
-    python -m daytrader.agent review       # run the Reviewer once
-    python -m daytrader.agent status       # print the snapshot + account (no LLM, no key needed)
+    python -m daytrader.agent serve        # web dashboard + run all teams (the default service)
+    python -m daytrader.agent compete       # run the competition loop headless (no UI)
+    python -m daytrader.agent leaderboard    # print current standings and exit
+    python -m daytrader.agent status         # print one team's market+account snapshot (no LLM, no key)
 
-`run`/`once`/`plan`/`review` require ANTHROPIC_API_KEY. `status` does not.
+Each team is a full multi-agent desk (Strategist, Trader, Reviewer) driven by its
+OWN model — Claude, OpenAI, Grok, Qwen — with identical $10k cash and tools.
+Teams trade only if their API key is set; configure any subset.
+Requires the relevant provider API keys at runtime (ANTHROPIC_API_KEY,
+OPENAI_API_KEY, XAI_API_KEY, DASHSCOPE_API_KEY).
 """
 from __future__ import annotations
 
 import argparse
-import json
 
 
-def cmd_run(_args):
-    from daytrader.live.runner import DeskRunner
-    DeskRunner().run_forever()
+def cmd_serve(args):
+    from daytrader.live.dashboard import serve
+    serve(port=args.port)
 
 
-def cmd_once(_args):
-    from daytrader.live.runner import DeskRunner
-    res = DeskRunner().trade()
-    print(res.text or "(no text)")
-    for a in res.actions:
-        print(" -", a["tool"], a["input"], "->", a["result"])
+def cmd_compete(_args):
+    from daytrader.live.competition import Competition
+    Competition().run_forever()
 
 
-def cmd_plan(_args):
-    from daytrader.live.runner import DeskRunner
-    print(DeskRunner().plan().text)
-
-
-def cmd_review(_args):
-    from daytrader.live.runner import DeskRunner
-    print(DeskRunner().review().text)
+def cmd_leaderboard(_args):
+    from daytrader.live.competition import leaderboard
+    rows = leaderboard()
+    if not rows:
+        print("No teams configured.")
+        return
+    print(f"{'#':>2}  {'TEAM':<8} {'MODEL':<20} {'EQUITY':>10} {'RET%':>7} "
+          f"{'DD%':>6} {'PF':>5} {'WIN%':>6} {'TRADES':>7} {'OPEN':>5}")
+    for r in rows:
+        print(f"{r['rank']:>2}  {r['team']:<8} {r['model'][:20]:<20} "
+              f"${r['equity']:>9,.0f} {r['return_pct']:>6.2f}% {r['drawdown_pct']:>5.1f}% "
+              f"{r['profit_factor']:>5.2f} {r['win_rate']:>5.1f}% {r['n_trades']:>7} {r['open_positions']:>5}")
 
 
 def cmd_status(_args):
-    """No LLM: just show what the agents would see plus account state."""
     from daytrader.live.db import LiveDB
     from daytrader.live.market_state import snapshot
     from daytrader.live.paper_broker import PaperBroker
+    import json
     db = LiveDB()
-    broker = PaperBroker(db)
-    print(json.dumps(snapshot(broker), indent=2, default=str))
+    print(json.dumps(snapshot(PaperBroker(db, starting_equity=10000)), indent=2, default=str))
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="daytrader.agent", description="Autonomous paper-trading desk")
+    p = argparse.ArgumentParser(prog="daytrader.agent", description="Competing autonomous paper-trading desks")
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("run").set_defaults(func=cmd_run)
-    sub.add_parser("once").set_defaults(func=cmd_once)
-    sub.add_parser("plan").set_defaults(func=cmd_plan)
-    sub.add_parser("review").set_defaults(func=cmd_review)
+    s = sub.add_parser("serve"); s.add_argument("--port", type=int, default=8787); s.set_defaults(func=cmd_serve)
+    sub.add_parser("compete").set_defaults(func=cmd_compete)
+    sub.add_parser("leaderboard").set_defaults(func=cmd_leaderboard)
     sub.add_parser("status").set_defaults(func=cmd_status)
     args = p.parse_args(argv)
     args.func(args)
