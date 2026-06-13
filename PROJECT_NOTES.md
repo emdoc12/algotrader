@@ -26,7 +26,7 @@ python -m daytrader backtest --interval 5m --html report.html
 python -m daytrader walkforward --interval 5m
 
 # Competing agent desks (set the API keys for whichever teams you want)
-python -m daytrader.agent serve        # web dashboard + run all teams (http://localhost:8787)
+python -m daytrader.agent serve        # web dashboard + run all teams (http://localhost:3737)
 python -m daytrader.agent leaderboard  # print standings
 python -m daytrader.agent status       # what the agents see (no API key needed)
 ```
@@ -42,5 +42,5 @@ the safest structure during the broker rollout transition.
 
 ## Deployment
 
-`Dockerfile` builds the competing-desks service (web dashboard on port 8787 +
+`Dockerfile` builds the competing-desks service (web dashboard on port 3737 +
 the trading loop). State persists in per-team SQLite DBs under `/app/data`.
