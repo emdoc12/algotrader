@@ -50,20 +50,24 @@ def generate_signals(strategies: list[Strategy], data: dict[str, pd.DataFrame]) 
 
 
 def run_backtest(
-    strategies: list[Strategy],
+    strategies: list[Strategy] | None = None,
     symbols: list[str] | None = None,
     interval: str = "5m",
     rng: str | None = None,
     config: EngineConfig | None = None,
     sizer=None,
     data: dict[str, pd.DataFrame] | None = None,
+    ensemble=None,
 ) -> BacktestResult:
     symbols = symbols or loader.DEFAULT_UNIVERSE
     if data is None:
         data = loader.load_many(symbols, interval=interval, rng=rng)
     config = config or EngineConfig()
 
-    signals = generate_signals(strategies, data)
+    if ensemble is not None:
+        signals = ensemble.generate(data)
+    else:
+        signals = generate_signals(strategies or [], data)
     engine = BacktestEngine(config=config, sizer=sizer)
     trades, equity = engine.run(data, signals)
 
