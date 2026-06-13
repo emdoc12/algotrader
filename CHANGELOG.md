@@ -9,6 +9,16 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.4.2] — 2026-06-13
+
+### Fixed
+- **OpenAI GPT-5-family models** (e.g. `gpt-5.1`) reject `max_tokens` and require
+  `max_completion_tokens`. The OpenAI-compatible provider now detects this and
+  switches automatically (caching the choice), so OpenAI works while Grok/Qwen
+  keep using `max_tokens`.
+
+---
+
 ## [6.4.1] — 2026-06-13
 
 ### Fixed

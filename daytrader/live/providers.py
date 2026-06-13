@@ -173,6 +173,26 @@ class OpenAICompatibleProvider(BaseProvider):
         self.base_url = base_url
         self.api_key_env = api_key_env
         self._client = None
+        # Newer OpenAI models (GPT-5 family) require 'max_completion_tokens'
+        # instead of 'max_tokens'. We start with the widely-supported name and
+        # switch automatically (and cache the choice) if the API rejects it.
+        self._token_param = "max_tokens"
+
+    def _create(self, client, base_kwargs: dict, max_tokens: int):
+        """Call chat.completions.create, auto-handling the max_tokens vs
+        max_completion_tokens parameter difference across OpenAI-compatible APIs."""
+        kwargs = dict(base_kwargs)
+        kwargs[self._token_param] = max_tokens
+        try:
+            return client.chat.completions.create(**kwargs)
+        except Exception as e:  # noqa: BLE001
+            msg = str(e)
+            if self._token_param == "max_tokens" and "max_completion_tokens" in msg:
+                self._token_param = "max_completion_tokens"  # cache for next calls
+                kwargs.pop("max_tokens", None)
+                kwargs["max_completion_tokens"] = max_tokens
+                return client.chat.completions.create(**kwargs)
+            raise
 
     def _client_lazy(self):
         if self._client is None:
@@ -205,13 +225,13 @@ class OpenAICompatibleProvider(BaseProvider):
             ]
 
             for _ in range(max_iterations):
-                kwargs = {"model": self.model, "messages": messages, "max_tokens": max_tokens}
+                base_kwargs = {"model": self.model, "messages": messages}
                 # Only set tools/tool_choice when tools exist — some providers
                 # (e.g. xAI Grok) reject tool_choice when no tools are supplied.
                 if oai_tools:
-                    kwargs["tools"] = oai_tools
-                    kwargs["tool_choice"] = "auto"
-                resp = client.chat.completions.create(**kwargs)
+                    base_kwargs["tools"] = oai_tools
+                    base_kwargs["tool_choice"] = "auto"
+                resp = self._create(client, base_kwargs, max_tokens)
 
                 msg = resp.choices[0].message
                 tool_calls = getattr(msg, "tool_calls", None)
