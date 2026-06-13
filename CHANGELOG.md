@@ -9,6 +9,28 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.5.0] — 2026-06-13
+
+### Added
+- **External research-data feeds** the desks can query on demand to hunt for an
+  edge — pluggable read-only adapters under `daytrader/data/feeds/`, each behind
+  its own API key (Settings → Research data providers), merged into the desks'
+  toolset only when configured:
+  - **Polygon.io** — `polygon_quote`, `polygon_news`, `polygon_aggregates`, `polygon_movers`.
+  - **Unusual Whales** — `uw_flow_alerts`, `uw_ticker_flow`, `uw_dark_pool`, `uw_market_overview`.
+  - **BullFlow** — `bullflow_alerts`, `bullflow_ticker` (SSE-snapshot reader).
+  - **Quiver Quant** — `quiver_congress`, `quiver_insiders`, `quiver_wsb`, `quiver_gov_contracts`.
+  - **Finviz Elite** — `finviz_screener`, `finviz_news` (authenticated CSV export).
+  Strategist + Trader can call them; the mission prompt nudges using flow/news/
+  screeners for confluence. All adapters are stdlib-only, defensive (never raise,
+  short-TTL cached), and READ-ONLY.
+
+### Notes
+- BullFlow field names and a couple of endpoints are inferred from limited public
+  docs and may need a small tweak once tested with a live key.
+
+---
+
 ## [6.4.2] — 2026-06-13
 
 ### Fixed

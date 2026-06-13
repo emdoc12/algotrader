@@ -140,4 +140,15 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
         },
     ]
 
+    # Merge optional external research-data tools (Polygon, Unusual Whales,
+    # BullFlow, Quiver, Finviz) for whichever providers have a key configured.
+    # These are READ-ONLY lookups the desks call on demand to hunt for an edge.
+    try:
+        from daytrader.data.feeds.base import data_tools
+        dschemas, dhandlers = data_tools()
+        schemas.extend(dschemas)
+        handlers.update(dhandlers)
+    except Exception as e:  # noqa: BLE001 - feeds are optional, never fatal
+        print(f"[tools] data feeds unavailable: {e}")
+
     return schemas, handlers
