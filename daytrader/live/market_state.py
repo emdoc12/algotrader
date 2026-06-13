@@ -102,13 +102,22 @@ def market_only(symbols: list[str] | None = None, interval: str = "5m") -> dict:
     per_symbol = {sym: _latest_indicators(df) for sym, df in data.items()}
     fresh = _fresh_signals(data)
     now_et = datetime.now(timezone.utc).astimezone()
-    return {
+    out = {
         "timestamp": now_et.isoformat(),
         "universe": symbols,
         "interval": interval,
         "market": per_symbol,
         "fresh_signals": fresh,
     }
+    # Optional enrichment: if the owner has configured tastytrade, overlay live
+    # READ-ONLY quotes + option chains/Greeks. Degrades to Yahoo-only otherwise.
+    try:
+        from daytrader.live import tastytrade_data
+        if tastytrade_data.is_configured():
+            out = tastytrade_data.enrich_snapshot(out)
+    except Exception:  # noqa: BLE001 - enrichment is best-effort, never fatal
+        pass
+    return out
 
 
 def with_account(market_snap: dict, broker) -> dict:

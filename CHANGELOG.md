@@ -9,6 +9,24 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.2.0] — 2026-06-13
+
+### Added
+- **tastytrade live data feed (READ-ONLY)** (`daytrader/live/tastytrade_data.py`)
+  — real-time stock + option quotes and Greeks (delta/gamma/theta/vega/rho/iv)
+  via DXLink, plus near-the-money option chains. Enriches the teams' market
+  snapshot when tastytrade credentials are set; degrades to the Yahoo feed
+  otherwise. **Strictly data/read endpoints — there is no code path that can
+  place, modify, or cancel an order on the tastytrade account.** All execution
+  stays in the internal paper books.
+- tastytrade username/password fields on the dashboard Settings page.
+
+### Notes
+- Pinned `tastytrade<10` because the latest SDK (12.x) is OAuth-only; 9.13 keeps
+  simple username/password login. (OAuth can be added later if preferred.)
+
+---
+
 ## [6.1.0] — 2026-06-13
 
 ### Added
