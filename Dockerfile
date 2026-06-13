@@ -47,11 +47,11 @@ ENV DAYTRADER_DB_PATH=/app/data/daytrader_live.db
 ENV START_EQUITY=10000
 ENV GITHUB_REPO=emdoc12/algotrader
 ENV PYTHONUNBUFFERED=1
-# Dashboard port. To reuse an existing container port mapping (e.g. the old
-# 3737), set DASHBOARD_PORT to match instead of remapping the host.
-ENV DASHBOARD_PORT=8787
+# Dashboard port. Defaults to 3737 to match the legacy container so existing
+# Unraid port mappings keep working. Override with DASHBOARD_PORT if desired.
+ENV DASHBOARD_PORT=3737
 
-EXPOSE 8787
+EXPOSE 3737
 
 # ── Run the dashboard + competition loop (port from DASHBOARD_PORT) ──────────
 CMD ["python3", "-m", "daytrader.agent", "serve"]

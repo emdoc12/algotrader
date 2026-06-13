@@ -16,9 +16,9 @@ from __future__ import annotations
 import argparse
 import os
 
-# Honor the legacy DASHBOARD_PORT env var so an existing container/port mapping
-# (e.g. the old 3737) keeps working without remapping.
-DEFAULT_PORT = int(os.environ.get("DASHBOARD_PORT", "8787"))
+# Default to 3737 to match the legacy container's port (avoids breaking an
+# existing Unraid port mapping). Override with DASHBOARD_PORT if desired.
+DEFAULT_PORT = int(os.environ.get("DASHBOARD_PORT", "3737"))
 
 
 def cmd_serve(args):

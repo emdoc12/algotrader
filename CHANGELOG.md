@@ -9,6 +9,16 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.2.1] — 2026-06-13
+
+### Fixed
+- **Dashboard default port reverted to 3737** to match the legacy container.
+  v6.x had changed it to 8787, which broke existing Unraid port mappings
+  (host:8787 → container:3737). The default is 3737 again so existing mappings
+  work unchanged; override with `DASHBOARD_PORT` if desired.
+
+---
+
 ## [6.2.0] — 2026-06-13
 
 ### Added

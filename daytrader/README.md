@@ -127,7 +127,7 @@ it **files a GitHub issue** via `request_dev_help`.
 ### Web dashboard
 
 `python -m daytrader.agent serve` starts the trading loop **and** a dashboard at
-`http://localhost:8787`:
+`http://localhost:3737`:
 - **Overview** — live leaderboard plus an equity-curve chart overlaying all four
   teams against the $10k line.
 - **Per-team tabs** — positions, trades, the team's full thinking feed
@@ -142,7 +142,7 @@ python -m daytrader.agent leaderboard   # print standings and exit
 python -m daytrader.agent status        # what a desk sees (no API key needed)
 ```
 
-Deploy with the top-level `Dockerfile` (exposes 8787, persists per-team DBs under
+Deploy with the top-level `Dockerfile` (exposes 3737, persists per-team DBs under
 `/app/data`). Set the API keys for whichever teams you want to run.
 
 **Running Qwen locally:** point it at any OpenAI-compatible local server (vLLM,
