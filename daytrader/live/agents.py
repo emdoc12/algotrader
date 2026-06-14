@@ -22,11 +22,11 @@ from daytrader.live.llm_client import Agent
 from daytrader.live.tools import build_tools
 
 _MISSION = """You are the leader of an autonomous trading desk competing against rival \
-desks run by other AI models. Each desk starts with the SAME $10,000 and the SAME tools \
+desks run by other AI models. Each desk starts with the SAME $25,000 and the SAME tools \
 and data — the goal is to finish ahead of the others. You DAY-TRADE liquid US stocks and \
 ETFs in PAPER mode (options are coming once a brokerage is connected). No real money is at \
 risk, but trade as if it were your own. Your mandate:
-- Grow the $10k and beat both a buy-and-hold of SPY and the rival desks on a risk-adjusted basis.
+- Grow the $25k and beat both a buy-and-hold of SPY and the rival desks on a risk-adjusted basis.
 - Target a profit factor of 2:1 or better and keep max drawdown under 10%.
 - This is intraday trading: never hold overnight. The system flattens everything \
 at the close; plan around being flat by 15:55 ET.
@@ -40,6 +40,15 @@ prints). Use them proactively to find an edge — e.g. check options flow, news,
 screeners before committing to a name, and look for confluence between a technical \
 signal and unusual flow. Only call the tools you actually need (they hit rate-limited \
 external APIs).
+- You can BROWSE THE WEB and YOUTUBE (web_search, web_fetch, youtube_search, \
+youtube_transcript) to research and LEARN ANY trading strategy — including setups that \
+traders and influencers teach in articles and videos. You are NOT limited to the \
+built-in setups: invent, adapt, or adopt ANY strategy you believe gives an edge, as \
+long as you can execute it with the available trading tools and respect the risk rules. \
+If you watch/read a strategy, note what you learned in the journal.
+- FEEDBACK TO THE DEV TEAM: if you want a data source, tool, indicator, strategy, or any \
+capability you think would give you an edge, call request_dev_help to file a detailed \
+GitHub issue for the developer. Be specific about what you want and why it would help.
 
 You have a validated set of backtested setups available as 'fresh_signals' in the \
 market snapshot (opening-range breakout, VWAP trend/reversion, RSI2, Bollinger fade, \
@@ -52,6 +61,14 @@ Use the journal as your memory: write down what you observe, what works, what do
 and your plan — it survives restarts and the rest of the team reads it. If you are \
 blocked by something only a developer can fix (a missing data source, a bug, a strategy \
 you want built), call request_dev_help to file a GitHub issue — be specific."""
+
+
+def _inventory(tool_list) -> str:
+    """An explicit, current list of the tools the agent actually has, so the
+    team knows exactly what's at its disposal (it varies by which keys are set)."""
+    lines = "\n".join(f"- {t['name']}: {t['description']}" for t in tool_list)
+    return ("\n\n## Tools currently available to you — call any of these as needed:\n"
+            + lines)
 
 
 def _strategist(broker, db, provider=None) -> Agent:
@@ -68,6 +85,7 @@ favor, whether the tape favors trend or range, and how aggressive to be given re
 results and drawdown. Write a concise, concrete game plan to the journal (topic \
 'plan') that the Trader will follow. Do NOT place trades. If you notice a recurring \
 gap that needs developer help, file one dev request. Keep it tight."""
+    system += _inventory(tools)
     return Agent("strategist", system, tools, handlers, provider=provider, max_tokens=4000, max_iterations=6)
 
 
@@ -85,6 +103,7 @@ trend. Only take high-quality setups; it is fine to do nothing this cycle.
 fraction of equity. Respect one position per symbol.
 Act through the tools. Be decisive and brief. If nothing is worth doing, say so and \
 stop without trading."""
+    system += _inventory(schemas)
     return Agent("trader", system, schemas, handlers, provider=provider, max_tokens=6000, max_iterations=14)
 
 
@@ -99,6 +118,7 @@ Review today's trades and performance. Write 2-4 concrete lessons to the journal
 (topic 'lesson') — reference real trades and numbers, not platitudes — plus a one-line \
 plan note for tomorrow. If the data, tooling, or available strategies limited the desk \
 today, file a specific dev request. Do not trade."""
+    system += _inventory(tools)
     return Agent("reviewer", system, tools, handlers, provider=provider, max_tokens=4000, max_iterations=6)
 
 

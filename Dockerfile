@@ -44,7 +44,7 @@ VOLUME ["/app/data"]
 # ── Environment defaults ─────────────────────────────────────────────────────
 ENV DAYTRADER_DATA_DIR=/app/data
 ENV DAYTRADER_DB_PATH=/app/data/daytrader_live.db
-ENV START_EQUITY=10000
+ENV START_EQUITY=25000
 ENV GITHUB_REPO=emdoc12/algotrader
 ENV PYTHONUNBUFFERED=1
 # Dashboard port. Defaults to 3737 to match the legacy container so existing

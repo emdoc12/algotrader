@@ -57,13 +57,28 @@ def cmd_check(_args):
     print(f"\nWorking teams: {working or 'none'}")
 
 
+def cmd_reset(_args):
+    """Wipe per-team DBs so the competition restarts clean (e.g. after a
+    starting-cash change). Only deletes paper data; never touches settings."""
+    import glob, os
+    from daytrader.live.competition import DATA_DIR, START_CASH, team_names
+    removed = 0
+    for name in team_names():
+        for f in glob.glob(os.path.join(DATA_DIR, f"team_{name}.db*")):
+            try:
+                os.remove(f); removed += 1
+            except OSError:
+                pass
+    print(f"Reset complete: removed {removed} db file(s). Teams will start fresh at ${START_CASH:,.0f}.")
+
+
 def cmd_status(_args):
     from daytrader.live.db import LiveDB
     from daytrader.live.market_state import snapshot
     from daytrader.live.paper_broker import PaperBroker
     import json
     db = LiveDB()
-    print(json.dumps(snapshot(PaperBroker(db, starting_equity=10000)), indent=2, default=str))
+    print(json.dumps(snapshot(PaperBroker(db, starting_equity=25000)), indent=2, default=str))
 
 
 def main(argv=None):
@@ -72,6 +87,7 @@ def main(argv=None):
     s = sub.add_parser("serve"); s.add_argument("--port", type=int, default=DEFAULT_PORT); s.set_defaults(func=cmd_serve)
     sub.add_parser("compete").set_defaults(func=cmd_compete)
     sub.add_parser("leaderboard").set_defaults(func=cmd_leaderboard)
+    sub.add_parser("reset").set_defaults(func=cmd_reset)
     sub.add_parser("check").set_defaults(func=cmd_check)
     sub.add_parser("status").set_defaults(func=cmd_status)
     args = p.parse_args(argv)

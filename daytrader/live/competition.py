@@ -1,7 +1,7 @@
 """The model competition: four desks, identical resources, one leaderboard.
 
 Each contestant (Claude, OpenAI, Grok, Qwen) runs the exact same desk — same
-tools, same market data, same $10k starting cash — driven by its own model. We
+tools, same market data, same $25k starting cash — driven by its own model. We
 build the market view ONCE per cycle and overlay each team's own account, so the
 only variable is the model's decisions. The leaderboard ranks them on equity and
 risk-adjusted performance.
@@ -29,7 +29,7 @@ from daytrader.live import settings as _settings
 ET = ZoneInfo("America/New_York")
 OPEN, PLAN_BY, EOD_FLAT, CLOSE = dtime(9, 30), dtime(9, 45), dtime(15, 50), dtime(16, 0)
 
-START_CASH = float(os.environ.get("START_EQUITY", "10000"))
+START_CASH = float(os.environ.get("START_EQUITY", "25000"))
 INTERVAL_SEC = int(os.environ.get("AGENT_INTERVAL_SECONDS", "900"))
 DAILY_LOSS_LIMIT_PCT = float(os.environ.get("DAILY_LOSS_LIMIT_PCT", "3.0"))
 WATCHLIST_SIZE = int(os.environ.get("WATCHLIST_SIZE", "18"))
