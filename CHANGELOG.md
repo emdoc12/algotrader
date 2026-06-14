@@ -9,6 +9,28 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.6.0] — 2026-06-14
+
+### Added
+- **Web + YouTube research tools** (always on, no key) — `web_search`,
+  `web_fetch`, `youtube_search`, `youtube_transcript`. The desks can browse the
+  open web and read video transcripts to discover and learn ANY strategy,
+  including ones traders/influencers teach. (YouTube transcript fetch is blocked
+  from datacenter IPs but works from a residential IP like a home server.)
+- **Explicit tool inventory** injected into each desk's prompt, so every team
+  knows exactly which tools/data sources it has at its disposal (varies by which
+  keys are set).
+- **`python -m daytrader.agent reset`** — wipe per-team DBs for a clean restart.
+
+### Changed
+- **Starting cash per team: $10k → $25k** (more buffer for strategies). Run
+  `reset` (or clear `team_*.db`) once so existing desks restart at $25k.
+- Mission now grants full strategy freedom (invent/adopt any strategy, not just
+  the built-ins) and explicitly invites the desks to file dev requests for any
+  data/tool/strategy they think would give them an edge.
+
+---
+
 ## [6.5.0] — 2026-06-13
 
 ### Added

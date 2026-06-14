@@ -3,3 +3,4 @@ openai
 pandas
 numpy
 tastytrade>=12
+youtube-transcript-api
