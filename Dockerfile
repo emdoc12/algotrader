@@ -36,6 +36,7 @@ RUN pip install --no-cache-dir -r daytrader/live/requirements.txt
 
 # ── Agent / trading code ─────────────────────────────────────────────────────
 COPY daytrader/ ./daytrader/
+COPY VERSION ./VERSION
 
 # ── Persistent data directory (per-team SQLite DBs) ──────────────────────────
 RUN mkdir -p /app/data

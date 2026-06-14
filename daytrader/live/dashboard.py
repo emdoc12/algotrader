@@ -120,7 +120,7 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             path = urllib.parse.urlparse(self.path).path
             if path == "/":
-                self._html(PAGE_HTML)
+                self._html(_render_page())
                 return
             if path == "/api/overview":
                 self._json(overview_payload())
@@ -189,6 +189,33 @@ class _Handler(BaseHTTPRequestHandler):
 # --------------------------------------------------------------------------- #
 # server construction + entrypoint                                            #
 # --------------------------------------------------------------------------- #
+def _version() -> str:
+    """Running version, read from the VERSION file (repo root or /app)."""
+    from pathlib import Path
+    for p in (Path(__file__).resolve().parents[2] / "VERSION", Path("/app/VERSION")):
+        try:
+            v = p.read_text().strip()
+            if v:
+                return v
+        except Exception:  # noqa: BLE001
+            continue
+    return "?"
+
+
+def _render_page() -> str:
+    """Fill the static page with the live version + starting-cash values so the
+    header never goes stale."""
+    try:
+        from daytrader.live.competition import START_CASH
+        cash = int(START_CASH)
+    except Exception:  # noqa: BLE001
+        cash = 25000
+    return (PAGE_HTML
+            .replace("__VERSION__", _version())
+            .replace("__START_CASH_NUM__", str(cash))
+            .replace("__START_CASH__", f"{cash:,}"))
+
+
 def _make_server(port: int = 8787) -> ThreadingHTTPServer:
     """Build (but do not start) the ThreadingHTTPServer for the dashboard.
 
@@ -241,9 +268,12 @@ PAGE_HTML = r"""<!DOCTYPE html>
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--txt);
        font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
-  header{padding:18px 24px;border-bottom:1px solid var(--line)}
+  header{padding:18px 24px;border-bottom:1px solid var(--line);position:relative}
   header h1{margin:0;font-size:20px;letter-spacing:.3px}
   header .sub{color:var(--gray);font-size:12px;margin-top:4px}
+  header .ver{position:absolute;top:16px;right:24px;color:var(--gray);
+       font-size:12px;background:#17171c;border:1px solid var(--line);
+       padding:3px 9px;border-radius:999px;font-variant-numeric:tabular-nums}
   .tabs{display:flex;gap:6px;padding:10px 24px 0;flex-wrap:wrap}
   .tab{padding:8px 16px;border:1px solid var(--line);border-bottom:none;
        background:var(--card);color:var(--gray);cursor:pointer;
@@ -304,9 +334,10 @@ PAGE_HTML = r"""<!DOCTYPE html>
 </head>
 <body>
 <header>
+  <span class="ver" title="Running version">v__VERSION__</span>
   <h1>AI Trading Desk Competition</h1>
   <div class="sub">Four AI desks &mdash; Claude, OpenAI, Grok, Qwen &mdash; each start with
-    <b>$10,000</b> in an identical paper account. May the best model win.</div>
+    <b>$__START_CASH__</b> in an identical paper account. May the best model win.</div>
 </header>
 <div class="tabs" id="tabs"></div>
 <main id="main"></main>
@@ -316,7 +347,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
 const TEAMS = ["claude","openai","grok","qwen"];
 const LABELS = {claude:"Claude", openai:"OpenAI", grok:"Grok", qwen:"Qwen"};
 const COLORS = {claude:"#36d399", openai:"#7c8cff", grok:"#f87272", qwen:"#ffd479"};
-const START = 10000;
+const START = __START_CASH_NUM__;
 let current = "overview";
 let refreshTimer = null;
 
@@ -415,7 +446,8 @@ async function loadOverview(){
       el("span",{class:"sw", style:"background:"+COLORS[tm]}), LABELS[tm]));
   }
   legend.appendChild(el("div",{class:"li"},
-    el("span",{class:"sw", style:"background:var(--gray)"}), "$10,000 baseline"));
+    el("span",{class:"sw", style:"background:var(--gray)"}),
+    "$"+START.toLocaleString()+" baseline"));
   chartCard.appendChild(legend);
   main.appendChild(chartCard);
   requestAnimationFrame(() => drawEquityChart(cv, data));
