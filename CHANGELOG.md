@@ -9,6 +9,17 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.6.1] — 2026-06-14
+
+### Fixed
+- **Dashboard header is now dynamic.** The subtitle shows the real starting cash
+  (so it reads **$25,000**, not a hardcoded $10k) and a **version badge** (e.g.
+  `v6.6.1`) sits in the top-right so you can glance up and confirm you're on the
+  latest build. Both are rendered server-side from the VERSION file + START_CASH,
+  so they never go stale. `VERSION` is now copied into the container image.
+
+---
+
 ## [6.6.0] — 2026-06-14
 
 ### Added
