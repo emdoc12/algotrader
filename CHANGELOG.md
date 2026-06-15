@@ -9,6 +9,20 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.6.2] — 2026-06-15
+
+### Fixed
+- **Dashboard is now mobile-friendly.** Added a responsive layout for phones /
+  narrow screens (≤640px): the version badge stacks above the title instead of
+  overlapping it, the tab bar scrolls horizontally rather than wrapping into a
+  pile, padding/fonts tighten up, and — the big one — the wide data tables
+  (especially the 10-column leaderboard) now scroll sideways *inside their card*
+  instead of forcing the whole page to overflow. Inputs use 16px text so iOS
+  Safari no longer zooms in when you tap the chat box. Pure CSS — no behavior
+  change on desktop.
+
+---
+
 ## [6.6.1] — 2026-06-14
 
 ### Fixed

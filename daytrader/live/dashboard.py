@@ -330,6 +330,32 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .err{color:var(--red);font-size:12px;margin-top:6px}
   a{color:var(--accent)}
   .empty{color:var(--gray);font-size:13px;padding:6px 0}
+
+  /* ── phones / narrow screens ───────────────────────────────────────────
+     Tighten chrome, stack the version badge above the title, and let wide
+     data tables (esp. the 10-col leaderboard) scroll inside their card
+     instead of forcing the whole page to overflow sideways. */
+  @media (max-width:640px){
+    header{padding:14px 16px 12px}
+    header h1{font-size:17px}
+    header .sub{font-size:11px}
+    header .ver{position:static;display:inline-block;margin-bottom:8px}
+    .tabs{padding:8px 10px 0;gap:4px;overflow-x:auto;flex-wrap:nowrap;
+          -webkit-overflow-scrolling:touch}
+    .tab{padding:7px 12px;font-size:12px;white-space:nowrap;flex:0 0 auto}
+    main{padding:14px 12px 56px}
+    .card{padding:12px;border-radius:10px}
+    /* the table itself becomes the horizontal scroll container */
+    table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch;
+          width:max-content;min-width:100%}
+    th,td{padding:7px 8px}
+    .stats{gap:14px 18px}
+    .stat{min-width:80px}
+    .stat .v{font-size:18px}
+    canvas{height:260px}
+    .msg{max-width:88%}
+    .chatbar input{font-size:16px}  /* 16px stops iOS Safari zoom-on-focus */
+  }
 </style>
 </head>
 <body>
