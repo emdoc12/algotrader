@@ -112,11 +112,14 @@ def file_dev_request(
 
     db = _get_db(db)
 
-    result = {"ok": False, "url": None, "number": None, "fallback": True, "error": None}
+    result = {"ok": False, "url": None, "number": None, "fallback": True,
+              "recorded": False, "error": None}
 
     if not token:
-        result["error"] = "no GITHUB_TOKEN set"
-        _record_in_db(db, title, body, url=None, status="open")
+        # No GitHub mirror, but the request still persists locally and shows on
+        # the dashboard's dev-requests page. ``recorded`` is the truthful signal.
+        result["recorded"] = _record_in_db(db, title, body, url=None, status="open")
+        result["error"] = "no GITHUB_TOKEN set (recorded locally only)"
         return result
 
     payload = {"title": title, "body": body, "labels": labels}
@@ -128,12 +131,13 @@ def file_dev_request(
             issue = _post_issue(repo, token, payload)
             html_url = issue.get("html_url")
             number = issue.get("number")
-            _record_in_db(db, title, body, url=html_url, status="open")
+            recorded = _record_in_db(db, title, body, url=html_url, status="open")
             return {
                 "ok": True,
                 "url": html_url,
                 "number": number,
                 "fallback": False,
+                "recorded": recorded,
                 "error": None,
             }
         except urllib.error.HTTPError as exc:
@@ -163,7 +167,7 @@ def file_dev_request(
 
     # All attempts failed: fall back to DB-only.
     result["error"] = last_error or "unknown error"
-    _record_in_db(db, title, body, url=None, status="open")
+    result["recorded"] = _record_in_db(db, title, body, url=None, status="open")
     return result
 
 

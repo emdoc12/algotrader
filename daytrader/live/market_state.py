@@ -90,6 +90,45 @@ def _fresh_signals(data: dict[str, pd.DataFrame], lookback_bars: int = 2) -> lis
     return fresh
 
 
+def _add_relative_strength(
+    per_symbol: dict, data: dict, lookback_bars: int = 6, benchmark: str = "SPY"
+) -> None:
+    """Annotate each symbol's indicator block with relative strength vs SPY.
+
+    RS = (symbol % change over the lookback) − (SPY % change over the same span).
+    Computed from bars already loaded this cycle (no extra fetches). With 5m
+    bars, the default 6 bars ≈ a 30-minute window. Adds ``rs_vs_spy_pct`` and a
+    ``rs_rank`` (1 = strongest) to every symbol that has enough data.
+    """
+    def _pct(sym: str):
+        df = data.get(sym)
+        if df is None or len(df) <= lookback_bars:
+            return None
+        try:
+            past = float(df["close"].iloc[-(lookback_bars + 1)])
+            now = float(df["close"].iloc[-1])
+            return ((now / past) - 1) * 100 if past else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    spy_pct = _pct(benchmark)
+    if spy_pct is None:
+        return
+    scored = []
+    for sym, inds in per_symbol.items():
+        if not inds:
+            continue
+        p = _pct(sym)
+        if p is None:
+            continue
+        rs = round(p - spy_pct, 2)
+        inds["rs_vs_spy_pct"] = rs
+        scored.append((sym, rs))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    for rank, (sym, _rs) in enumerate(scored, 1):
+        per_symbol[sym]["rs_rank"] = rank
+
+
 def _default_symbols(top_n: int = 18) -> list[str]:
     """The day's watchlist from the scanner; falls back to the core universe."""
     try:
@@ -110,9 +149,17 @@ def market_only(symbols: list[str] | None = None, interval: str = "5m") -> dict:
     """
     symbols = symbols or _default_symbols()
     data = loader.load_many(symbols, interval=interval, max_age_hours=0.1)
+    # Ensure SPY bars are available as the relative-strength benchmark even if
+    # it isn't on the day's watchlist.
+    if "SPY" not in data:
+        try:
+            data["SPY"] = loader.load("SPY", interval=interval, max_age_hours=0.1)
+        except Exception:  # noqa: BLE001
+            pass
     quote_map = quotes.get_quotes(symbols)
     per_symbol = {sym: _latest_indicators(df, live_price=quote_map.get(sym))
-                  for sym, df in data.items()}
+                  for sym, df in data.items() if sym in symbols}
+    _add_relative_strength(per_symbol, data)
     fresh = _fresh_signals(data)
     now_et = datetime.now(timezone.utc).astimezone()
     out = {

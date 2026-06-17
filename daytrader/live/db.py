@@ -120,6 +120,23 @@ class LiveDB:
             """
         )
         self.conn.commit()
+        self._migrate()
+
+    def _ensure_column(self, table: str, col: str, decl: str) -> None:
+        """Add a column if it isn't present (simple forward-only migration)."""
+        cur = self.conn.execute(f"PRAGMA table_info({table})")
+        existing = {r[1] for r in cur.fetchall()}
+        if col not in existing:
+            self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+
+    def _migrate(self) -> None:
+        """Backfill columns added after the original schema shipped."""
+        try:
+            self._ensure_column("dev_requests", "resolution", "TEXT")
+            self._ensure_column("dev_requests", "resolved_ts", "TEXT")
+            self.conn.commit()
+        except Exception:  # noqa: BLE001 - never block startup on a migration
+            pass
 
     # ------------------------------------------------------------------ #
     # chat (owner <-> team leader)                                        #
@@ -233,6 +250,40 @@ class LiveDB:
             "SELECT * FROM dev_requests WHERE status='open' ORDER BY id DESC"
         )
         return [dict(r) for r in cur.fetchall()]
+
+    def all_dev_requests(self, limit: int = 200) -> list[dict]:
+        cur = self.conn.execute(
+            "SELECT * FROM dev_requests ORDER BY id DESC LIMIT ?", (limit,)
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    def get_dev_request(self, req_id: int) -> Optional[dict]:
+        cur = self.conn.execute("SELECT * FROM dev_requests WHERE id=?", (int(req_id),))
+        row = cur.fetchone()
+        return dict(row) if row is not None else None
+
+    def update_dev_request(
+        self, req_id: int, status: Optional[str] = None, resolution: Optional[str] = None
+    ) -> bool:
+        """Update a dev request's status and/or resolution note. Stamps
+        ``resolved_ts`` when moved out of 'open'. Returns True if a row changed."""
+        sets, params = [], []
+        if status is not None:
+            sets.append("status=?"); params.append(status)
+            if status != "open":
+                sets.append("resolved_ts=?"); params.append(_now_iso())
+            else:
+                sets.append("resolved_ts=?"); params.append(None)
+        if resolution is not None:
+            sets.append("resolution=?"); params.append(resolution)
+        if not sets:
+            return False
+        params.append(int(req_id))
+        cur = self.conn.execute(
+            f"UPDATE dev_requests SET {', '.join(sets)} WHERE id=?", params
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
 
     # ------------------------------------------------------------------ #
     # equity snapshots                                                    #

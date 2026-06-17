@@ -87,8 +87,9 @@ def health_snapshot() -> dict:
                         recent_errors.append({"ts": ts, "team": name, "agent": e.get("agent", ""),
                                               "action": act, "detail": detail[:180]})
             for d in db.open_dev_requests():
-                dev.append({"team": name, "ts": d.get("ts"), "title": d.get("title"),
-                            "status": d.get("status"), "url": d.get("url")})
+                dev.append({"team": name, "id": d.get("id"), "ts": d.get("ts"),
+                            "title": d.get("title"), "status": d.get("status"),
+                            "url": d.get("url")})
             db.close()
         except Exception:  # noqa: BLE001
             pass

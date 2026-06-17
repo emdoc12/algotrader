@@ -70,6 +70,29 @@ def overview_payload() -> dict:
     }
 
 
+def close_dev_request(team: str, req_id, status: str = "closed",
+                       resolution: str = "") -> dict:
+    """Owner-side close/update of a dev request from the dashboard."""
+    if team not in team_names():
+        return {"ok": False, "error": f"unknown team {team!r}"}
+    try:
+        rid = int(req_id)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "id (integer) required"}
+    if status not in ("closed", "wont_fix", "open"):
+        status = "closed"
+    db = _team_db(team)
+    if db is None:
+        return {"ok": False, "error": "team db unavailable"}
+    try:
+        changed = db.update_dev_request(rid, status=status, resolution=resolution)
+        return {"ok": bool(changed), "id": rid, "status": status}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": repr(e)}
+    finally:
+        db.close()
+
+
 def team_payload(name: str) -> dict:
     """Everything a single team tab needs, tolerant of a missing DB."""
     db = _team_db(name)
@@ -161,6 +184,19 @@ class _Handler(BaseHTTPRequestHandler):
                 if not isinstance(body, dict):
                     body = {}
                 self._json(settings.save(body))
+                return
+            if path == "/api/devrequest/close":
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length else b""
+                try:
+                    data = json.loads(raw.decode("utf-8")) if raw else {}
+                except Exception:  # noqa: BLE001
+                    data = {}
+                self._json(close_dev_request(
+                    data.get("team", ""), data.get("id"),
+                    status=data.get("status", "closed"),
+                    resolution=data.get("resolution", "closed from dashboard"),
+                ))
                 return
             if path.startswith("/api/team/") and path.endswith("/chat"):
                 middle = path[len("/api/team/"):-len("/chat")]
@@ -711,8 +747,12 @@ async function loadTeam(name){
   if(devs.length){
     devs.forEach(d => {
       const item = el("div",{class:"item"});
-      const meta = el("div",{class:"meta"});
-      meta.appendChild(el("span",{class:"pill"}, d.status||"open"));
+      const meta = el("div",{class:"meta", style:"display:flex;align-items:center;gap:10px;justify-content:space-between"});
+      const left = el("div",{style:"display:flex;align-items:center;gap:8px"});
+      left.appendChild(el("span",{class:"pill"}, "#"+(d.id!=null?d.id:"?")+" "+(d.status||"open")));
+      meta.appendChild(left);
+      meta.appendChild(el("button",{class:"btn-ghost", style:"padding:4px 10px;font-size:11px",
+        onclick:()=>closeDevReq(name, d.id)}, "Mark done"));
       item.appendChild(meta);
       const title = el("div",{class:"body"});
       title.appendChild(document.createTextNode(d.title||"(untitled)"));
@@ -812,6 +852,20 @@ async function sendChat(name){
   }
 }
 
+async function closeDevReq(team, id){
+  if(id == null) return;
+  try{
+    await fetch("/api/devrequest/close", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({team: team, id: id, status: "closed",
+                            resolution: "marked done from dashboard"}),
+    });
+  }catch(e){ /* ignore; reload reflects truth */ }
+  if(current === team) loadTeam(team);
+  else if(current === "health") loadHealth();
+}
+
 // ---- health ------------------------------------------------------------- //
 async function loadHealth(){
   const main = document.getElementById("main");
@@ -898,10 +952,15 @@ async function loadHealth(){
   const dev = h.open_dev_requests || [];
   if(!dev.length){ dc.appendChild(el("div",{class:"muted",style:"font-size:13px"}, "None.")); }
   else dev.forEach(d => {
-    const row = el("div", {style:"padding:6px 0;border-bottom:1px solid var(--line);font-size:13px"});
-    row.appendChild(el("span",{class:"muted"}, "["+d.team+"] "));
-    if(d.url) row.appendChild(el("a",{href:d.url,target:"_blank",style:"color:var(--green)"}, d.title||"(issue)"));
-    else row.appendChild(el("span", null, d.title||"(request)"));
+    const row = el("div", {style:"padding:6px 0;border-bottom:1px solid var(--line);font-size:13px;display:flex;align-items:center;justify-content:space-between;gap:10px"});
+    const left = el("div");
+    left.appendChild(el("span",{class:"muted"}, "["+d.team+" #"+(d.id!=null?d.id:"?")+"] "));
+    if(d.url) left.appendChild(el("a",{href:d.url,target:"_blank",style:"color:var(--green)"}, d.title||"(issue)"));
+    else left.appendChild(el("span", null, d.title||"(request)"));
+    row.appendChild(left);
+    if(d.id!=null) row.appendChild(el("button",{class:"btn-ghost",
+      style:"padding:4px 10px;font-size:11px;flex:0 0 auto",
+      onclick:()=>closeDevReq(d.team, d.id)}, "Mark done"));
     dc.appendChild(row);
   });
   main.appendChild(dc);

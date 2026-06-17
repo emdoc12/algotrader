@@ -9,6 +9,37 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.8.0] — 2026-06-15
+
+### Fixed
+- **Dev requests now persist without a `GITHUB_TOKEN` — and say so.** Filing a
+  request always wrote to the local DB (and thus the dashboard), but
+  `file_dev_request` returned `ok: False` when no token was set, so the desks
+  reasonably concluded their request had vanished. It now returns a truthful
+  `recorded` flag, and the `request_dev_help` tool replies with a clear note:
+  "Saved to the dev-requests page … GitHub mirror skipped (no token) but your
+  request IS persisted." **No token is required** for the dev-request workflow;
+  a token only adds optional GitHub-issue mirroring.
+
+### Added
+- **Dev requests can be CLOSED now** (the missing half of the workflow). New
+  `resolve_dev_request(id, status, resolution)` agent tool — added to the
+  Reviewer, who is now instructed at EOD to close any open request whose
+  tool/data/fix has actually shipped, with a one-line verification note.
+  Backed by a new `LiveDB.update_dev_request` + `get_dev_request` and a
+  forward-only migration that adds `resolution` / `resolved_ts` columns.
+- **"Mark done" buttons on the dashboard** — both the per-team Dev requests
+  card and the Health tab's open-requests list now show the request id and a
+  one-click close (POST `/api/devrequest/close`), so the owner can clean up the
+  page directly too.
+- **Relative strength vs SPY baked into every snapshot** (Team Claude's dev
+  request #3). Each symbol's indicator block now carries `rs_vs_spy_pct`
+  (symbol % change − SPY % change over the last ~30 min) and `rs_rank`
+  (1 = strongest), computed from bars already loaded that cycle — no extra
+  fetches. SPY is loaded as the benchmark even when it isn't on the watchlist.
+
+---
+
 ## [6.7.0] — 2026-06-15
 
 ### Fixed

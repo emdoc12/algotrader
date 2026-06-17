@@ -116,7 +116,7 @@ stop without trading."""
 def _reviewer(broker, db, provider=None) -> Agent:
     schemas, handlers = build_tools(broker, db)
     allowed = {"get_positions", "get_performance", "get_recent_trades",
-               "journal_write", "request_dev_help"}
+               "journal_write", "request_dev_help", "resolve_dev_request"}
     tools = [t for t in schemas if t["name"] in allowed]
     system = _MISSION + """
 
@@ -124,7 +124,10 @@ YOUR ROLE: Reviewer. The trading day is ending and positions have been flattened
 Review today's trades and performance. Write 2-4 concrete lessons to the journal \
 (topic 'lesson') — reference real trades and numbers, not platitudes — plus a one-line \
 plan note for tomorrow. If the data, tooling, or available strategies limited the desk \
-today, file a specific dev request. Do not trade."""
+today, file a specific dev request. Also CLEAN UP the dev-requests page: for each item \
+in open_dev_requests that has actually been delivered (the tool/data/fix now exists in \
+your inventory), close it with resolve_dev_request (status 'closed') and a one-line note \
+on how you verified it; only keep items open that are genuinely still outstanding. Do not trade."""
     system += _inventory(tools)
     return Agent("reviewer", system, tools, handlers, provider=provider, max_tokens=4000, max_iterations=6)
 

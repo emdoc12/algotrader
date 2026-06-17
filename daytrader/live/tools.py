@@ -173,7 +173,42 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
         return {"ok": True, "id": jid}
 
     def request_dev_help(inp: dict) -> dict:
-        return file_dev_request(inp["title"], inp.get("body", ""), inp.get("labels"), db=db)
+        res = file_dev_request(inp["title"], inp.get("body", ""), inp.get("labels"), db=db)
+        recorded = bool(res.get("recorded") or res.get("ok"))
+        if res.get("ok"):
+            note = "Filed as a GitHub issue and saved to the dev-requests page."
+        elif recorded:
+            note = ("Saved to the dev-requests page (visible on the dashboard). "
+                    "GitHub mirror skipped — no GITHUB_TOKEN set — but your request "
+                    "IS persisted and the dev will see it.")
+        else:
+            note = "Could not record the request."
+        return {
+            "ok": recorded,
+            "recorded_locally": recorded,
+            "github_issue": bool(res.get("ok")),
+            "url": res.get("url"),
+            "note": note,
+            "error": None if recorded else res.get("error"),
+        }
+
+    def resolve_dev_request(inp: dict) -> dict:
+        """Close / update a dev request once it's been delivered or rejected."""
+        try:
+            rid = int((inp or {}).get("id"))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "id (integer) required — see open_dev_requests in the snapshot"}
+        status = str((inp or {}).get("status", "closed")).lower()
+        if status not in ("closed", "wont_fix", "open"):
+            status = "closed"
+        resolution = (inp or {}).get("resolution", "")
+        existing = db.get_dev_request(rid)
+        if existing is None:
+            return {"ok": False, "error": f"no dev request #{rid}"}
+        changed = db.update_dev_request(rid, status=status, resolution=resolution)
+        db.log_agent("reviewer", "resolve_dev_request", f"#{rid} -> {status}")
+        return {"ok": bool(changed), "id": rid, "status": status,
+                "title": existing.get("title")}
 
     handlers = {
         "place_trade": place_trade,
@@ -186,6 +221,7 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
         "get_relative_strength_vs_spy": get_relative_strength_vs_spy,
         "journal_write": journal_write,
         "request_dev_help": request_dev_help,
+        "resolve_dev_request": resolve_dev_request,
     }
 
     schemas = [
@@ -285,7 +321,7 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
         },
         {
             "name": "request_dev_help",
-            "description": "File a GitHub issue asking the developer (Claude) for help: a new data source, a bug fix, or a new feature/strategy. Check existing open requests first to avoid duplicates.",
+            "description": "Ask the developer (Claude) for help: a new data source, a bug fix, or a new feature/strategy. The request is ALWAYS saved to the dev-requests page (visible on the dashboard) and mirrored to a GitHub issue when a token is configured — no token is required for it to persist. Check existing open requests (in the snapshot's open_dev_requests) first to avoid duplicates.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -293,6 +329,19 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                     "body": {"type": "string", "description": "What you need and why, with enough detail for a dev to act"},
                 },
                 "required": ["title", "body"],
+            },
+        },
+        {
+            "name": "resolve_dev_request",
+            "description": "Close or update a dev request once it's been delivered (or you've decided not to pursue it). Find the id in the snapshot's open_dev_requests list. Use status 'closed' for done, 'wont_fix' to drop it, 'open' to reopen.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer", "description": "The dev request id from open_dev_requests."},
+                    "status": {"type": "string", "enum": ["closed", "wont_fix", "open"], "description": "New status (default closed)."},
+                    "resolution": {"type": "string", "description": "Short note on how it was resolved / why closed."},
+                },
+                "required": ["id"],
             },
         },
     ]
