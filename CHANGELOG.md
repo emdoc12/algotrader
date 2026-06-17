@@ -9,6 +9,16 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.8.1] — 2026-06-15
+
+### Added
+- **Dev requests now show when they were filed.** Each request on the team tab
+  and the Health tab displays its timestamp plus a relative age ("2d ago",
+  "3h ago"), so it's obvious at a glance whether an item is new or stale. The
+  data was already stored (`ts`); this just surfaces it.
+
+---
+
 ## [6.8.0] — 2026-06-15
 
 ### Fixed

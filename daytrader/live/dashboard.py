@@ -431,6 +431,21 @@ function fmtMoney(v){ return "$" + Number(v).toLocaleString(undefined,{minimumFr
 function fmtPct(v){ const n = Number(v); return (n>=0?"+":"") + n.toFixed(2) + "%"; }
 function clsFor(v){ return Number(v) > 0 ? "green" : (Number(v) < 0 ? "red" : "gray"); }
 function esc(s){ const d = document.createElement("div"); d.textContent = (s==null?"":String(s)); return d.innerHTML; }
+function fmtWhen(ts){
+  if(!ts) return "";
+  const raw = String(ts);
+  const stamp = raw.replace("T"," ").slice(5,16);  // MM-DD HH:MM
+  const d = new Date(raw);
+  if(isNaN(d.getTime())) return stamp;
+  const diff = (Date.now() - d.getTime())/1000;
+  let rel;
+  if(diff < 0) rel = "just now";
+  else if(diff < 60) rel = "just now";
+  else if(diff < 3600) rel = Math.floor(diff/60)+"m ago";
+  else if(diff < 86400) rel = Math.floor(diff/3600)+"h ago";
+  else rel = Math.floor(diff/86400)+"d ago";
+  return stamp + " (" + rel + ")";
+}
 async function getJSON(url){ const r = await fetch(url, {cache:"no-store"}); return await r.json(); }
 
 // ---- tabs --------------------------------------------------------------- //
@@ -748,8 +763,9 @@ async function loadTeam(name){
     devs.forEach(d => {
       const item = el("div",{class:"item"});
       const meta = el("div",{class:"meta", style:"display:flex;align-items:center;gap:10px;justify-content:space-between"});
-      const left = el("div",{style:"display:flex;align-items:center;gap:8px"});
+      const left = el("div",{style:"display:flex;align-items:center;gap:8px;flex-wrap:wrap"});
       left.appendChild(el("span",{class:"pill"}, "#"+(d.id!=null?d.id:"?")+" "+(d.status||"open")));
+      if(d.ts) left.appendChild(el("span",{class:"gray", style:"font-size:11px"}, fmtWhen(d.ts)));
       meta.appendChild(left);
       meta.appendChild(el("button",{class:"btn-ghost", style:"padding:4px 10px;font-size:11px",
         onclick:()=>closeDevReq(name, d.id)}, "Mark done"));
@@ -957,6 +973,7 @@ async function loadHealth(){
     left.appendChild(el("span",{class:"muted"}, "["+d.team+" #"+(d.id!=null?d.id:"?")+"] "));
     if(d.url) left.appendChild(el("a",{href:d.url,target:"_blank",style:"color:var(--green)"}, d.title||"(issue)"));
     else left.appendChild(el("span", null, d.title||"(request)"));
+    if(d.ts) left.appendChild(el("span",{class:"gray", style:"font-size:11px;margin-left:8px"}, fmtWhen(d.ts)));
     row.appendChild(left);
     if(d.id!=null) row.appendChild(el("button",{class:"btn-ghost",
       style:"padding:4px 10px;font-size:11px;flex:0 0 auto",
