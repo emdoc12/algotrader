@@ -129,6 +129,51 @@ def _add_relative_strength(
         per_symbol[sym]["rs_rank"] = rank
 
 
+def _market_summary(per_symbol: dict) -> dict:
+    """Top-level read of the tape for fast regime/trend-day detection.
+
+    Flags a TREND DAY when breadth is one-sided and movers are running with
+    real ADX — the window the desks keep saying they miss. Built from values
+    already computed, so it's free.
+    """
+    rows = [(s, v) for s, v in per_symbol.items() if v]
+    if not rows:
+        return {}
+    spy = per_symbol.get("SPY", {})
+    ups = sum(1 for _, v in rows if v.get("day_change_pct", 0) > 0)
+    downs = sum(1 for _, v in rows if v.get("day_change_pct", 0) < 0)
+    big_movers = [
+        {"symbol": s, "day_change_pct": v.get("day_change_pct"),
+         "adx14": v.get("adx14"), "rs_vs_spy_pct": v.get("rs_vs_spy_pct")}
+        for s, v in rows
+        if abs(v.get("day_change_pct", 0)) >= 2.0 and (v.get("adx14") or 0) >= 30
+    ]
+    big_movers.sort(key=lambda r: abs(r.get("day_change_pct") or 0), reverse=True)
+    spy_chg = spy.get("day_change_pct", 0) or 0
+    spy_adx = spy.get("adx14", 0) or 0
+    trend_day = bool(big_movers) or (abs(spy_chg) >= 1.0 and spy_adx >= 25)
+    direction = "up" if spy_chg > 0 else ("down" if spy_chg < 0 else "flat")
+    # leaders / laggers by relative strength
+    ranked = sorted((r for r in rows if r[1].get("rs_rank") is not None),
+                    key=lambda r: r[1]["rs_rank"])
+    leaders = [r[0] for r in ranked[:3]]
+    laggers = [r[0] for r in ranked[-3:]][::-1]
+    return {
+        "trend_day": trend_day,
+        "spy_day_change_pct": round(float(spy_chg), 2),
+        "spy_adx14": round(float(spy_adx), 1),
+        "spy_direction": direction,
+        "breadth": {"advancers": ups, "decliners": downs, "total": len(rows)},
+        "big_movers": big_movers[:8],
+        "rs_leaders": leaders,
+        "rs_laggers": laggers,
+        "note": ("TREND DAY — one-sided breadth and movers with ADX>=30; "
+                 "favor with-trend entries early before ADX decays."
+                 if trend_day else
+                 "Range/chop tape — no strong one-sided movers; be selective."),
+    }
+
+
 def _default_symbols(top_n: int = 18) -> list[str]:
     """The day's watchlist from the scanner; falls back to the core universe."""
     try:
@@ -167,6 +212,7 @@ def market_only(symbols: list[str] | None = None, interval: str = "5m") -> dict:
         "universe": symbols,
         "interval": interval,
         "market": per_symbol,
+        "market_summary": _market_summary(per_symbol),
         "fresh_signals": fresh,
         "quotes": quote_map,
     }

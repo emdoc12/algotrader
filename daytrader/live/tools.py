@@ -168,6 +168,26 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
         return {"ok": True, "lookback_minutes": lookback_min,
                 "spy_pct": round(spy_chg, 2), "count": len(rows), "rankings": rows}
 
+    def backtest_strategy(inp: dict) -> dict:
+        """Self-serve backtest of the built-in strategies over recent data."""
+        from daytrader.live import strategy_lab
+        inp = inp or {}
+        try:
+            return strategy_lab.run_backtest(
+                strategy=inp.get("strategy"),
+                symbols=inp.get("symbols"),
+                lookback_days=int(inp.get("lookback_days", 30)),
+                interval=inp.get("interval", "5m"),
+                regimes=inp.get("regimes"),
+                adx_threshold=float(inp.get("adx_threshold", 25.0)),
+                market_filter=bool(inp.get("market_filter", True)),
+                starting_equity=float(inp.get("starting_equity", 25000.0)),
+                pessimistic_costs=bool(inp.get("pessimistic_costs", False)),
+                strategy_params=inp.get("strategy_params"),
+            )
+        except Exception as e:  # noqa: BLE001
+            return {"error": repr(e)}
+
     def journal_write(inp: dict) -> dict:
         jid = db.add_journal(inp.get("author", "team"), inp.get("topic", "note"), inp.get("note", ""))
         return {"ok": True, "id": jid}
@@ -219,6 +239,7 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
         "get_recent_trades": get_recent_trades,
         "get_opening_range": get_opening_range,
         "get_relative_strength_vs_spy": get_relative_strength_vs_spy,
+        "backtest_strategy": backtest_strategy,
         "journal_write": journal_write,
         "request_dev_help": request_dev_help,
         "resolve_dev_request": resolve_dev_request,
@@ -304,6 +325,36 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                     "lookback_minutes": {"type": "integer", "description": "Lookback in minutes (5-240; default 30)."},
                 },
                 "required": ["symbols"],
+            },
+        },
+        {
+            "name": "backtest_strategy",
+            "description": (
+                "Backtest one or more of the 8 built-in strategies over recent intraday "
+                "data and get win rate, profit factor, avg win/loss, max drawdown, "
+                "expectancy, return, and alpha vs SPY — plus an equity curve and sample "
+                "trades. Use it to test a hypothesis before risking real cycles: which "
+                "setup works in which regime, what stop/target/ADX params help, etc. "
+                "strategy can be a name (orb, vwap_trend, vwap_reversion, rsi2, bollinger, "
+                "ema_pullback, macd, pivot, gap_fade), a profile (trend, momentum, all), "
+                "or a list. Tune via strategy_params (e.g. {\"atr_stop_mult\": 1.5}), "
+                "regimes ([\"trend\"]/[\"range\"]/[\"any\"]), adx_threshold, and "
+                "market_filter. Uses the same engine + cost model as the production book; "
+                "samples under ~10 trades are not conclusive."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "strategy": {"description": "Strategy name, profile (trend/momentum/all), or a list of names."},
+                    "symbols": {"type": "array", "items": {"type": "string"}, "description": "Tickers to test (default: today's watchlist)."},
+                    "lookback_days": {"type": "integer", "description": "Days of history (default 30; 5m data caps ~55d)."},
+                    "interval": {"type": "string", "description": "Bar size: 5m/15m/30m/1h (default 5m)."},
+                    "regimes": {"type": "array", "items": {"type": "string"}, "description": "Pin regime gating: trend, range, or any. Omit to use each strategy's natural regime."},
+                    "adx_threshold": {"type": "number", "description": "ADX cutoff for trend vs range (default 25)."},
+                    "market_filter": {"type": "boolean", "description": "Require SPY-trend alignment (default true)."},
+                    "pessimistic_costs": {"type": "boolean", "description": "Stress-test with harsh slippage (default false)."},
+                    "strategy_params": {"type": "object", "description": "Per-strategy parameter overrides passed to the strategy constructor."},
+                },
             },
         },
         {

@@ -63,6 +63,18 @@ which to act on, ignore, or combine, based on the live picture and what has been
 working. Out-of-sample the trend setups in SPY's direction have been the reliable edge; \
 mean-reversion and counter-trend setups have bled.
 
+TEST BEFORE YOU TRUST: use the backtest_strategy tool to validate a hypothesis on \
+recent data BEFORE risking live cycles on it — which of the 8 setups works in which \
+regime, what stop/target/ADX params help, etc. Don't deploy a setup on a hunch when you \
+can measure its edge in seconds (but remember small samples aren't conclusive).
+
+READ THE TAPE FAST: the snapshot's 'market_summary' gives a trend_day flag, SPY \
+direction/ADX, breadth, the big movers (>=2% with ADX>=30), and rs_leaders/rs_laggers; \
+each name also carries rs_vs_spy_pct and rs_rank (1 = strongest vs SPY). On a flagged \
+trend day, lean in early with the leaders before ADX decays — that morning window is \
+where the edge lives. For first-bar / opening-range stats on a name, call \
+get_opening_range.
+
 Use the journal as your memory: write down what you observe, what works, what doesn't, \
 and your plan — it survives restarts and the rest of the team reads it. If you are \
 blocked by something only a developer can fix (a missing data source, a bug, a strategy \
@@ -116,7 +128,8 @@ stop without trading."""
 def _reviewer(broker, db, provider=None) -> Agent:
     schemas, handlers = build_tools(broker, db)
     allowed = {"get_positions", "get_performance", "get_recent_trades",
-               "journal_write", "request_dev_help", "resolve_dev_request"}
+               "backtest_strategy", "journal_write", "request_dev_help",
+               "resolve_dev_request"}
     tools = [t for t in schemas if t["name"] in allowed]
     system = _MISSION + """
 

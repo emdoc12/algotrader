@@ -9,6 +9,42 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.9.0] — 2026-06-15
+
+### Added
+- **Self-serve strategy backtesting (`backtest_strategy` tool)** — Team Claude's
+  dev request #3, the "single biggest leverage point." A desk can now test a
+  hypothesis on recent intraday data in seconds instead of burning live
+  sessions. It wraps the project's validated engine + cost model + metrics, so a
+  result means the same thing it does in the offline backtests. Inputs: a
+  strategy name / profile (trend, momentum, all) / list, symbols, lookback,
+  interval, regime pin, ADX threshold, market filter, pessimistic costs, and
+  per-strategy parameter overrides. Returns win rate, profit factor, avg
+  win/loss, max DD, expectancy, return, alpha vs SPY, an equity curve, sample
+  trades, and an honest verdict that flags small (non-conclusive) samples.
+  Available to the Strategist, Trader, and Reviewer. New module
+  `daytrader/live/strategy_lab.py`. (v1 tests the 8 built-in setups with tunable
+  params — a custom entry/exit-rule DSL is a future step.)
+- **Trend-day detection in the snapshot (`market_summary`)** — Team Qwen's dev
+  request #2's core need. Every snapshot now carries a top-level read of the
+  tape: a `trend_day` flag, SPY direction/ADX, market breadth (advancers vs
+  decliners), the day's big movers (>=2% with ADX>=30), and RS leaders/laggers
+  — computed from values already in the snapshot. The mission now tells desks to
+  lean into leaders early on a flagged trend day, before ADX decays. Pairs with
+  the per-symbol `rs_rank`/`rs_vs_spy_pct` (v6.8.0) and `get_opening_range`
+  (v6.7.0) to form the morning pipeline the desks asked for.
+
+### Already shipped (clarifying the other two open requests)
+- **Relative-strength ranking vs SPY** (a dev request) shipped in **v6.8.0** —
+  `rs_vs_spy_pct` + `rs_rank` are in every snapshot; `market_summary` now adds
+  the leader/lagger view on top.
+- **Unusual options flow + dark pool** (a dev request) shipped in **v6.5.0** —
+  the `uw_flow_alerts` / `uw_ticker_flow` / `uw_dark_pool` / `uw_market_overview`
+  tools appear in each desk's inventory automatically once
+  `UNUSUAL_WHALES_API_KEY` is set in Settings.
+
+---
+
 ## [6.8.1] — 2026-06-15
 
 ### Added
