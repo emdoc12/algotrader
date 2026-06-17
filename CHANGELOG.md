@@ -9,6 +9,52 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.7.0] — 2026-06-15
+
+### Fixed
+- **Feed-vs-broker price gap closed** (Claude's #1 escalation — was flipping
+  winners into losers). The market snapshot and the paper broker now draw from
+  ONE shared quote source (`daytrader/data/quotes.py`) backed by Yahoo's
+  chart-meta `regularMarketPrice` (the official last trade, fresher than the
+  last 1-minute bar close). The competition loop pins each cycle's quote map
+  onto the broker for the duration of that cycle, so the price the agent
+  reasoned over **is** the price the broker fills at — zero drift. Also fixes
+  the BA-style "price-feed discrepancy" pattern on names whose 1m bar lagged
+  the live tape.
+- **Indicators for held positions outside the day's scan.** When a team holds
+  a symbol that isn't on the day's scanned watchlist, `with_account` now
+  fetches its bars + live quote and adds a full indicator block to the
+  snapshot, so the trader is never flying blind on what it already owns.
+
+### Added (agent capabilities)
+- **`get_recent_trades`** — detailed round-trip trade blotter (entry/exit time
+  + price, qty, commission, slippage, pnl, exit reason, rationale). Asked for
+  by Team OpenAI for post-trade review. Also added to the Reviewer's allowed
+  tools.
+- **`get_opening_range(symbol, minutes=15)`** — today's first N minutes for
+  trend-day detection: O/H/L/C, volume, range %, gap from prior close. Asked
+  for by Team Qwen.
+- **`get_relative_strength_vs_spy(symbols, lookback_minutes=30)`** — ranks a
+  list of symbols by intraday RS vs SPY (sym% − SPY%). Asked for by Team Qwen.
+- **Mission: fractional shares are explicit + risk floor stated.** The mission
+  text now tells every desk that `qty` accepts fractional values (e.g. 0.05)
+  and to size trades to ~0.2–0.5% of equity (~$50–$125 on $25k). This unblocks
+  Team Grok, which was sitting on cash because its risk math couldn't justify
+  a whole share of expensive names. The `place_trade` schema description was
+  also updated to advertise fractional support.
+
+### Notes
+- Unusual Whales tools (`uw_flow_alerts`, `uw_ticker_flow`, `uw_dark_pool`,
+  `uw_market_overview`) have been available since v6.5.0 — they appear in each
+  desk's tool inventory automatically when `UNUSUAL_WHALES_API_KEY` is set.
+  Team Qwen's dev request for "real-time unusual options flow + dark pool"
+  should now be visible in its inventory.
+- The recurring Anthropic `500 / Internal Server Error` was a transient
+  upstream API failure (not a code bug); the existing trade loop tolerates it
+  and retries on the next cycle.
+
+---
+
 ## [6.6.2] — 2026-06-15
 
 ### Fixed

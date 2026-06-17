@@ -17,12 +17,18 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from daytrader.core import indicators as ind
-from daytrader.data import loader
+from daytrader.data import loader, quotes
 from daytrader.portfolio.book import _SPEC, _load
 from daytrader.portfolio.ensemble import Ensemble, Regime, classify_regime
 
 
-def _latest_indicators(df: pd.DataFrame) -> dict:
+def _latest_indicators(df: pd.DataFrame, live_price: float | None = None) -> dict:
+    """Per-symbol indicator snapshot.
+
+    ``price`` is the live quote (same one the broker fills at) when supplied,
+    falling back to the last bar's close. ``bar_close`` always carries the
+    underlying bar close for transparency.
+    """
     if len(df) < 30:
         return {}
     close = df["close"]
@@ -32,10 +38,12 @@ def _latest_indicators(df: pd.DataFrame) -> dict:
     atr = ind.atr(df, 14).iloc[-1]
     adx = ind.adx(df, 14).iloc[-1]
     vwap = ind.vwap_session(df).iloc[-1]
-    price = float(close.iloc[-1])
+    bar_close = float(close.iloc[-1])
+    price = float(live_price) if live_price is not None else bar_close
     day_open = float(df["open"][df.index.normalize() == df.index[-1].normalize()].iloc[0])
     return {
         "price": round(price, 2),
+        "bar_close": round(bar_close, 2),
         "day_change_pct": round((price / day_open - 1) * 100, 2) if day_open else 0.0,
         "ema9": round(float(ema9), 2),
         "ema21": round(float(ema21), 2),
@@ -95,11 +103,16 @@ def market_only(symbols: list[str] | None = None, interval: str = "5m") -> dict:
     """The shared market view: prices, indicators, regime, fresh signals.
 
     Account/memory state is NOT included so this can be computed ONCE per cycle
-    and reused across all competing teams (one data fetch, not N).
+    and reused across all competing teams (one data fetch, not N). The price
+    inside each market[sym] entry is the live quote from
+    :mod:`daytrader.data.quotes` — the same number the broker uses for fills,
+    so there is no feed-vs-broker gap within a cycle.
     """
     symbols = symbols or _default_symbols()
     data = loader.load_many(symbols, interval=interval, max_age_hours=0.1)
-    per_symbol = {sym: _latest_indicators(df) for sym, df in data.items()}
+    quote_map = quotes.get_quotes(symbols)
+    per_symbol = {sym: _latest_indicators(df, live_price=quote_map.get(sym))
+                  for sym, df in data.items()}
     fresh = _fresh_signals(data)
     now_et = datetime.now(timezone.utc).astimezone()
     out = {
@@ -108,6 +121,7 @@ def market_only(symbols: list[str] | None = None, interval: str = "5m") -> dict:
         "interval": interval,
         "market": per_symbol,
         "fresh_signals": fresh,
+        "quotes": quote_map,
     }
     # Optional enrichment: if the owner has configured tastytrade, overlay live
     # READ-ONLY quotes + option chains/Greeks. Degrades to Yahoo-only otherwise.
@@ -121,7 +135,12 @@ def market_only(symbols: list[str] | None = None, interval: str = "5m") -> dict:
 
 
 def with_account(market_snap: dict, broker) -> dict:
-    """Overlay one team's account state + memory onto a shared market snapshot."""
+    """Overlay one team's account state + memory onto a shared market snapshot.
+
+    Also fetches indicators + a live quote for any HELD position whose symbol
+    is not on the day's scanned universe, so the trader never has to manage a
+    position blind.
+    """
     out = dict(market_snap)
     if broker is None:
         return out
@@ -130,6 +149,31 @@ def with_account(market_snap: dict, broker) -> dict:
         out["performance"] = broker.performance()
     except Exception as e:  # noqa: BLE001
         out["account_error"] = str(e)
+
+    # Held positions outside the day's scan need live indicators too, or the
+    # trader is flying blind on what it already owns.
+    try:
+        positions = (out.get("account") or {}).get("positions") or []
+        market = dict(out.get("market") or {})
+        held_extra = sorted({(p.get("symbol") or "").upper()
+                             for p in positions
+                             if p.get("symbol") and p["symbol"].upper() not in market})
+        if held_extra:
+            interval = market_snap.get("interval", "5m")
+            extra_data = loader.load_many(list(held_extra), interval=interval, max_age_hours=0.1)
+            extra_quotes = quotes.get_quotes(held_extra)
+            for sym, df in extra_data.items():
+                inds = _latest_indicators(df, live_price=extra_quotes.get(sym))
+                if inds:
+                    market[sym] = inds
+            out["market"] = market
+            extra_quote_map = dict(out.get("quotes") or {})
+            extra_quote_map.update(extra_quotes)
+            out["quotes"] = extra_quote_map
+            out["held_positions_added"] = list(held_extra)
+    except Exception as e:  # noqa: BLE001 - never break the snapshot
+        out["held_indicator_error"] = str(e)
+
     db = getattr(broker, "db", None)
     if db is not None:
         try:

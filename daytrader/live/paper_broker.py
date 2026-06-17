@@ -1,7 +1,8 @@
 """Paper-trading broker for the autonomous day-trading agent.
 
-Executes simulated market orders against the latest *live* price (from the
-data loader) plus realistic slippage drawn from the backtester's
+Executes simulated market orders against the *same live quote the agent
+reasoned over* (from :mod:`daytrader.data.quotes`, the shared snapshot/broker
+quote source), plus realistic slippage drawn from the backtester's
 :class:`CostModel`, tracks cash / positions / equity exactly the way the
 backtest engine does, and persists everything through :class:`LiveDB` so the
 whole book survives container restarts.
@@ -13,19 +14,21 @@ Accounting mirrors ``daytrader.backtest.engine``:
   * A SHORT position contributes ``-qty * mark`` (its proceeds already sit in
     cash, so the net equity effect is ``qty * (entry - mark)``).
 
+Per-cycle quote pinning: the competition loop calls
+:meth:`set_cycle_quotes` before each team's trade cycle with the snapshot's
+quote map, so the broker fills at the exact prices the agent saw. The pin is
+cleared after the cycle, so equity marks and EOD flatten use live quotes.
+
 PAPER mode only -- no real orders are ever sent.
 """
 from __future__ import annotations
 
-import time
 from typing import Optional
 
 from daytrader.backtest.engine import CostModel
 from daytrader.core.types import Side
-from daytrader.data import loader
+from daytrader.data import quotes
 from daytrader.live.db import LiveDB, _now_iso
-
-_PRICE_CACHE_TTL = 30.0  # seconds
 
 
 class PaperBroker:
@@ -41,8 +44,10 @@ class PaperBroker:
 
         # symbol -> position dict (side as Side, qty/entry_price floats, etc.)
         self._positions: dict[str, dict] = {}
-        # symbol -> (price, fetched_at) cache for latest_price
-        self._price_cache: dict[str, tuple[float, float]] = {}
+        # Per-cycle pinned quotes (snapshot.market[sym].price). When set, fills
+        # use these prices so the broker matches what the agent reasoned over.
+        # Cleared between cycles; equity marks and EOD flattens use live quotes.
+        self._cycle_quotes: Optional[dict[str, float]] = None
 
         # ---- restart recovery -------------------------------------------------
         for row in self.db.load_open_positions():
@@ -80,18 +85,31 @@ class PaperBroker:
     # ------------------------------------------------------------------ #
     # pricing                                                             #
     # ------------------------------------------------------------------ #
+    def set_cycle_quotes(self, quote_map: Optional[dict[str, float]]) -> None:
+        """Pin a per-cycle quote map. Fills served from these prices match
+        exactly what the snapshot showed the agent. Pass ``None`` to clear."""
+        if quote_map is None:
+            self._cycle_quotes = None
+        else:
+            # Normalize keys to uppercase so callers can pass any case.
+            self._cycle_quotes = {str(k).upper(): float(v) for k, v in quote_map.items()
+                                  if v is not None}
+
     def latest_price(self, symbol: str) -> float:
-        """Latest live price = last 1m close. Cached for ~30s per symbol."""
-        now = time.time()
-        cached = self._price_cache.get(symbol)
-        if cached is not None and (now - cached[1]) < _PRICE_CACHE_TTL:
-            return cached[0]
-        df = loader.load(symbol, interval="1m")
-        if df is None or len(df) == 0:
-            raise RuntimeError(f"No price data available for {symbol}")
-        price = float(df["close"].iloc[-1])
-        self._price_cache[symbol] = (price, now)
-        return price
+        """Latest live quote, shared with the market-state snapshot.
+
+        Prefers the cycle-pinned quote (so the broker fills at exactly the
+        price the agent reasoned over); falls back to a live fetch.
+        """
+        sym = symbol.upper()
+        if self._cycle_quotes is not None:
+            pinned = self._cycle_quotes.get(sym)
+            if pinned is not None:
+                return float(pinned)
+        px = quotes.get_quote(sym)
+        if px is None:
+            raise RuntimeError(f"No price data available for {sym}")
+        return float(px)
 
     # ------------------------------------------------------------------ #
     # cost helpers (mirror engine semantics)                              #

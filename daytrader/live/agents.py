@@ -32,6 +32,12 @@ risk, but trade as if it were your own. Your mandate:
 at the close; plan around being flat by 15:55 ET.
 - Risk is the priority on a small account. Size small (risk well under 1% of equity per \
 trade), always use a protective stop, and prefer trading WITH the prevailing SPY trend.
+- POSITION SIZING: Fractional shares ARE supported — ``qty`` can be any positive number \
+(e.g. 0.05 for a tiny stake in a $500 name). Right-size every trade so the distance from \
+entry to stop loses only ~0.2–0.5% of equity (about $50–$125 on $25k). You are NEVER \
+limited to whole shares; if your risk math says 0.3 shares of NVDA, place 0.3 shares. \
+Standing flat on principle is fine; refusing to trade because of share-count rounding is \
+not.
 - Your tradeable universe is the day's scanned watchlist in the snapshot (liquid stocks + \
 ETFs); you may trade any symbol that appears there.
 - You may also have RESEARCH-DATA tools available (real-time quotes & news, unusual \
@@ -109,7 +115,8 @@ stop without trading."""
 
 def _reviewer(broker, db, provider=None) -> Agent:
     schemas, handlers = build_tools(broker, db)
-    allowed = {"get_positions", "get_performance", "journal_write", "request_dev_help"}
+    allowed = {"get_positions", "get_performance", "get_recent_trades",
+               "journal_write", "request_dev_help"}
     tools = [t for t in schemas if t["name"] in allowed]
     system = _MISSION + """
 

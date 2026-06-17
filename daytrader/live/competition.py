@@ -261,15 +261,23 @@ class Competition:
 
     def trade_all(self):
         market = market_only()
+        # Pin the snapshot's quote map onto each broker for this cycle so the
+        # broker fills at the exact prices the agent reasoned over (no more
+        # feed-vs-broker drift flipping winners into losers).
+        cycle_quotes = dict(market.get("quotes") or {})
         for t in self.teams:
             if t.halted:
                 continue
             self._risk_check(t)
             if not t.halted:
-                res = t.desk.trade_cycle(with_account(market, t.broker))
-                if getattr(res, "error", None):
-                    _notify(f"⚠️ Team {t.name} ({getattr(t.provider,'model','?')}) cycle error: {res.error}",
-                            throttle_key=f"err_{t.name}")
+                t.broker.set_cycle_quotes(cycle_quotes)
+                try:
+                    res = t.desk.trade_cycle(with_account(market, t.broker))
+                    if getattr(res, "error", None):
+                        _notify(f"⚠️ Team {t.name} ({getattr(t.provider,'model','?')}) cycle error: {res.error}",
+                                throttle_key=f"err_{t.name}")
+                finally:
+                    t.broker.set_cycle_quotes(None)
                 t.broker.db.record_equity(t.broker.cash(), t.broker.equity(),
                                           len(t.broker.positions()), t.broker.drawdown_pct())
 
