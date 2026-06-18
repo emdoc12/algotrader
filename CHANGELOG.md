@@ -9,6 +9,26 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.10.1] — 2026-06-17
+
+### Fixed
+- **Mobile layout actually works now.** The v6.6.2 attempt had a bug: it set the
+  tables to `width:max-content`, which made the wide ones (the trades "Reason"
+  column, the 10-col leaderboard) grow *past* their card and force the whole
+  page wider than the screen — so everything got squeezed into a thin left
+  column with text bleeding off to the right. Fixed properly:
+  - `html,body` now hard-guard against any horizontal overflow
+    (`max-width:100%; overflow-x:hidden`), so a wide child can never blow out
+    the page again.
+  - On phones the **card** is the horizontal scroll container; wide tables
+    scroll inside their card instead of stretching the page.
+  - The long free-text **Reason** column is hidden on phones (it's already in
+    the Thinking & Activity feed), so the trades table's essentials —
+    symbol/side/entry→exit/qty/P&L — fit on screen without scrolling.
+  - Added `-webkit-text-size-adjust:100%` to stop iOS from rescaling text.
+
+---
+
 ## [6.10.0] — 2026-06-15
 
 ### Added

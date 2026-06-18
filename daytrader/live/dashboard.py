@@ -302,6 +302,8 @@ PAGE_HTML = r"""<!DOCTYPE html>
     --accent:#7c8cff;
   }
   *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  html,body{max-width:100%;overflow-x:hidden}
   body{margin:0;background:var(--bg);color:var(--txt);
        font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
   header{padding:18px 24px;border-bottom:1px solid var(--line);position:relative}
@@ -369,8 +371,9 @@ PAGE_HTML = r"""<!DOCTYPE html>
 
   /* ── phones / narrow screens ───────────────────────────────────────────
      Tighten chrome, stack the version badge above the title, and let wide
-     data tables (esp. the 10-col leaderboard) scroll inside their card
-     instead of forcing the whole page to overflow sideways. */
+     data tables (esp. the 10-col leaderboard + the trades "Reason" column)
+     scroll INSIDE their card instead of forcing the whole page sideways.
+     The card is the scroll container; the page itself never overflows. */
   @media (max-width:640px){
     header{padding:14px 16px 12px}
     header h1{font-size:17px}
@@ -379,12 +382,16 @@ PAGE_HTML = r"""<!DOCTYPE html>
     .tabs{padding:8px 10px 0;gap:4px;overflow-x:auto;flex-wrap:nowrap;
           -webkit-overflow-scrolling:touch}
     .tab{padding:7px 12px;font-size:12px;white-space:nowrap;flex:0 0 auto}
-    main{padding:14px 12px 56px}
-    .card{padding:12px;border-radius:10px}
-    /* the table itself becomes the horizontal scroll container */
-    table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch;
-          width:max-content;min-width:100%}
+    main{padding:14px 12px 56px;max-width:100%}
+    /* the CARD scrolls its overflowing table; tables keep their natural
+       (nowrap) width and scroll within the card, not the page */
+    .card{padding:12px;border-radius:10px;max-width:100%;
+          overflow-x:auto;-webkit-overflow-scrolling:touch}
+    table{min-width:100%}
     th,td{padding:7px 8px}
+    /* the long free-text trade reason is in the activity feed too — hide it
+       from the table on phones so the essentials fit without scrolling */
+    .col-reason{display:none}
     .stats{gap:14px 18px}
     .stat{min-width:80px}
     .stat .v{font-size:18px}
@@ -701,7 +708,8 @@ async function loadTeam(name){
   if(trades.length){
     const t = el("table");
     const h = el("tr");
-    ["Symbol","Side","Entry → Exit","Qty","P&L","Reason"].forEach(x=>h.appendChild(el("th",null,x)));
+    ["Symbol","Side","Entry → Exit","Qty","P&L"].forEach(x=>h.appendChild(el("th",null,x)));
+    h.appendChild(el("th",{class:"col-reason"},"Reason"));
     t.appendChild(h);
     trades.forEach(tr0 => {
       const tr = el("tr");
@@ -713,7 +721,7 @@ async function loadTeam(name){
        el("td",{class:"gray"}, entry + " → " + exit),
        el("td",null,String(tr0.qty!=null?tr0.qty:"")),
        el("td",{class:clsFor(pnl)}, (pnl>=0?"+":"") + fmtMoney(pnl).replace("$-","$")),
-       el("td",{class:"gray"}, tr0.exit_reason||"")].forEach(c=>tr.appendChild(c));
+       el("td",{class:"gray col-reason"}, tr0.exit_reason||"")].forEach(c=>tr.appendChild(c));
       t.appendChild(tr);
     });
     trCard.appendChild(t);
