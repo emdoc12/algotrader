@@ -682,16 +682,18 @@ async function loadTeam(name){
   if(positions.length){
     const t = el("table");
     const h = el("tr");
-    ["Symbol","Side","Qty","Entry","Stop","Target","Strategy"].forEach(x=>h.appendChild(el("th",null,x)));
+    ["Symbol","Side","Qty","Entry","Stop","Target","Hold","Strategy"].forEach(x=>h.appendChild(el("th",null,x)));
     t.appendChild(h);
     positions.forEach(p => {
       const tr = el("tr");
+      const hz = (p.horizon||"day");
       [el("td",null,p.symbol||""),
        el("td",{class: (p.side||"").toLowerCase()==="short"?"red":"green"}, (p.side||"").toUpperCase()),
        el("td",null,String(p.qty!=null?p.qty:"")),
        el("td",null,p.entry_price!=null?fmtMoney(p.entry_price):""),
        el("td",null,p.stop!=null?fmtMoney(p.stop):"—"),
        el("td",null,p.target!=null?fmtMoney(p.target):"—"),
+       el("td",{class: hz==="day"?"gray":"green"}, hz),
        el("td",{class:"gray"},p.strategy||"")].forEach(c=>tr.appendChild(c));
       t.appendChild(tr);
     });

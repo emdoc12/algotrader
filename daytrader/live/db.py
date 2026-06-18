@@ -141,6 +141,7 @@ class LiveDB:
         try:
             self._ensure_column("dev_requests", "resolution", "TEXT")
             self._ensure_column("dev_requests", "resolved_ts", "TEXT")
+            self._ensure_column("open_positions", "horizon", "TEXT DEFAULT 'day'")
             self.conn.commit()
         except Exception:  # noqa: BLE001 - never block startup on a migration
             pass
@@ -200,7 +201,7 @@ class LiveDB:
         """Insert or replace an open position keyed by symbol."""
         cols = (
             "symbol", "side", "qty", "entry_price", "entry_ts", "strategy",
-            "stop", "target", "rationale",
+            "stop", "target", "rationale", "horizon",
         )
         params = [pos_dict.get(c) for c in cols]
         self.conn.execute(

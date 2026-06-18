@@ -9,6 +9,29 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.11.0] — 2026-06-17
+
+### Changed
+- **Desks can now swing-trade and hold longer-term, not just day-trade.** The
+  mandate is now "prefer day trading, but hold when warranted," aimed at
+  aggressive-but-steady growth / income generation. Each trade carries a
+  **horizon**: `day` (the default — flattened automatically at the close),
+  `swing` (held for days), or `long` (held weeks+). Swing/long positions survive
+  the EOD flatten and the daily-loss circuit breaker, riding their own stops;
+  only `day` positions are force-closed at 15:55 ET. Desks don't have to specify
+  anything to keep day-trading — `day` is the default; they opt into longer holds
+  explicitly via `place_trade(..., horizon="swing"|"long")`.
+  - `horizon` flows through `place_trade` → `PaperBroker.open` → the
+    `open_positions` table (new column, migrated in place) and is restored on
+    restart, so multi-day holds survive container restarts.
+  - `flatten_all(reason, horizons={...})` closes only the requested horizons; the
+    runner uses `{"day"}` at the close and on the circuit breaker.
+  - Open-positions table on the dashboard shows a **Hold** column (day/swing/long).
+  - Mission goal reworded to "aggressive but steady growth (or income
+    generation)"; PF 2:1+ target kept, max-drawdown guidance ~10–15%.
+
+---
+
 ## [6.10.1] — 2026-06-17
 
 ### Fixed

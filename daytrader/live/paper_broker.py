@@ -62,6 +62,7 @@ class PaperBroker:
                 "stop": row["stop"],
                 "target": row["target"],
                 "rationale": row["rationale"] or "",
+                "horizon": (row["horizon"] if "horizon" in row.keys() and row["horizon"] else "day"),
             }
 
         last = self.db.last_equity()
@@ -140,10 +141,19 @@ class PaperBroker:
         target: Optional[float] = None,
         strategy: str = "agent",
         rationale: str = "",
+        horizon: str = "day",
     ) -> dict:
-        """Market entry at the latest live price plus slippage."""
+        """Market entry at the latest live price plus slippage.
+
+        ``horizon`` is the intended hold: 'day' (default; flattened at the close),
+        'swing' (held for days), or 'long' (held weeks+). Non-day positions
+        survive the EOD flatten and ride their stops.
+        """
         side = Side(side)
         qty = float(qty)
+        horizon = str(horizon).lower() if horizon else "day"
+        if horizon not in ("day", "swing", "long"):
+            horizon = "day"
         if qty <= 0:
             return self._fail(symbol, side, qty, "qty must be positive")
         if symbol in self._positions:
@@ -182,6 +192,7 @@ class PaperBroker:
             "stop": stop,
             "target": target,
             "rationale": rationale,
+            "horizon": horizon,
             # carried for realized-pnl accounting at close:
             "commission_paid": commission,
             "slippage_paid": slip,
@@ -196,8 +207,9 @@ class PaperBroker:
             "stop": stop,
             "target": target,
             "rationale": rationale,
+            "horizon": horizon,
         })
-        self.db.log_agent(strategy, "open", f"{side.value} {qty} {symbol} @ {fill:.4f}")
+        self.db.log_agent(strategy, "open", f"{side.value} {qty} {symbol} @ {fill:.4f} [{horizon}]")
         self._persist_equity()
         return {
             "ok": True,
@@ -270,10 +282,15 @@ class PaperBroker:
             "reason": reason,
         }
 
-    def flatten_all(self, reason: str = "eod_flat") -> list[dict]:
-        """Close every open position. Returns the per-symbol close results."""
+    def flatten_all(self, reason: str = "eod_flat",
+                    horizons: Optional[set] = None) -> list[dict]:
+        """Close open positions. If ``horizons`` is given, close only positions
+        whose horizon is in that set (e.g. {"day"} at the close leaves swing/long
+        holds running); otherwise close everything."""
         results = []
         for symbol in list(self._positions):
+            if horizons is not None and self._positions[symbol].get("horizon", "day") not in horizons:
+                continue
             results.append(self.close(symbol, reason=reason))
         return results
 
@@ -303,6 +320,7 @@ class PaperBroker:
                 "stop": pos.get("stop"),
                 "target": pos.get("target"),
                 "strategy": pos.get("strategy"),
+                "horizon": pos.get("horizon", "day"),
                 "rationale": pos.get("rationale", ""),
             })
         return out

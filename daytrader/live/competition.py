@@ -215,8 +215,9 @@ def chat_with_leader(team_name: str, message: str) -> dict:
         import json
         system = (
             f"You are the LEADER of the '{team_name}' autonomous trading desk, which "
-            f"day-trades a $10k paper account of US stocks/ETFs in a competition against "
-            f"rival AI desks. The owner is messaging you with a question or suggestion "
+            f"trades a ${START_CASH:,.0f} paper account of US stocks/ETFs — day-trading by "
+            f"default, but free to swing-trade or hold longer when warranted — in a "
+            f"competition against rival AI desks. The owner is messaging you with a question or suggestion "
             f"about your trades and strategy. Answer directly and concisely as the desk "
             f"lead: explain your reasoning, own your results, and take the owner's "
             f"suggestions seriously (you can say you'll adjust the plan and note it in "
@@ -284,8 +285,9 @@ class Competition:
     def review_all(self):
         market = market_only()
         for t in self.teams:
+            # Flatten only DAY trades at the close; swing/long holds ride on.
             if t.broker.positions():
-                t.broker.flatten_all(reason="eod_flat")
+                t.broker.flatten_all(reason="eod_flat", horizons={"day"})
             t.desk.review_day(with_account(market, t.broker))
 
     def _risk_check(self, t: Team):
@@ -294,7 +296,9 @@ class Competition:
         day_pnl = (t.broker.equity() / t.day_start_equity - 1) * 100
         if day_pnl <= -DAILY_LOSS_LIMIT_PCT:
             t.halted = True
-            t.broker.flatten_all(reason="daily_loss_limit")
+            # Stop the day-trading bleed; leave deliberate swing/long holds on
+            # their own stops rather than force-closing a longer-term thesis.
+            t.broker.flatten_all(reason="daily_loss_limit", horizons={"day"})
             t.db.log_agent("runner", "circuit_breaker", f"{day_pnl:.2f}%")
             _notify(f"🛑 Team {t.name} hit the daily loss limit ({day_pnl:.1f}%) — flattened and halted for the day.")
 

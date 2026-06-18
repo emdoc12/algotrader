@@ -27,8 +27,9 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
             stop=inp.get("stop"), target=inp.get("target"),
             strategy=inp.get("strategy", "agent"),
             rationale=inp.get("rationale", ""),
+            horizon=inp.get("horizon", "day"),
         )
-        db.log_agent("trader", "place_trade", str({k: inp.get(k) for k in ("symbol", "side", "qty")}))
+        db.log_agent("trader", "place_trade", str({k: inp.get(k) for k in ("symbol", "side", "qty", "horizon")}))
         return res
 
     def close_position(inp: dict) -> dict:
@@ -329,7 +330,7 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
     schemas = [
         {
             "name": "place_trade",
-            "description": "Open a paper position. One position per symbol; rejected if one is already open or if a long exceeds available cash. ALWAYS include a protective stop and a profit target. Fractional shares are supported — size to your risk, not to a whole-share lot.",
+            "description": "Open a paper position. One position per symbol; rejected if one is already open or if a long exceeds available cash. ALWAYS include a protective stop and a profit target. Fractional shares are supported — size to your risk, not to a whole-share lot. Set 'horizon' to control holding: 'day' (default, flattened at the close), 'swing' (held for days), or 'long' (held weeks+) — swing/long survive the close and ride their stop.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -340,6 +341,7 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                     "target": {"type": "number", "description": "Profit target price"},
                     "strategy": {"type": "string", "description": "Strategy/setup name driving this trade"},
                     "rationale": {"type": "string", "description": "One-sentence reason for the trade"},
+                    "horizon": {"type": "string", "enum": ["day", "swing", "long"], "description": "Intended hold. Default 'day' (flattened at close). 'swing'/'long' survive the close. Prefer 'day' unless the setup genuinely warrants more time."},
                 },
                 "required": ["symbol", "side", "qty", "stop", "target", "rationale"],
             },
