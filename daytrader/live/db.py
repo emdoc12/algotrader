@@ -117,6 +117,13 @@ class LiveDB:
                 role    TEXT NOT NULL,
                 content TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS custom_strategies (
+                id     INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts     TEXT NOT NULL,
+                name   TEXT UNIQUE,
+                config TEXT,
+                notes  TEXT
+            );
             """
         )
         self.conn.commit()
@@ -305,6 +312,29 @@ class LiveDB:
         )
         row = cur.fetchone()
         return dict(row) if row is not None else None
+
+    # ------------------------------------------------------------------ #
+    # custom strategies (agent-authored)                                  #
+    # ------------------------------------------------------------------ #
+    def save_custom_strategy(self, name: str, config_json: str, notes: str = "") -> int:
+        """Insert or replace a saved custom strategy keyed by name."""
+        cur = self.conn.execute(
+            "INSERT INTO custom_strategies (ts, name, config, notes) VALUES (?,?,?,?) "
+            "ON CONFLICT(name) DO UPDATE SET ts=excluded.ts, config=excluded.config, "
+            "notes=excluded.notes",
+            (_now_iso(), name, config_json, notes),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def get_custom_strategy(self, name: str) -> Optional[dict]:
+        cur = self.conn.execute("SELECT * FROM custom_strategies WHERE name=?", (name,))
+        row = cur.fetchone()
+        return dict(row) if row is not None else None
+
+    def list_custom_strategies(self) -> list[dict]:
+        cur = self.conn.execute("SELECT * FROM custom_strategies ORDER BY id DESC")
+        return [dict(r) for r in cur.fetchall()]
 
     # ------------------------------------------------------------------ #
     # agent log                                                           #

@@ -188,6 +188,84 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
         except Exception as e:  # noqa: BLE001
             return {"error": repr(e)}
 
+    def _resolve_custom_config(inp: dict):
+        """Get a custom config from inline 'config' or a saved 'name'. Returns
+        (config|None, error|None)."""
+        cfg = inp.get("config")
+        if cfg:
+            return cfg, None
+        name = inp.get("name")
+        if name:
+            row = db.get_custom_strategy(name)
+            if not row:
+                return None, f"no saved custom strategy named {name!r}"
+            import json as _json
+            try:
+                return _json.loads(row["config"]), None
+            except Exception as e:  # noqa: BLE001
+                return None, f"saved config for {name!r} is corrupt: {e!r}"
+        return None, "provide either an inline 'config' or a saved 'name'"
+
+    def backtest_custom_strategy(inp: dict) -> dict:
+        """Backtest an agent-authored custom strategy (inline config or saved name)."""
+        from daytrader.live import strategy_lab
+        inp = inp or {}
+        cfg, err = _resolve_custom_config(inp)
+        if err:
+            return {"error": err}
+        try:
+            return strategy_lab.run_backtest(
+                custom=cfg,
+                symbols=inp.get("symbols"),
+                lookback_days=int(inp.get("lookback_days", 30)),
+                interval=inp.get("interval", "5m"),
+                regimes=inp.get("regimes"),
+                adx_threshold=float(inp.get("adx_threshold", 25.0)),
+                market_filter=bool(inp.get("market_filter", True)),
+                starting_equity=float(inp.get("starting_equity", 25000.0)),
+                pessimistic_costs=bool(inp.get("pessimistic_costs", False)),
+            )
+        except Exception as e:  # noqa: BLE001
+            return {"error": repr(e)}
+
+    def save_custom_strategy(inp: dict) -> dict:
+        """Validate and persist a custom strategy so it can be reused/deployed."""
+        from daytrader.strategies.custom import validate_config, StrategyConfigError
+        import json as _json
+        inp = inp or {}
+        cfg = inp.get("config")
+        if not cfg:
+            return {"ok": False, "error": "config required"}
+        name = (inp.get("name") or (cfg.get("name") if isinstance(cfg, dict) else None) or "").strip()
+        if not name:
+            return {"ok": False, "error": "name required (in 'name' or config.name)"}
+        try:
+            norm = validate_config({**cfg, "name": name})
+        except StrategyConfigError as e:
+            return {"ok": False, "error": f"invalid config: {e}"}
+        try:
+            stored = {**cfg, "name": name}
+            db.save_custom_strategy(name, _json.dumps(stored), inp.get("notes", ""))
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": repr(e)}
+        db.log_agent("strategist", "save_custom_strategy", name)
+        return {"ok": True, "name": name, "conditions": len(norm["entry"]),
+                "note": "Saved. Backtest it with backtest_custom_strategy(name=...) anytime."}
+
+    def list_custom_strategies(_inp: dict) -> dict:
+        import json as _json
+        rows = db.list_custom_strategies()
+        out = []
+        for r in rows:
+            try:
+                cfg = _json.loads(r["config"])
+            except Exception:  # noqa: BLE001
+                cfg = {}
+            out.append({"name": r.get("name"), "ts": r.get("ts"),
+                        "side": cfg.get("side"), "conditions": len(cfg.get("entry", []) or []),
+                        "notes": r.get("notes")})
+        return {"ok": True, "count": len(out), "strategies": out}
+
     def journal_write(inp: dict) -> dict:
         jid = db.add_journal(inp.get("author", "team"), inp.get("topic", "note"), inp.get("note", ""))
         return {"ok": True, "id": jid}
@@ -240,6 +318,9 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
         "get_opening_range": get_opening_range,
         "get_relative_strength_vs_spy": get_relative_strength_vs_spy,
         "backtest_strategy": backtest_strategy,
+        "backtest_custom_strategy": backtest_custom_strategy,
+        "save_custom_strategy": save_custom_strategy,
+        "list_custom_strategies": list_custom_strategies,
         "journal_write": journal_write,
         "request_dev_help": request_dev_help,
         "resolve_dev_request": resolve_dev_request,
@@ -356,6 +437,60 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                     "strategy_params": {"type": "object", "description": "Per-strategy parameter overrides passed to the strategy constructor."},
                 },
             },
+        },
+        {
+            "name": "backtest_custom_strategy",
+            "description": (
+                "Backtest a CUSTOM strategy you design from rules (no developer needed). "
+                "Provide either an inline 'config' or the 'name' of a saved one. The config "
+                "is: {name, side: long|short, entry: [conditions], stop_atr_mult, rr, "
+                "max_entries_per_day, no_entry_before, no_entry_after}. Each condition is "
+                "{left, op, right} where left is a FEATURE, op is one of < <= > >= == != "
+                "cross_above cross_below, and right is a number or another feature. All "
+                "conditions are AND-ed. Append '_prev' to a feature for the prior bar (e.g. "
+                "crossovers). FEATURES: price, open, high, low, volume, ema9, ema21, ema50, "
+                "sma20, rsi, rsi2, atr, atr_pct, adx, vwap, vs_vwap_pct, macd, macd_signal, "
+                "macd_hist, bb_upper, bb_lower, bb_mid, bb_pct, day_change_pct, gap_pct, "
+                "ret1, ret3. Exits (ATR stop, rr target, EOD-flat) are handled by the engine "
+                "— same as the built-ins, so results are directly comparable. Returns the "
+                "same metrics + verdict as backtest_strategy."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "config": {"type": "object", "description": "Inline strategy config (see description)."},
+                    "name": {"type": "string", "description": "Name of a previously saved custom strategy (alternative to config)."},
+                    "symbols": {"type": "array", "items": {"type": "string"}, "description": "Tickers to test (default: today's watchlist)."},
+                    "lookback_days": {"type": "integer", "description": "Days of history (default 30)."},
+                    "interval": {"type": "string", "description": "Bar size: 5m/15m/30m/1h (default 5m)."},
+                    "regimes": {"type": "array", "items": {"type": "string"}, "description": "Pin regime gating (trend/range/any)."},
+                    "adx_threshold": {"type": "number", "description": "ADX cutoff for trend vs range (default 25)."},
+                    "market_filter": {"type": "boolean", "description": "Require SPY-trend alignment (default true)."},
+                    "pessimistic_costs": {"type": "boolean", "description": "Stress-test with harsh slippage (default false)."},
+                },
+            },
+        },
+        {
+            "name": "save_custom_strategy",
+            "description": (
+                "Save a custom strategy config (validated) to your team's library so you can "
+                "re-backtest or reference it later. Provide 'config' (and optional 'name', "
+                "'notes'). Use after a config backtests well so the idea isn't lost."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "config": {"type": "object", "description": "The strategy config to save."},
+                    "name": {"type": "string", "description": "Unique name (defaults to config.name)."},
+                    "notes": {"type": "string", "description": "Why it works / backtest result summary."},
+                },
+                "required": ["config"],
+            },
+        },
+        {
+            "name": "list_custom_strategies",
+            "description": "List your team's saved custom strategies (name, side, #conditions, notes).",
+            "input_schema": {"type": "object", "properties": {}},
         },
         {
             "name": "journal_write",

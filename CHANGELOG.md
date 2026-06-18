@@ -9,6 +9,38 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.10.0] — 2026-06-15
+
+### Added
+- **Custom, agent-authored strategies (the rule DSL).** The desks can now invent
+  brand-new setups from rules — no developer needed — and backtest them through
+  the same engine/cost-model/metrics as the built-ins. A strategy is a small
+  config: `{side, entry:[{left, op, right}…], stop_atr_mult, rr,
+  max_entries_per_day, no_entry_before/after}`. Conditions are AND-ed; `left` is
+  a feature, `op` ∈ `< <= > >= == != cross_above cross_below`, `right` is a
+  number or another feature, and a `_prev` suffix reads the prior bar (for
+  crossovers). ~30 causal features are exposed (price, ema9/21/50, sma20, rsi,
+  rsi2, atr, atr_pct, adx, vwap, vs_vwap_pct, macd/signal/hist, bollinger
+  bands+%, day_change_pct, gap_pct, ret1, ret3). Exits (ATR stop, rr target,
+  EOD-flat) are engine-handled, so custom results are directly comparable to the
+  built-ins. The config is a fixed feature/operator vocabulary — no arbitrary
+  code is ever executed. New module `daytrader/strategies/custom.py`.
+- **Three new tools** (Strategist, Trader, Reviewer): `backtest_custom_strategy`
+  (inline config or saved name), `save_custom_strategy` (validates + persists to
+  a per-team library), and `list_custom_strategies`. Backed by a new
+  `custom_strategies` DB table + `LiveDB.save/get/list_custom_strategy`.
+- **Mission updated** to push the desks to invent and validate their own setups
+  aggressively — iterate the rules until PF≥2 on a real sample, save the winner,
+  then trade it by applying its conditions live.
+
+### Notes
+- This is the v1 the v6.9.0 changelog flagged as a follow-up. Live
+  auto-execution of a saved custom strategy (wiring it into `fresh_signals`) is
+  the next possible step; for now a desk trades a validated custom setup by
+  applying its rules itself when the snapshot shows the conditions.
+
+---
+
 ## [6.9.0] — 2026-06-15
 
 ### Added

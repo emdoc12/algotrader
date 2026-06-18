@@ -110,17 +110,32 @@ def run_backtest(
     starting_equity: float = 25_000.0,
     pessimistic_costs: bool = False,
     strategy_params: Optional[dict] = None,
+    custom: Optional[object] = None,
 ) -> dict:
-    """Backtest one or more built-in strategies over recent intraday data.
+    """Backtest built-in strategies (by name/profile) OR a custom rule config.
 
-    Returns a compact dict: resolved config, summary metrics (win rate, profit
-    factor, avg win/loss, max DD, expectancy, return, alpha vs SPY), a
-    downsampled equity curve, and a sample of trades. Never raises.
+    Pass ``custom`` (a config dict, or a list of them) to test an agent-authored
+    strategy; otherwise ``strategy`` selects built-ins. Returns a compact dict:
+    resolved config, summary metrics (win rate, profit factor, avg win/loss, max
+    DD, expectancy, return, alpha vs SPY), a downsampled equity curve, and a
+    sample of trades. Never raises.
     """
-    names = _resolve_names(strategy)
-    if not names:
-        return {"error": f"unknown strategy {strategy!r}",
-                "available": available_strategies() + list(_PROFILES.keys())}
+    custom_strats = []
+    if custom is not None:
+        from daytrader.strategies.custom import CustomRuleStrategy, StrategyConfigError
+        configs = custom if isinstance(custom, list) else [custom]
+        try:
+            custom_strats = [CustomRuleStrategy(cfg) for cfg in configs]
+        except StrategyConfigError as e:
+            return {"error": f"invalid custom strategy: {e}"}
+        except Exception as e:  # noqa: BLE001
+            return {"error": f"could not build custom strategy: {e!r}"}
+        names = [s.name for s in custom_strats]
+    else:
+        names = _resolve_names(strategy)
+        if not names:
+            return {"error": f"unknown strategy {strategy!r}",
+                    "available": available_strategies() + list(_PROFILES.keys())}
 
     interval = "1h" if interval in ("60m", "1h") else interval
     cap = _MAX_LOOKBACK.get(interval, 55)
@@ -153,10 +168,16 @@ def run_backtest(
         pinned = {r for r in pinned if r in valid} or None
 
     allocs = []
-    for key in names:
-        strat, natural = _instantiate(key, strategy_params)
-        regset = pinned if pinned else {natural}
-        allocs.append(Allocation(strategy=strat, regimes=regset, weight=1.0))
+    if custom_strats:
+        # Custom strategies fire in any regime unless the caller pins one.
+        regset = pinned if pinned else {Regime.ANY.value}
+        for strat in custom_strats:
+            allocs.append(Allocation(strategy=strat, regimes=set(regset), weight=1.0))
+    else:
+        for key in names:
+            strat, natural = _instantiate(key, strategy_params)
+            regset = pinned if pinned else {natural}
+            allocs.append(Allocation(strategy=strat, regimes=regset, weight=1.0))
 
     try:
         ens = Ensemble(allocs, adx_threshold=adx_threshold, market_filter=market_filter)

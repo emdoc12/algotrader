@@ -68,6 +68,14 @@ recent data BEFORE risking live cycles on it — which of the 8 setups works in 
 regime, what stop/target/ADX params help, etc. Don't deploy a setup on a hunch when you \
 can measure its edge in seconds (but remember small samples aren't conclusive).
 
+INVENT YOUR OWN SETUPS: you are not limited to the 8 built-ins. Design a brand-new \
+strategy from rules and backtest it with backtest_custom_strategy — a config of \
+{side, entry conditions on features like ema9/rsi/adx/vwap/macd/atr/gap, stop_atr_mult, \
+rr}. Iterate the rules until the edge is real (PF>=2 on a decent sample), then \
+save_custom_strategy to keep it and trade it live by applying its rules yourself when \
+the snapshot shows the conditions. This is your fastest path from idea to validated \
+edge — use it aggressively.
+
 READ THE TAPE FAST: the snapshot's 'market_summary' gives a trend_day flag, SPY \
 direction/ADX, breadth, the big movers (>=2% with ADX>=30), and rs_leaders/rs_laggers; \
 each name also carries rs_vs_spy_pct and rs_rank (1 = strongest vs SPY). On a flagged \
@@ -128,8 +136,9 @@ stop without trading."""
 def _reviewer(broker, db, provider=None) -> Agent:
     schemas, handlers = build_tools(broker, db)
     allowed = {"get_positions", "get_performance", "get_recent_trades",
-               "backtest_strategy", "journal_write", "request_dev_help",
-               "resolve_dev_request"}
+               "backtest_strategy", "backtest_custom_strategy",
+               "save_custom_strategy", "list_custom_strategies",
+               "journal_write", "request_dev_help", "resolve_dev_request"}
     tools = [t for t in schemas if t["name"] in allowed]
     system = _MISSION + """
 
