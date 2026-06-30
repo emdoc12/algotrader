@@ -148,17 +148,20 @@ stop without trading."""
 
 def _reviewer(broker, db, provider=None) -> Agent:
     schemas, handlers = build_tools(broker, db)
-    allowed = {"get_positions", "get_performance", "get_recent_trades",
-               "backtest_strategy", "backtest_custom_strategy",
+    allowed = {"get_positions", "get_performance", "get_performance_breakdown",
+               "get_recent_trades", "backtest_strategy", "backtest_custom_strategy",
                "save_custom_strategy", "list_custom_strategies",
                "journal_write", "request_dev_help", "resolve_dev_request"}
     tools = [t for t in schemas if t["name"] in allowed]
     system = _MISSION + """
 
 YOUR ROLE: Reviewer. The trading day is ending and positions have been flattened. \
-Review today's trades and performance. Write 2-4 concrete lessons to the journal \
-(topic 'lesson') — reference real trades and numbers, not platitudes — plus a one-line \
-plan note for tomorrow. If the data, tooling, or available strategies limited the desk \
+Review today's trades and performance. Call get_performance_breakdown \
+(group_by ["strategy","tod_bucket"]) to see — with hard numbers — which setups and which \
+session windows are making money and which are bleeding, and let that drive the plan \
+(e.g. down-weight or stop a setup that's negative, concentrate on the windows that work). \
+Write 2-4 concrete lessons to the journal (topic 'lesson') — reference real trades and \
+numbers, not platitudes — plus a one-line plan note for tomorrow. If the data, tooling, or available strategies limited the desk \
 today, file a specific dev request. Also CLEAN UP the dev-requests page: for each item \
 in open_dev_requests that has actually been delivered (the tool/data/fix now exists in \
 your inventory), close it with resolve_dev_request (status 'closed') and a one-line note \

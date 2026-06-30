@@ -51,6 +51,24 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
     def get_performance(_inp: dict) -> dict:
         return {"ok": True, "performance": broker.performance()}
 
+    def get_performance_breakdown(inp: dict) -> dict:
+        """Realized P&L / win-rate / PF grouped by strategy and/or time-of-day."""
+        from daytrader.live import analytics
+        inp = inp or {}
+        group_by = inp.get("group_by") or ["strategy"]
+        if isinstance(group_by, str):
+            group_by = [group_by]
+        try:
+            trades = db.recent_trades(limit=2000)
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": repr(e)}
+        rows = analytics.performance_breakdown(trades, group_by=group_by)
+        return {"ok": True, "group_by": [g for g in group_by if g in ("strategy", "tod_bucket")] or ["strategy"],
+                "breakdown": rows,
+                "note": ("Sorted by total P&L; time-of-day buckets are ET "
+                         "(open 9:30-10:00, morning 10:00-12:00, midday 12:00-14:00, late 14:00-16:00). "
+                         "Realized trades only.")}
+
     def get_recent_trades(inp: dict) -> dict:
         """Detailed round-trip trade blotter for post-trade review."""
         try:
@@ -317,6 +335,7 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
         "flatten_all": flatten_all,
         "get_positions": get_positions,
         "get_performance": get_performance,
+        "get_performance_breakdown": get_performance_breakdown,
         "get_recent_trades": get_recent_trades,
         "get_opening_range": get_opening_range,
         "get_relative_strength_vs_spy": get_relative_strength_vs_spy,
@@ -379,6 +398,17 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
             "name": "get_performance",
             "description": "Get realized performance so far: trade count, win rate, profit factor, P&L.",
             "input_schema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "get_performance_breakdown",
+            "description": "Realized performance grouped by strategy and/or time-of-day, so you can see which setups and which session windows actually carry positive expectancy and concentrate risk there (or disable what bleeds). Each row has the group keys plus n_trades, win_rate, profit_factor, total_pnl, avg_win, avg_loss. group_by accepts 'strategy' and/or 'tod_bucket'. Time-of-day buckets are ET: open (9:30-10:00), morning (10:00-12:00), midday (12:00-14:00), late (14:00-16:00). Realized trades only.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "group_by": {"type": "array", "items": {"type": "string", "enum": ["strategy", "tod_bucket"]},
+                                 "description": "Dimensions to group by (default ['strategy']). Use both for a strategy×time matrix."},
+                },
+            },
         },
         {
             "name": "get_recent_trades",

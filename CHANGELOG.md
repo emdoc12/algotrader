@@ -9,6 +9,25 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.13.0] — 2026-06-30
+
+### Added
+- **Regime/strategy/time-of-day performance breakdown** (dev request #2). New
+  `get_performance_breakdown` tool returns realized n_trades, win_rate,
+  profit_factor, total_pnl, avg_win, avg_loss grouped by `strategy` and/or
+  `tod_bucket` — so a desk can see with hard numbers which setups and which
+  session windows carry positive expectancy and concentrate risk there (or
+  disable what bleeds), instead of eyeballing the trade log. Time-of-day buckets
+  are ET: open (9:30–10:00), morning (10:00–12:00), midday (12:00–14:00), late
+  (14:00–16:00). Given to the Strategist, Trader, and Reviewer; the Reviewer is
+  now instructed to run a strategy×time breakdown at EOD and let it drive the
+  plan. New module `daytrader/live/analytics.py`.
+  - Correctly converts trade timestamps (recorded in the container's local /
+    UTC time) to ET before bucketing, so the session windows are accurate
+    regardless of the container timezone.
+
+---
+
 ## [6.12.0] — 2026-06-30
 
 ### Added
