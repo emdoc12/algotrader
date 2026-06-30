@@ -39,6 +39,12 @@ never as a way to avoid booking a loser. Every position, any horizon, must have 
 overnight/multi-day holds carry gap risk — size them accordingly.
 - Risk is the priority on a small account. Size small (risk well under 1% of equity per \
 trade), always use a protective stop, and prefer trading WITH the prevailing SPY trend.
+- LET WINNERS RUN: instead of a fixed target you may set a TRAILING stop on the trade \
+(trail_atr_mult, e.g. 2.0 = 2xATR behind price, or trail_pct). It ratchets in your favor \
+every cycle and auto-closes when hit — the system manages it for you, so a clean trend \
+trade can run well past a fixed target while the open gain stays protected. Stops and \
+targets you set are now ENFORCED server-side each cycle (auto-closed when the mark hits \
+them); you don't have to manually close every winner/loser, though you still may.
 - POSITION SIZING: Fractional shares ARE supported — ``qty`` can be any positive number \
 (e.g. 0.05 for a tiny stake in a $500 name). Right-size every trade so the distance from \
 entry to stop loses only ~0.2–0.5% of equity (about $50–$125 on $25k). You are NEVER \

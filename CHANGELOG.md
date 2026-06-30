@@ -9,6 +9,40 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.12.0] — 2026-06-30
+
+### Added
+- **Trailing stops + server-side bracket execution** (dev request #4 — "let
+  winners run"). The live broker now *enforces* stops and targets automatically
+  each trade cycle instead of relying on the agent to close manually, and a
+  trade can carry a **trailing stop** that ratchets in its favor as price moves:
+  - `place_trade(..., trail_atr_mult=2.0)` trails 2×ATR behind price, or
+    `trail_pct=1.5` trails 1.5% behind. The stop only ever tightens toward
+    price (never loosens) and auto-closes when hit — so a clean trend trade can
+    run well past a fixed target while the open gain stays protected.
+  - New `PaperBroker.manage_positions(quotes, atr_map)` runs at the top of every
+    trade cycle (before the agent), ratcheting trails and auto-executing
+    stops/targets. Trades close with reason `auto_stop` / `auto_target`.
+  - `trail_atr_mult` / `trail_pct` persist on the position (new DB columns) and
+    survive restarts. The dashboard marks a trailing stop with a ⤴ glyph.
+  - Honest limitation: management runs at trade-cycle granularity (not
+    intrabar), so a level breached between cycles fills at the next cycle's mark
+    — real between-cycle gap risk remains. *Scale-out / partial exits (sell ½ at
+    +1R, move to breakeven) are deferred to a follow-up — this v1 is the
+    trailing-stop + auto-bracket half of the request.*
+
+### Fixed
+- **`trend_day` flag no longer fires on a single mover** (dev request #5). It was
+  flipping TRUE whenever any one name ran with ADX≥30, so a lone laggard made the
+  whole tape look like a trend day even with SPY ranging. `trend_day` now
+  reflects the INDEX itself trending — SPY's own ADX14 ≥ ~22 **and** its EMA
+  trend agreeing with its direction. Big movers and breadth are reported as
+  separate signals (a lone mover can't fake it). Also exposes `spy_adx_slope` /
+  `spy_adx_rising` (and per-symbol `adx_slope`) so desks can tell an emerging
+  trend from a decaying one — the morning-window edge they flagged.
+
+---
+
 ## [6.11.0] — 2026-06-17
 
 ### Changed

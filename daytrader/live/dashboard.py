@@ -691,7 +691,7 @@ async function loadTeam(name){
        el("td",{class: (p.side||"").toLowerCase()==="short"?"red":"green"}, (p.side||"").toUpperCase()),
        el("td",null,String(p.qty!=null?p.qty:"")),
        el("td",null,p.entry_price!=null?fmtMoney(p.entry_price):""),
-       el("td",null,p.stop!=null?fmtMoney(p.stop):"—"),
+       el("td",null,(p.stop!=null?fmtMoney(p.stop):"—") + ((p.trail_atr_mult||p.trail_pct)?" ⤴":"")),
        el("td",null,p.target!=null?fmtMoney(p.target):"—"),
        el("td",{class: hz==="day"?"gray":"green"}, hz),
        el("td",{class:"gray"},p.strategy||"")].forEach(c=>tr.appendChild(c));

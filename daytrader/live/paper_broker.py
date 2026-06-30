@@ -63,6 +63,8 @@ class PaperBroker:
                 "target": row["target"],
                 "rationale": row["rationale"] or "",
                 "horizon": (row["horizon"] if "horizon" in row.keys() and row["horizon"] else "day"),
+                "trail_atr_mult": (row["trail_atr_mult"] if "trail_atr_mult" in row.keys() else None),
+                "trail_pct": (row["trail_pct"] if "trail_pct" in row.keys() else None),
             }
 
         last = self.db.last_equity()
@@ -132,6 +134,24 @@ class PaperBroker:
     # ------------------------------------------------------------------ #
     # orders                                                              #
     # ------------------------------------------------------------------ #
+    def _persist_position(self, pos: dict) -> None:
+        """Write the in-memory position to the DB (used on open and on every
+        trailing-stop ratchet)."""
+        self.db.upsert_position({
+            "symbol": pos["symbol"],
+            "side": pos["side"].value if hasattr(pos["side"], "value") else pos["side"],
+            "qty": pos["qty"],
+            "entry_price": pos["entry_price"],
+            "entry_ts": pos.get("entry_ts"),
+            "strategy": pos.get("strategy"),
+            "stop": pos.get("stop"),
+            "target": pos.get("target"),
+            "rationale": pos.get("rationale", ""),
+            "horizon": pos.get("horizon", "day"),
+            "trail_atr_mult": pos.get("trail_atr_mult"),
+            "trail_pct": pos.get("trail_pct"),
+        })
+
     def open(
         self,
         symbol: str,
@@ -142,18 +162,25 @@ class PaperBroker:
         strategy: str = "agent",
         rationale: str = "",
         horizon: str = "day",
+        trail_atr_mult: Optional[float] = None,
+        trail_pct: Optional[float] = None,
     ) -> dict:
         """Market entry at the latest live price plus slippage.
 
         ``horizon`` is the intended hold: 'day' (default; flattened at the close),
         'swing' (held for days), or 'long' (held weeks+). Non-day positions
         survive the EOD flatten and ride their stops.
+
+        ``trail_atr_mult`` / ``trail_pct`` enable a server-side trailing stop that
+        :meth:`manage_positions` ratchets in the favorable direction each cycle.
         """
         side = Side(side)
         qty = float(qty)
         horizon = str(horizon).lower() if horizon else "day"
         if horizon not in ("day", "swing", "long"):
             horizon = "day"
+        trail_atr_mult = float(trail_atr_mult) if trail_atr_mult else None
+        trail_pct = float(trail_pct) if trail_pct else None
         if qty <= 0:
             return self._fail(symbol, side, qty, "qty must be positive")
         if symbol in self._positions:
@@ -193,23 +220,15 @@ class PaperBroker:
             "target": target,
             "rationale": rationale,
             "horizon": horizon,
+            "trail_atr_mult": trail_atr_mult,
+            "trail_pct": trail_pct,
             # carried for realized-pnl accounting at close:
             "commission_paid": commission,
             "slippage_paid": slip,
         }
-        self.db.upsert_position({
-            "symbol": symbol,
-            "side": side.value,
-            "qty": qty,
-            "entry_price": fill,
-            "entry_ts": entry_ts,
-            "strategy": strategy,
-            "stop": stop,
-            "target": target,
-            "rationale": rationale,
-            "horizon": horizon,
-        })
-        self.db.log_agent(strategy, "open", f"{side.value} {qty} {symbol} @ {fill:.4f} [{horizon}]")
+        self._persist_position(self._positions[symbol])
+        trail = f" trail={trail_atr_mult}xATR" if trail_atr_mult else (f" trail={trail_pct}%" if trail_pct else "")
+        self.db.log_agent(strategy, "open", f"{side.value} {qty} {symbol} @ {fill:.4f} [{horizon}]{trail}")
         self._persist_equity()
         return {
             "ok": True,
@@ -294,6 +313,75 @@ class PaperBroker:
             results.append(self.close(symbol, reason=reason))
         return results
 
+    def manage_positions(self, quote_map: Optional[dict] = None,
+                         atr_map: Optional[dict] = None) -> list[dict]:
+        """Server-side bracket management, run once per trade cycle.
+
+        For each open position: (1) ratchet a trailing stop in the favorable
+        direction (by ``trail_atr_mult`` * ATR, or ``trail_pct`` of price), then
+        (2) auto-close if the current mark has hit the stop or the target. This
+        lets winners run on a trailing stop and protects the open gain without
+        the agent having to babysit every cycle.
+
+        Granularity is the trade cycle (not intrabar), so fills are at the
+        current mark when a level is breached — honest about between-cycle gap
+        risk. Returns a list of {symbol, action, ...} events.
+        """
+        quote_map = {str(k).upper(): v for k, v in (quote_map or {}).items() if v is not None}
+        atr_map = {str(k).upper(): v for k, v in (atr_map or {}).items() if v is not None}
+        events: list[dict] = []
+        for sym in list(self._positions):
+            pos = self._positions.get(sym)
+            if pos is None:
+                continue
+            mark = quote_map.get(sym)
+            if mark is None:
+                try:
+                    mark = self.latest_price(sym)
+                except Exception:  # noqa: BLE001
+                    continue
+            mark = float(mark)
+            side = pos["side"]
+
+            # 1) ratchet trailing stop (only ever tightens toward price)
+            trail_dist = None
+            if pos.get("trail_atr_mult") and atr_map.get(sym):
+                trail_dist = float(pos["trail_atr_mult"]) * float(atr_map[sym])
+            elif pos.get("trail_pct"):
+                trail_dist = mark * float(pos["trail_pct"]) / 100.0
+            if trail_dist and trail_dist > 0:
+                cur = pos.get("stop")
+                if side == Side.LONG:
+                    new_stop = mark - trail_dist
+                    if cur is None or new_stop > cur:
+                        pos["stop"] = round(new_stop, 4)
+                        self._persist_position(pos)
+                        events.append({"symbol": sym, "action": "trail_stop", "stop": pos["stop"]})
+                else:
+                    new_stop = mark + trail_dist
+                    if cur is None or new_stop < cur:
+                        pos["stop"] = round(new_stop, 4)
+                        self._persist_position(pos)
+                        events.append({"symbol": sym, "action": "trail_stop", "stop": pos["stop"]})
+
+            # 2) auto-execute stop / target at the current mark
+            stop, target = pos.get("stop"), pos.get("target")
+            hit = None
+            if side == Side.LONG:
+                if stop is not None and mark <= stop:
+                    hit = "stop"
+                elif target is not None and mark >= target:
+                    hit = "target"
+            else:
+                if stop is not None and mark >= stop:
+                    hit = "stop"
+                elif target is not None and mark <= target:
+                    hit = "target"
+            if hit:
+                res = self.close(sym, reason=f"auto_{hit}")
+                events.append({"symbol": sym, "action": hit, "pnl": res.get("pnl")})
+        return events
+
     # ------------------------------------------------------------------ #
     # state / reporting                                                   #
     # ------------------------------------------------------------------ #
@@ -321,6 +409,8 @@ class PaperBroker:
                 "target": pos.get("target"),
                 "strategy": pos.get("strategy"),
                 "horizon": pos.get("horizon", "day"),
+                "trail_atr_mult": pos.get("trail_atr_mult"),
+                "trail_pct": pos.get("trail_pct"),
                 "rationale": pos.get("rationale", ""),
             })
         return out

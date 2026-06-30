@@ -36,7 +36,10 @@ def _latest_indicators(df: pd.DataFrame, live_price: float | None = None) -> dic
     ema21 = ind.ema(close, 21).iloc[-1]
     rsi = ind.rsi(close, 14).iloc[-1]
     atr = ind.atr(df, 14).iloc[-1]
-    adx = ind.adx(df, 14).iloc[-1]
+    adx_series = ind.adx(df, 14)
+    adx = adx_series.iloc[-1]
+    adx_prev = adx_series.iloc[-4] if len(adx_series) >= 4 else adx
+    adx_slope = float(adx) - float(adx_prev) if pd.notna(adx) and pd.notna(adx_prev) else 0.0
     vwap = ind.vwap_session(df).iloc[-1]
     bar_close = float(close.iloc[-1])
     price = float(live_price) if live_price is not None else bar_close
@@ -52,6 +55,8 @@ def _latest_indicators(df: pd.DataFrame, live_price: float | None = None) -> dic
         "atr14": round(float(atr), 2),
         "atr_pct": round(float(atr) / price * 100, 2) if price else 0.0,
         "adx14": round(float(adx), 1),
+        "adx_slope": round(adx_slope, 1),
+        "adx_rising": adx_slope > 0,
         "vwap": round(float(vwap), 2),
         "vs_vwap_pct": round((price / float(vwap) - 1) * 100, 2) if vwap else 0.0,
         "regime": Regime.TREND.value if adx >= 25 else Regime.RANGE.value,
@@ -132,9 +137,11 @@ def _add_relative_strength(
 def _market_summary(per_symbol: dict) -> dict:
     """Top-level read of the tape for fast regime/trend-day detection.
 
-    Flags a TREND DAY when breadth is one-sided and movers are running with
-    real ADX — the window the desks keep saying they miss. Built from values
-    already computed, so it's free.
+    ``trend_day`` reflects whether the BROAD TAPE (SPY) is actually trending —
+    SPY's own ADX is up AND its EMA trend agrees with its direction — NOT merely
+    whether some single name is running. Big movers and breadth are reported as
+    SEPARATE signals so a lone laggard with high ADX can't fake a trend day.
+    Built from values already computed, so it's free.
     """
     rows = [(s, v) for s, v in per_symbol.items() if v]
     if not rows:
@@ -149,28 +156,50 @@ def _market_summary(per_symbol: dict) -> dict:
         if abs(v.get("day_change_pct", 0)) >= 2.0 and (v.get("adx14") or 0) >= 30
     ]
     big_movers.sort(key=lambda r: abs(r.get("day_change_pct") or 0), reverse=True)
+
     spy_chg = spy.get("day_change_pct", 0) or 0
     spy_adx = spy.get("adx14", 0) or 0
-    trend_day = bool(big_movers) or (abs(spy_chg) >= 1.0 and spy_adx >= 25)
+    spy_adx_slope = spy.get("adx_slope", 0) or 0
+    spy_ema_trend = spy.get("ema_trend")
     direction = "up" if spy_chg > 0 else ("down" if spy_chg < 0 else "flat")
+    # Trend day = the INDEX itself is trending: real ADX, and EMA trend aligned
+    # with the day's direction. A single big mover does NOT make it a trend day.
+    spy_trending = (
+        spy_adx >= 22
+        and ((spy_ema_trend == "up" and spy_chg > 0)
+             or (spy_ema_trend == "down" and spy_chg < 0))
+    )
     # leaders / laggers by relative strength
     ranked = sorted((r for r in rows if r[1].get("rs_rank") is not None),
                     key=lambda r: r[1]["rs_rank"])
     leaders = [r[0] for r in ranked[:3]]
     laggers = [r[0] for r in ranked[-3:]][::-1]
+
+    if spy_trending:
+        adx_state = "rising" if spy_adx_slope > 0 else ("decaying" if spy_adx_slope < 0 else "flat")
+        note = (f"TREND DAY — SPY trending {direction} (ADX {spy_adx:.0f} {adx_state}, "
+                f"EMA {spy_ema_trend}). Favor with-trend entries early"
+                + (" while ADX is still rising." if spy_adx_slope > 0 else "; ADX is decaying, the window may be closing."))
+    else:
+        note = (f"RANGE/CHOP — SPY not trending (ADX {spy_adx:.0f}, EMA {spy_ema_trend}, "
+                f"{direction}). Be selective; treat single big movers as isolated, "
+                "not a market-wide trend.")
+        if big_movers:
+            note += f" Note {len(big_movers)} isolated mover(s) running on their own."
     return {
-        "trend_day": trend_day,
+        "trend_day": spy_trending,
+        "spy_trending": spy_trending,
         "spy_day_change_pct": round(float(spy_chg), 2),
         "spy_adx14": round(float(spy_adx), 1),
+        "spy_adx_slope": round(float(spy_adx_slope), 1),
+        "spy_adx_rising": spy_adx_slope > 0,
+        "spy_ema_trend": spy_ema_trend,
         "spy_direction": direction,
         "breadth": {"advancers": ups, "decliners": downs, "total": len(rows)},
         "big_movers": big_movers[:8],
         "rs_leaders": leaders,
         "rs_laggers": laggers,
-        "note": ("TREND DAY — one-sided breadth and movers with ADX>=30; "
-                 "favor with-trend entries early before ADX decays."
-                 if trend_day else
-                 "Range/chop tape — no strong one-sided movers; be selective."),
+        "note": note,
     }
 
 

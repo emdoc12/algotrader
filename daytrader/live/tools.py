@@ -28,6 +28,8 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
             strategy=inp.get("strategy", "agent"),
             rationale=inp.get("rationale", ""),
             horizon=inp.get("horizon", "day"),
+            trail_atr_mult=inp.get("trail_atr_mult"),
+            trail_pct=inp.get("trail_pct"),
         )
         db.log_agent("trader", "place_trade", str({k: inp.get(k) for k in ("symbol", "side", "qty", "horizon")}))
         return res
@@ -342,6 +344,8 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                     "strategy": {"type": "string", "description": "Strategy/setup name driving this trade"},
                     "rationale": {"type": "string", "description": "One-sentence reason for the trade"},
                     "horizon": {"type": "string", "enum": ["day", "swing", "long"], "description": "Intended hold. Default 'day' (flattened at close). 'swing'/'long' survive the close. Prefer 'day' unless the setup genuinely warrants more time."},
+                    "trail_atr_mult": {"type": "number", "description": "Optional trailing stop = this many ATRs behind price; ratchets in your favor each cycle and auto-closes when hit. Use to let a winner run instead of a fixed target."},
+                    "trail_pct": {"type": "number", "description": "Optional trailing stop as a percent of price (alternative to trail_atr_mult). E.g. 1.5 = trail 1.5%."},
                 },
                 "required": ["symbol", "side", "qty", "stop", "target", "rationale"],
             },

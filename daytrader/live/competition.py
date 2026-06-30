@@ -266,6 +266,8 @@ class Competition:
         # broker fills at the exact prices the agent reasoned over (no more
         # feed-vs-broker drift flipping winners into losers).
         cycle_quotes = dict(market.get("quotes") or {})
+        atr_map = {sym: m.get("atr14") for sym, m in (market.get("market") or {}).items()
+                   if m.get("atr14") is not None}
         for t in self.teams:
             if t.halted:
                 continue
@@ -273,6 +275,9 @@ class Competition:
             if not t.halted:
                 t.broker.set_cycle_quotes(cycle_quotes)
                 try:
+                    # Enforce server-side brackets first (trailing stops ratchet,
+                    # stops/targets auto-execute), THEN let the agent decide.
+                    t.broker.manage_positions(cycle_quotes, atr_map)
                     res = t.desk.trade_cycle(with_account(market, t.broker))
                     if getattr(res, "error", None):
                         _notify(f"⚠️ Team {t.name} ({getattr(t.provider,'model','?')}) cycle error: {res.error}",
