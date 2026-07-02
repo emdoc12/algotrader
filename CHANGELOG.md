@@ -9,6 +9,16 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.15.1] — 2026-07-02
+
+### Fixed
+- **Connection test no longer false-FAILs reasoning models.** GLM-5.2 and
+  Kimi K2.6 returned "(empty reply)" because the health ping's `max_tokens=20`
+  was consumed by the model's reasoning before any text was produced. The ping
+  now uses 512 tokens, and a clean round-trip with no error/refusal counts as
+  connected even if the reply text is empty (it still proves the key + endpoint
+  + model resolve). Real trading was unaffected — it uses full token budgets.
+
 ## [6.15.0] — 2026-07-02
 
 ### Added

@@ -28,16 +28,24 @@ def check_providers() -> list[dict]:
                          "ok": False, "latency_ms": 0, "detail": "no API key set"})
             continue
         t0 = time.time()
+        # 512 tokens (not 20) so reasoning models — GLM, Kimi, DeepSeek — have
+        # room to finish thinking and emit a reply on a one-line ping.
         res = provider.run_loop(PING_SYSTEM, tools=[], handlers={},
-                                user_message=PING_USER, max_tokens=20, max_iterations=1)
+                                user_message=PING_USER, max_tokens=512, max_iterations=1)
         ms = int((time.time() - t0) * 1000)
-        ok = bool(res.text) and not res.error and not res.refused
+        # A clean round-trip (no error, no refusal) proves the key + endpoint +
+        # model all resolve — that's what this test confirms. An empty reply from
+        # a working endpoint (a reasoning model that spent the budget thinking) is
+        # still a successful connection, not a failure.
+        ok = not res.error and not res.refused
         if res.error:
             detail = res.error
         elif res.refused:
             detail = "refused"
+        elif res.text and res.text.strip():
+            detail = res.text.strip()[:80]
         else:
-            detail = (res.text or "").strip()[:80] or "(empty reply)"
+            detail = "connected (no text — reasoning model on a 1-line ping)"
         rows.append({"team": name, "model": model, "configured": True,
                      "ok": ok, "latency_ms": ms, "detail": detail})
     return rows
