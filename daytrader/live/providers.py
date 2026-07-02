@@ -317,19 +317,19 @@ def default_team_providers() -> dict[str, BaseProvider]:
         ),
         "openai": OpenAICompatibleProvider(
             name="openai",
-            model=os.environ.get("OPENAI_MODEL", "gpt-5.1"),
+            model=os.environ.get("OPENAI_MODEL", "gpt-5.5"),
             base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
             api_key_env="OPENAI_API_KEY",
         ),
         "grok": OpenAICompatibleProvider(
             name="grok",
-            model=os.environ.get("XAI_MODEL", "grok-4"),
+            model=os.environ.get("XAI_MODEL", "grok-4.3"),
             base_url=os.environ.get("XAI_BASE_URL", "https://api.x.ai/v1"),
             api_key_env="XAI_API_KEY",
         ),
         "qwen": OpenAICompatibleProvider(
             name="qwen",
-            model=os.environ.get("QWEN_MODEL", "qwen3.6"),
+            model=os.environ.get("QWEN_MODEL", "qwen3.7-max"),
             base_url=os.environ.get(
                 "QWEN_BASE_URL",
                 "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
