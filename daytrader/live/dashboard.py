@@ -120,6 +120,38 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # noqa: D401, N802
         pass
 
+    # -- security helpers ---------------------------------------------- #
+    def _token_ok(self) -> bool:
+        """When DASHBOARD_TOKEN is set, require it on /api/* requests (header or
+        ?token=). Unset (default) = open, so existing deployments don't break."""
+        import os
+        tok = os.environ.get("DASHBOARD_TOKEN", "")
+        if not tok:
+            return True
+        got = self.headers.get("X-Dashboard-Token", "")
+        if not got:
+            got = urllib.parse.parse_qs(
+                urllib.parse.urlparse(self.path).query).get("token", [""])[0]
+        import hmac
+        return hmac.compare_digest(str(got), str(tok))
+
+    def _origin_ok(self) -> bool:
+        """Block cross-origin (CSRF) POSTs: if an Origin header is present it must
+        match Host. Absent Origin (curl / same-origin no-CORS) is allowed."""
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True
+        try:
+            return urllib.parse.urlparse(origin).netloc == self.headers.get("Host", "")
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _read_body(self, cap: int = 262144) -> bytes:
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0:
+            return b""
+        return self.rfile.read(min(length, cap))
+
     # -- low-level send helpers ----------------------------------------- #
     def _send(self, code: int, body: bytes, ctype: str) -> None:
         self.send_response(code)
@@ -145,15 +177,14 @@ class _Handler(BaseHTTPRequestHandler):
             if path == "/":
                 self._html(_render_page())
                 return
+            if path.startswith("/api/") and not self._token_ok():
+                self._json({"error": "unauthorized"}, 401)
+                return
             if path == "/api/overview":
                 self._json(overview_payload())
                 return
             if path == "/api/settings":
                 self._json(settings.masked_status())
-                return
-            if path == "/api/check":
-                from daytrader.live.healthcheck import check_providers
-                self._json({"results": check_providers()})
                 return
             if path == "/api/health":
                 from daytrader.live.healthcheck import health_snapshot
@@ -174,11 +205,22 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         try:
             path = urllib.parse.urlparse(self.path).path
+            # CSRF + optional-token gate on every mutating / paid endpoint.
+            if not self._origin_ok():
+                self._json({"error": "cross-origin request refused"}, 403)
+                return
+            if not self._token_ok():
+                self._json({"error": "unauthorized"}, 401)
+                return
+            if path == "/api/check":
+                # Live provider pings — moved to POST so a cross-origin <img>/GET
+                # can't trigger paid API calls (drive-by cost-spend).
+                from daytrader.live.healthcheck import check_providers
+                self._json({"results": check_providers()})
+                return
             if path == "/api/settings":
-                length = int(self.headers.get("Content-Length") or 0)
-                raw = self.rfile.read(length) if length else b""
                 try:
-                    body = json.loads(raw.decode("utf-8")) if raw else {}
+                    body = json.loads(self._read_body().decode("utf-8") or "{}")
                 except Exception:  # noqa: BLE001
                     body = {}
                 if not isinstance(body, dict):
@@ -186,10 +228,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(settings.save(body))
                 return
             if path == "/api/devrequest/close":
-                length = int(self.headers.get("Content-Length") or 0)
-                raw = self.rfile.read(length) if length else b""
                 try:
-                    data = json.loads(raw.decode("utf-8")) if raw else {}
+                    data = json.loads(self._read_body().decode("utf-8") or "{}")
                 except Exception:  # noqa: BLE001
                     data = {}
                 self._json(close_dev_request(
@@ -204,10 +244,8 @@ class _Handler(BaseHTTPRequestHandler):
                 if name not in team_names():
                     self._json({"ok": False, "reply": "", "error": f"unknown team {name!r}"}, 404)
                     return
-                length = int(self.headers.get("Content-Length") or 0)
-                raw = self.rfile.read(length) if length else b""
                 try:
-                    data = json.loads(raw.decode("utf-8")) if raw else {}
+                    data = json.loads(self._read_body().decode("utf-8") or "{}")
                 except Exception:  # noqa: BLE001
                     data = {}
                 message = (data.get("message") or "").strip()
@@ -258,7 +296,9 @@ def _make_server(port: int = 8787) -> ThreadingHTTPServer:
     Used by both ``serve()`` and the self-test. Building the server does NOT
     start the trading loop, so it is cheap and side-effect-free.
     """
-    return ThreadingHTTPServer(("0.0.0.0", port), _Handler)
+    import os
+    bind = os.environ.get("DASHBOARD_BIND", "0.0.0.0")
+    return ThreadingHTTPServer((bind, port), _Handler)
 
 
 def serve(port: int = 8787) -> None:
@@ -453,7 +493,19 @@ function fmtWhen(ts){
   else rel = Math.floor(diff/86400)+"d ago";
   return stamp + " (" + rel + ")";
 }
-async function getJSON(url){ const r = await fetch(url, {cache:"no-store"}); return await r.json(); }
+function safeUrl(u){ u = String(u==null?"":u); return /^https?:\/\//i.test(u) ? u : null; }
+function dashToken(){ try{ return localStorage.getItem("dashToken")||""; }catch(e){ return ""; } }
+function authHeaders(extra){ const h = Object.assign({}, extra||{}); const t = dashToken(); if(t) h["X-Dashboard-Token"]=t; return h; }
+async function apiFetch(url, opts){
+  opts = opts || {}; opts.cache = "no-store"; opts.headers = authHeaders(opts.headers);
+  let r = await fetch(url, opts);
+  if(r.status === 401){
+    const t = prompt("This dashboard requires a token (DASHBOARD_TOKEN). Enter it:");
+    if(t){ try{ localStorage.setItem("dashToken", t); }catch(e){} opts.headers = authHeaders(opts.headers); r = await fetch(url, opts); }
+  }
+  return r;
+}
+async function getJSON(url){ const r = await apiFetch(url); return await r.json(); }
 
 // ---- tabs --------------------------------------------------------------- //
 function buildTabs(){
@@ -782,9 +834,9 @@ async function loadTeam(name){
       item.appendChild(meta);
       const title = el("div",{class:"body"});
       title.appendChild(document.createTextNode(d.title||"(untitled)"));
-      if(d.url){
+      if(safeUrl(d.url)){
         title.appendChild(document.createTextNode("  "));
-        title.appendChild(el("a",{href:d.url, target:"_blank", rel:"noopener"}, "link"));
+        title.appendChild(el("a",{href:safeUrl(d.url), target:"_blank", rel:"noopener"}, "link"));
       }
       item.appendChild(title);
       if(d.body) item.appendChild(el("div",{class:"muted", style:"font-size:12px;margin-top:3px;white-space:pre-wrap"}, d.body));
@@ -851,7 +903,7 @@ async function sendChat(name){
   input.value = "";
 
   try{
-    const r = await fetch("/api/team/" + encodeURIComponent(name) + "/chat", {
+    const r = await apiFetch("/api/team/" + encodeURIComponent(name) + "/chat", {
       method:"POST",
       headers:{"Content-Type":"application/json"},
       body: JSON.stringify({message: msg}),
@@ -881,7 +933,7 @@ async function sendChat(name){
 async function closeDevReq(team, id){
   if(id == null) return;
   try{
-    await fetch("/api/devrequest/close", {
+    await apiFetch("/api/devrequest/close", {
       method:"POST",
       headers:{"Content-Type":"application/json"},
       body: JSON.stringify({team: team, id: id, status: "closed",
@@ -981,7 +1033,7 @@ async function loadHealth(){
     const row = el("div", {style:"padding:6px 0;border-bottom:1px solid var(--line);font-size:13px;display:flex;align-items:center;justify-content:space-between;gap:10px"});
     const left = el("div");
     left.appendChild(el("span",{class:"muted"}, "["+d.team+" #"+(d.id!=null?d.id:"?")+"] "));
-    if(d.url) left.appendChild(el("a",{href:d.url,target:"_blank",style:"color:var(--green)"}, d.title||"(issue)"));
+    if(safeUrl(d.url)) left.appendChild(el("a",{href:safeUrl(d.url),target:"_blank",style:"color:var(--green)"}, d.title||"(issue)"));
     else left.appendChild(el("span", null, d.title||"(request)"));
     if(d.ts) left.appendChild(el("span",{class:"gray", style:"font-size:11px;margin-left:8px"}, fmtWhen(d.ts)));
     row.appendChild(left);
@@ -1154,7 +1206,7 @@ async function testConnections(btnId, outId){
   if(btn){ btn.disabled = true; btn.textContent = "Testing… (a few seconds)"; }
   if(out) out.innerHTML = "";
   try{
-    const r = await getJSON("/api/check");
+    const r = await (await apiFetch("/api/check", {method:"POST"})).json();
     const rows = (r && r.results) || [];
     const tbl = el("table", {style:"width:100%;border-collapse:collapse;font-size:13px"});
     const hdr = el("tr");
@@ -1198,7 +1250,7 @@ async function saveSettings(){
   });
   if(btn) btn.disabled = true;
   try{
-    const r = await fetch("/api/settings", {
+    const r = await apiFetch("/api/settings", {
       method:"POST",
       headers:{"Content-Type":"application/json"},
       body: JSON.stringify(updates),

@@ -35,6 +35,40 @@ PLAIN_KEYS = [
 ]
 MANAGED_KEYS = SECRET_KEYS + PLAIN_KEYS
 
+# Provider hosts a *_BASE_URL may legitimately point at. Anything else is
+# rejected, because a base URL is where the provider API KEY gets sent — an
+# attacker who could set it to their own host would exfiltrate the key. Private
+# / loopback addresses are allowed for self-hosted OpenAI-compatible servers.
+_ALLOWED_BASE_HOSTS = (
+    "api.openai.com", "api.x.ai", "api.deepseek.com", "api.z.ai",
+    "api.moonshot.ai", "api.moonshot.cn", "api.together.xyz", "api.fireworks.ai",
+    "api.groq.com", "api.mistral.ai", "openrouter.ai",
+    "dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com", "dashscope-us.aliyuncs.com",
+)
+
+
+def _base_url_allowed(url: str) -> bool:
+    from urllib.parse import urlparse
+    import ipaddress
+    try:
+        u = urlparse(str(url))
+    except Exception:  # noqa: BLE001
+        return False
+    if u.scheme not in ("http", "https"):
+        return False
+    host = (u.hostname or "").lower()
+    if not host:
+        return False
+    if any(host == h or host.endswith("." + h) for h in _ALLOWED_BASE_HOSTS):
+        return True
+    if host in ("localhost", "host.docker.internal"):
+        return True
+    try:  # allow private/loopback IPs for a self-hosted model server
+        ip = ipaddress.ip_address(host)
+        return ip.is_private or ip.is_loopback
+    except ValueError:
+        return False
+
 
 def load() -> dict:
     try:
@@ -56,6 +90,7 @@ def save(updates: dict) -> dict:
     """Merge non-empty updates into the store and apply them. Empty string for a
     secret means 'leave unchanged'; the literal '__CLEAR__' deletes a key."""
     data = load()
+    rejected = []
     for k, v in updates.items():
         if k not in MANAGED_KEYS:
             continue
@@ -63,6 +98,9 @@ def save(updates: dict) -> dict:
             data.pop(k, None)
             os.environ.pop(k, None)
         elif v not in (None, ""):
+            if k.endswith("_BASE_URL") and not _base_url_allowed(v):
+                rejected.append(k)
+                continue
             data[k] = str(v)
             os.environ[k] = str(v)
     Path(_DATA_DIR).mkdir(parents=True, exist_ok=True)
@@ -71,7 +109,13 @@ def save(updates: dict) -> dict:
         os.chmod(SETTINGS_PATH, 0o600)
     except OSError:
         pass
-    return masked_status()
+    status = masked_status()
+    if rejected:
+        status = dict(status)
+        status["error"] = ("Rejected base-URL override(s) for a non-provider host: "
+                           + ", ".join(rejected) + ". Allowed: known provider domains or a "
+                           "private/localhost address for a self-hosted model.")
+    return status
 
 
 def _mask(val: str) -> str:
