@@ -9,6 +9,79 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.14.0] — 2026-07-02
+
+Large hardening release from a full multi-agent code review. Money-correctness,
+security, and scheduler robustness, plus a new dev-request feature.
+
+### Security
+- **Dashboard CSRF + optional auth.** All POST endpoints now reject cross-origin
+  requests (Origin check), so a malicious web page can no longer drive-by write
+  API keys, spend tokens, or mutate state. Set `DASHBOARD_TOKEN` to require a
+  token on every `/api/*` call (the page prompts once and stores it). `/api/check`
+  (paid provider pings) moved to POST so an `<img>`/GET can't trigger it.
+  `DASHBOARD_BIND` lets you bind to `127.0.0.1`; default stays `0.0.0.0`.
+- **Base-URL allowlist.** `*_BASE_URL` settings are validated against known
+  provider hosts (or a private/localhost address for self-hosting), closing the
+  "point the API at an attacker and exfiltrate the key" vector.
+- **SSRF guard on `web_fetch`.** Agent-supplied URLs are blocked from resolving
+  to private / loopback / link-local / metadata addresses, redirects are
+  re-validated, and every response is byte-capped (also prevents OOM).
+- Dashboard sanitizes agent-supplied dev-request links (only `http(s)://`),
+  caps POST body size, and stops iOS text auto-scaling.
+
+### Fixed — money correctness
+- **Risk rails in the broker.** `place_trade`/`open()` now reject: orders with no
+  stop, a stop/target on the wrong side of entry, per-trade risk over
+  `MAX_TRADE_RISK_PCT` (default 2%) of equity, and any order breaching a gross
+  exposure cap of `MAX_GROSS_EXPOSURE`× equity (default 2×). This closes the
+  unlimited-short / unlimited-leverage hole where one LLM order could take an
+  account to hundreds of × leverage.
+- **`side` parsing.** `buy`/`sell` (and long/short) are mapped explicitly;
+  unknown values are rejected instead of silently becoming a SHORT.
+- **Halted teams still get bracket enforcement.** A tripped circuit breaker no
+  longer disables server-side stops for surviving swing/long positions.
+- **Trailing stops keep working off-watchlist.** Held symbols dropped from the
+  day's scan now get quote+ATR data so their trailing stops keep ratcheting.
+- **`gap_pct` look-ahead removed** from the custom-strategy DSL (it leaked the
+  current day's close into earlier bars — a fake-edge generator). Added a
+  causality regression test suite (`tests/test_causality.py`).
+- **Backtest engine** no longer holds an entry filled on a day's last bar
+  overnight (a strategy could otherwise harvest gaps live trading can't realize).
+
+### Fixed — scheduler & restart robustness
+- **Deadline-based EOD.** Flatten + review now trigger on `time ≥ 15:50` even if
+  a cycle overran 16:00; a failed close is retried and the Reviewer runs exactly
+  once per day. No new (long) trade cycle starts after 15:30.
+- **Persisted risk/schedule state** (`day_start_equity`, `halted`, plan/review
+  done) keyed by ET date, so a mid-day restart can't reset the loss-limit
+  baseline, un-halt a team, or double-run the plan/review.
+- **Drawdown peak** recovered as the historical max on restart (was resetting).
+- **Market-holiday calendar** — no more full API-spend "trading" days on closed
+  sessions (static NYSE table).
+
+### Fixed — correctness / cleanup
+- **`profit_factor`** is `null` (rendered `∞`) when there are no losing trades,
+  everywhere, instead of "PF = gross-profit-in-dollars" — so the Reviewer stops
+  over-weighting an all-wins fluke.
+- **strategy-lab param validation** — unknown `strategy_params` now error instead
+  of silently backtesting the default config; `HH:MM` strings are coerced;
+  applied params are echoed. Custom configs reject `max_entries_per_day ≤ 0` and
+  bad/inverted time windows.
+- Tool results are byte-capped before re-entering context; max-iteration
+  exhaustion is flagged as an error. `WATCHLIST_SIZE` env var now works. SQLite
+  `busy_timeout` set. Removed dead `runner.py` + `status` CLI; fixed stale `$10k`
+  docs; Dockerfile header corrected to port 3737 / $25k; added a `HEALTHCHECK`.
+
+### Added
+- **`recent_exits` + `session_realized_pnl` in the snapshot** (dev request #6).
+  The on-cycle Trader now sees when a server-side stop/target fired since its
+  last cycle (symbol, exit_reason, pnl, time) and the day's true realized P&L —
+  fixing the leak where a stopped-out loss looked identical to a banked winner
+  and the trader ran on a stale mental model of the book.
+
+---
+
 ## [6.13.0] — 2026-06-30
 
 ### Added

@@ -134,6 +134,10 @@ def _trader(broker, db, provider=None) -> Agent:
 
 YOUR ROLE: Trader. This is an intraday decision cycle. Using the live snapshot, the \
 day's plan in the journal, the fresh signals, your current positions, and performance:
+0. FIRST check 'recent_exits' and 'session_realized_pnl' in the snapshot — the system \
+may have auto-closed a position on its stop or target since your last cycle. Do NOT \
+assume a now-flat book means a winner was banked; a position may have been STOPPED OUT \
+for a loss. Update your read of the day's real P&L from these fields before deciding.
 1. Manage open positions first — close anything whose thesis is invalidated or that \
 should be taken off; trust your stops otherwise.
 2. Then consider NEW entries from the fresh signals that fit the plan and the SPY \

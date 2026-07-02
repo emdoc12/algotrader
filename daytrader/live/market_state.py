@@ -13,8 +13,11 @@ re-implementation.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import pandas as pd
+
+ET_ZONE = ZoneInfo("America/New_York")
 
 from daytrader.core import indicators as ind
 from daytrader.data import loader, quotes
@@ -311,6 +314,33 @@ def with_account(market_snap: dict, broker) -> dict:
             pass
         try:
             out["open_dev_requests"] = db.open_dev_requests()
+        except Exception:  # noqa: BLE001
+            pass
+        # This session's exits + realized P&L, so the on-cycle trader SEES when a
+        # server-side stop/target fired (a flat book alone can't tell a banked
+        # target from a stopped-out loss). Addresses the "traded on a stale mental
+        # model of the book" P&L leak.
+        try:
+            from daytrader.live import analytics as _an
+            today_et = datetime.now(ET_ZONE).date()
+            exits, realized = [], 0.0
+            for tr in db.recent_trades(limit=100):
+                ex = _an._to_et(tr.get("exit_ts"))
+                if ex is None or ex.date() != today_et:
+                    continue
+                pnl = tr.get("pnl")
+                if pnl is not None:
+                    realized += float(pnl)
+                if len(exits) < 12:
+                    exits.append({
+                        "symbol": tr.get("symbol"),
+                        "side": tr.get("side"),
+                        "exit_reason": tr.get("exit_reason"),
+                        "pnl": round(float(pnl), 2) if pnl is not None else None,
+                        "exit_ts": tr.get("exit_ts"),
+                    })
+            out["recent_exits"] = exits            # newest first, this session
+            out["session_realized_pnl"] = round(realized, 2)
         except Exception:  # noqa: BLE001
             pass
     return out
