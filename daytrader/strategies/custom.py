@@ -156,9 +156,15 @@ class CustomRuleStrategy(Strategy):
         atr = ind.atr(df, 14)
         prior_close = close.shift(1)
         day = df.index.normalize()
-        day_open = close.groupby(day).transform("first")
-        # opening bar of each day for gap calc = first bar's open vs prior close
-        prev_day_close = close.groupby(day).transform("last").shift(1)
+        # True session open = the first bar's OPEN (not its close).
+        day_open = df["open"].groupby(day).transform("first")
+        # Prior SESSION's close, broadcast to every bar of the current day.
+        # (Do NOT use transform("last").shift(1): that shifts by one ROW, so
+        # every bar after a day's first would read TODAY's close — a look-ahead
+        # leak. Group to one value per day, shift by one DAY, then map back.)
+        last_by_day = close.groupby(day).last().shift(1)
+        prev_day_close = pd.Series(
+            np.asarray(day.map(last_by_day), dtype="float64"), index=df.index)
         feats = {
             "price": close, "open": df["open"], "high": high, "low": low,
             "volume": df["volume"],

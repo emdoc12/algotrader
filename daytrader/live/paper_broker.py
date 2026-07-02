@@ -23,12 +23,20 @@ PAPER mode only -- no real orders are ever sent.
 """
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 from daytrader.backtest.engine import CostModel
 from daytrader.core.types import Side
 from daytrader.data import quotes
 from daytrader.live.db import LiveDB, _now_iso
+
+# Risk rails that protect the paper account from oversized LLM orders. These are
+# hard broker-level caps (the mission guides desks to size far tighter); an order
+# breaching them is rejected with an actionable message the agent can act on.
+MAX_TRADE_RISK_PCT = float(os.environ.get("MAX_TRADE_RISK_PCT", "2.0"))   # entry→stop loss ≤ this % of equity
+MAX_GROSS_EXPOSURE = float(os.environ.get("MAX_GROSS_EXPOSURE", "2.0"))   # Σ|position notional| ≤ this × equity
+REQUIRE_STOP = os.environ.get("REQUIRE_STOP", "1") not in ("0", "false", "False", "")
 
 
 class PaperBroker:
@@ -195,6 +203,42 @@ class PaperBroker:
         notional = fill * qty
         commission = self._commission(qty)
         slip = abs(fill - raw) * qty
+
+        # ---- risk rails (reject oversized / unsafe orders) ------------------
+        if REQUIRE_STOP and stop is None:
+            return self._fail(symbol, side, qty,
+                              "a protective stop is required on every entry")
+        if stop is not None:
+            if side == Side.LONG and stop >= fill:
+                return self._fail(symbol, side, qty,
+                                  f"long stop {stop:.2f} must be BELOW entry {fill:.2f}")
+            if side == Side.SHORT and stop <= fill:
+                return self._fail(symbol, side, qty,
+                                  f"short stop {stop:.2f} must be ABOVE entry {fill:.2f}")
+        if target is not None:
+            if side == Side.LONG and target <= fill:
+                return self._fail(symbol, side, qty,
+                                  f"long target {target:.2f} must be ABOVE entry {fill:.2f}")
+            if side == Side.SHORT and target >= fill:
+                return self._fail(symbol, side, qty,
+                                  f"short target {target:.2f} must be BELOW entry {fill:.2f}")
+        eq = self.equity()
+        if stop is not None and eq > 0:
+            risk_amt = abs(fill - stop) * qty
+            cap = MAX_TRADE_RISK_PCT / 100.0 * eq
+            if risk_amt > cap:
+                return self._fail(
+                    symbol, side, qty,
+                    f"trade risk ${risk_amt:,.0f} exceeds the {MAX_TRADE_RISK_PCT:.1f}% cap "
+                    f"(${cap:,.0f}); reduce qty or tighten the stop")
+        if eq > 0:
+            gross = sum(abs(p["qty"]) * self._mark(s, p["entry_price"])
+                        for s, p in self._positions.items())
+            if (gross + notional) > MAX_GROSS_EXPOSURE * eq:
+                return self._fail(
+                    symbol, side, qty,
+                    f"gross exposure ${gross + notional:,.0f} would exceed "
+                    f"{MAX_GROSS_EXPOSURE:.1f}x equity (${MAX_GROSS_EXPOSURE * eq:,.0f}); reduce size")
 
         if side == Side.LONG and (notional + commission) > self._cash:
             return self._fail(

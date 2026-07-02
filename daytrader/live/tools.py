@@ -14,8 +14,17 @@ from daytrader.live.dev_requests import file_dev_request
 def build_tools(broker, db) -> tuple[list[dict], dict]:
     """Return (tool_schemas, handlers) bound to a broker + db."""
 
+    _LONG_WORDS = {"long", "buy", "b", "bull", "bullish"}
+    _SHORT_WORDS = {"short", "sell", "s", "bear", "bearish"}
+
     def place_trade(inp: dict) -> dict:
-        side = Side.LONG if str(inp.get("side", "long")).lower() == "long" else Side.SHORT
+        raw_side = str(inp.get("side", "")).strip().lower()
+        if raw_side in _LONG_WORDS:
+            side = Side.LONG
+        elif raw_side in _SHORT_WORDS:
+            side = Side.SHORT
+        else:
+            return {"ok": False, "error": f"side must be long or short (got {inp.get('side')!r})"}
         try:
             qty = float(inp["qty"])
         except (KeyError, TypeError, ValueError):

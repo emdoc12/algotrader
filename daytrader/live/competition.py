@@ -260,32 +260,62 @@ class Competition:
         for t in self.teams:
             t.desk.plan_day(with_account(market, t.broker))
 
+    @staticmethod
+    def _held_symbol_data(team, base_quotes: dict, base_atr: dict):
+        """Extend the cycle's quote + ATR maps with entries for any HELD symbol
+        that fell off today's scanned watchlist, so trailing stops keep
+        ratcheting on swing/long holds instead of silently freezing."""
+        q, a = dict(base_quotes), dict(base_atr)
+        try:
+            held = [p.get("symbol") for p in team.broker.positions()]
+        except Exception:  # noqa: BLE001
+            held = []
+        missing = [s for s in held if s and (s not in q or s not in a)]
+        if not missing:
+            return q, a
+        from daytrader.data import loader as _loader
+        from daytrader.core import indicators as _ind
+        for sym in missing:
+            try:
+                if sym not in q:
+                    from daytrader.data import quotes as _quotes
+                    px = _quotes.get_quote(sym)
+                    if px is not None:
+                        q[sym] = px
+                if sym not in a:
+                    df = _loader.load(sym, interval="5m", max_age_hours=0.1)
+                    if df is not None and len(df) >= 15:
+                        a[sym] = float(_ind.atr(df, 14).iloc[-1])
+            except Exception:  # noqa: BLE001
+                continue
+        return q, a
+
     def trade_all(self):
         market = market_only()
         # Pin the snapshot's quote map onto each broker for this cycle so the
         # broker fills at the exact prices the agent reasoned over (no more
         # feed-vs-broker drift flipping winners into losers).
         cycle_quotes = dict(market.get("quotes") or {})
-        atr_map = {sym: m.get("atr14") for sym, m in (market.get("market") or {}).items()
-                   if m.get("atr14") is not None}
+        base_atr = {sym: m.get("atr14") for sym, m in (market.get("market") or {}).items()
+                    if m.get("atr14") is not None}
         for t in self.teams:
-            if t.halted:
-                continue
-            self._risk_check(t)
-            if not t.halted:
-                t.broker.set_cycle_quotes(cycle_quotes)
-                try:
-                    # Enforce server-side brackets first (trailing stops ratchet,
-                    # stops/targets auto-execute), THEN let the agent decide.
-                    t.broker.manage_positions(cycle_quotes, atr_map)
+            self._risk_check(t)  # may halt + flatten this team's DAY trades
+            # Per-team maps that also cover held-outside-scan symbols.
+            q, a = self._held_symbol_data(t, cycle_quotes, base_atr)
+            t.broker.set_cycle_quotes(q)
+            try:
+                # Enforce server-side brackets EVERY cycle, even for halted teams
+                # — their surviving swing/long holds still need their stops run.
+                t.broker.manage_positions(q, a)
+                if not t.halted:
                     res = t.desk.trade_cycle(with_account(market, t.broker))
                     if getattr(res, "error", None):
                         _notify(f"⚠️ Team {t.name} ({getattr(t.provider,'model','?')}) cycle error: {res.error}",
                                 throttle_key=f"err_{t.name}")
-                finally:
-                    t.broker.set_cycle_quotes(None)
-                t.broker.db.record_equity(t.broker.cash(), t.broker.equity(),
-                                          len(t.broker.positions()), t.broker.drawdown_pct())
+            finally:
+                t.broker.set_cycle_quotes(None)
+            t.broker.db.record_equity(t.broker.cash(), t.broker.equity(),
+                                      len(t.broker.positions()), t.broker.drawdown_pct())
 
     def review_all(self):
         market = market_only()
