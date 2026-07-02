@@ -41,6 +41,18 @@ except Exception:  # pragma: no cover - defensive fallback
 
 Handlers = dict[str, Callable[[dict], dict]]
 
+# Cap each tool result before it re-enters the model context. An oversized
+# payload (e.g. a huge news/flow response) would otherwise inflate every later
+# loop iteration and can 400 the request mid-cycle.
+_TOOL_RESULT_CAP = int(os.environ.get("TOOL_RESULT_MAX_CHARS", "48000"))
+
+
+def _encode_result(result) -> str:
+    s = json.dumps(result, default=str)
+    if len(s) > _TOOL_RESULT_CAP:
+        return s[:_TOOL_RESULT_CAP] + ' …[truncated]"'
+    return s
+
 
 def _run_handler(handlers: Handlers, name: str, inp: dict) -> dict:
     """Execute a tool handler, mapping unknown tools / exceptions to error dicts."""
@@ -134,11 +146,12 @@ class AnthropicProvider(BaseProvider):
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
-                        "content": json.dumps(result, default=str),
+                        "content": _encode_result(result),
                     })
                 messages.append({"role": "user", "content": tool_results})
 
-            return AgentResult(text="(max iterations reached)", actions=actions)
+            return AgentResult(text="(max iterations reached)", actions=actions,
+                               error="max_iterations_reached")
         except Exception as e:  # noqa: BLE001 - network / SDK / missing-key variability
             return AgentResult(text="", actions=actions, error=repr(e))
 
@@ -268,10 +281,11 @@ class OpenAICompatibleProvider(BaseProvider):
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
-                        "content": json.dumps(result, default=str),
+                        "content": _encode_result(result),
                     })
 
-            return AgentResult(text="(max iterations reached)", actions=actions)
+            return AgentResult(text="(max iterations reached)", actions=actions,
+                               error="max_iterations_reached")
         except Exception as e:  # noqa: BLE001 - network / SDK / missing-key variability
             return AgentResult(text="", actions=actions, error=repr(e))
 

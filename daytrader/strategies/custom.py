@@ -125,16 +125,26 @@ def validate_config(config: dict) -> dict:
         raise StrategyConfigError("stop_atr_mult must be > 0")
     if out["rr"] <= 0:
         raise StrategyConfigError("rr must be > 0")
+    if out["max_entries_per_day"] <= 0:
+        raise StrategyConfigError("max_entries_per_day must be >= 1 (0 means the strategy never trades)")
+    # Validate the time windows up front (bad/inverted windows = silent zero trades).
+    before = _parse_time(out["no_entry_before"], dtime(9, 35), strict=True)
+    after = _parse_time(out["no_entry_after"], dtime(15, 45), strict=True)
+    if before >= after:
+        raise StrategyConfigError(
+            f"no_entry_before ({before}) must be earlier than no_entry_after ({after})")
     return out
 
 
-def _parse_time(v, default):
+def _parse_time(v, default, strict: bool = False):
     if v is None:
         return default
     try:
         hh, mm = str(v).split(":")[:2]
         return dtime(int(hh), int(mm))
     except Exception:  # noqa: BLE001
+        if strict:
+            raise StrategyConfigError(f"invalid time {v!r} (use 'HH:MM')")
         return default
 
 

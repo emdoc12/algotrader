@@ -3,8 +3,8 @@
 #
 # A set of AI trading desks (Claude, OpenAI, Grok, Qwen), each a full multi-agent
 # team (Strategist / Trader / Reviewer) running on its OWN model with an identical
-# $10,000 paper account and the same tools + data. They day-trade liquid US stocks
-# and ETFs (options once a brokerage is connected), and file GitHub issues when
+# $25,000 paper account and the same tools + data. They day-trade liquid US stocks
+# and ETFs (and can swing/hold longer when warranted), and file GitHub issues when
 # they need a developer's help. Ships a web dashboard to watch them compete.
 #
 # Required at runtime (configure any subset — teams without a key are skipped):
@@ -15,11 +15,13 @@
 # Optional:
 #   GITHUB_TOKEN / GITHUB_REPO   — file dev requests as real GitHub issues
 #   DISCORD_WEBHOOK_URL          — push alerts
+#   DASHBOARD_TOKEN              — require this token on the dashboard's API
+#   DASHBOARD_BIND               — bind address (default 0.0.0.0)
 #
 # Build:  docker build -t emdoc12/algotrader:latest .
-# Run:    docker run -p 8787:8787 --env ANTHROPIC_API_KEY=... \
+# Run:    docker run -p 3737:3737 --env ANTHROPIC_API_KEY=... \
 #                    -v /path/to/data:/app/data emdoc12/algotrader:latest
-# Then open http://localhost:8787
+# Then open http://localhost:3737
 # ─────────────────────────────────────────────────────────────────────────────
 
 FROM python:3.12-slim
@@ -53,6 +55,12 @@ ENV PYTHONUNBUFFERED=1
 ENV DASHBOARD_PORT=3737
 
 EXPOSE 3737
+
+# ── Health probe: cheap, DB-only /api/health (no LLM calls) ──────────────────
+# (Runs as root to keep the Unraid host-mounted /app/data volume writable —
+# switching to a non-root UID risks permission errors on that bind mount.)
+HEALTHCHECK --interval=60s --timeout=5s --start-period=20s --retries=3 \
+  CMD python3 -c "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('DASHBOARD_PORT','3737')+'/api/health', timeout=4)" || exit 1
 
 # ── Run the dashboard + competition loop (port from DASHBOARD_PORT) ──────────
 CMD ["python3", "-m", "daytrader.agent", "serve"]

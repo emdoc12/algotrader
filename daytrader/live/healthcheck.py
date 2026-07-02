@@ -78,7 +78,7 @@ def health_snapshot() -> dict:
                 ts = e.get("ts", ""); act = e.get("action", ""); detail = (e.get("detail") or "")
                 problem = act in ("error", "circuit_breaker") or "refus" in detail.lower() \
                     or "error" in detail.lower() or "exception" in detail.lower()
-                if act == "circuit_breaker":
+                if act == "circuit_breaker" and ts[:10] == today:
                     row["halted"] = True
                 if problem:
                     if ts[:10] == today:

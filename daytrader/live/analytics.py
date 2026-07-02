@@ -65,7 +65,8 @@ def _stats(pnls: list[float]) -> dict:
     return {
         "n_trades": len(pnls),
         "win_rate": round(len(wins) / len(pnls) * 100, 1) if pnls else 0.0,
-        "profit_factor": round(gp / gl, 2) if gl > 0 else (round(gp, 2) if gp else 0.0),
+        # None = undefined (no losing trades in this group yet), not "PF = gross profit".
+        "profit_factor": round(gp / gl, 2) if gl > 0 else None,
         "total_pnl": round(sum(pnls), 2),
         "avg_win": round(gp / len(wins), 2) if wins else 0.0,
         "avg_loss": round(sum(losses) / len(losses), 2) if losses else 0.0,

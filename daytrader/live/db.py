@@ -40,6 +40,7 @@ class LiveDB:
         # WAL gives us crash-safe, concurrent-reader persistence.
         self.conn.execute("PRAGMA journal_mode=WAL;")
         self.conn.execute("PRAGMA synchronous=NORMAL;")
+        self.conn.execute("PRAGMA busy_timeout=5000;")  # wait up to 5s for a lock
         self._create_tables()
 
     # ------------------------------------------------------------------ #
@@ -123,6 +124,10 @@ class LiveDB:
                 name   TEXT UNIQUE,
                 config TEXT,
                 notes  TEXT
+            );
+            CREATE TABLE IF NOT EXISTS runner_state (
+                k TEXT PRIMARY KEY,
+                v TEXT
             );
             """
         )
@@ -315,6 +320,28 @@ class LiveDB:
         )
         row = cur.fetchone()
         return dict(row) if row is not None else None
+
+    def max_equity(self) -> Optional[float]:
+        """Highest equity ever recorded (the true drawdown peak)."""
+        cur = self.conn.execute("SELECT MAX(equity) AS m FROM equity_snapshots")
+        row = cur.fetchone()
+        return float(row["m"]) if row and row["m"] is not None else None
+
+    # ------------------------------------------------------------------ #
+    # runner_state (small persistent key-value for the scheduler)         #
+    # ------------------------------------------------------------------ #
+    def kv_get(self, key: str) -> Optional[str]:
+        cur = self.conn.execute("SELECT v FROM runner_state WHERE k=?", (key,))
+        row = cur.fetchone()
+        return row["v"] if row is not None else None
+
+    def kv_set(self, key: str, value: str) -> None:
+        self.conn.execute(
+            "INSERT INTO runner_state (k, v) VALUES (?, ?) "
+            "ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+            (key, str(value)),
+        )
+        self.conn.commit()
 
     # ------------------------------------------------------------------ #
     # custom strategies (agent-authored)                                  #

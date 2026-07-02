@@ -3,10 +3,11 @@
     python -m daytrader.agent serve        # web dashboard + run all teams (the default service)
     python -m daytrader.agent compete       # run the competition loop headless (no UI)
     python -m daytrader.agent leaderboard    # print current standings and exit
-    python -m daytrader.agent status         # print one team's market+account snapshot (no LLM, no key)
+    python -m daytrader.agent reset          # wipe per-team DBs for a clean restart
+    python -m daytrader.agent check          # live-ping each provider key
 
 Each team is a full multi-agent desk (Strategist, Trader, Reviewer) driven by its
-OWN model — Claude, OpenAI, Grok, Qwen — with identical $10k cash and tools.
+OWN model — Claude, OpenAI, Grok, Qwen — with identical $25k cash and tools.
 Teams trade only if their API key is set; configure any subset.
 Requires the relevant provider API keys at runtime (ANTHROPIC_API_KEY,
 OPENAI_API_KEY, XAI_API_KEY, DASHSCOPE_API_KEY).
@@ -72,15 +73,6 @@ def cmd_reset(_args):
     print(f"Reset complete: removed {removed} db file(s). Teams will start fresh at ${START_CASH:,.0f}.")
 
 
-def cmd_status(_args):
-    from daytrader.live.db import LiveDB
-    from daytrader.live.market_state import snapshot
-    from daytrader.live.paper_broker import PaperBroker
-    import json
-    db = LiveDB()
-    print(json.dumps(snapshot(PaperBroker(db, starting_equity=25000)), indent=2, default=str))
-
-
 def main(argv=None):
     p = argparse.ArgumentParser(prog="daytrader.agent", description="Competing autonomous paper-trading desks")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -89,7 +81,6 @@ def main(argv=None):
     sub.add_parser("leaderboard").set_defaults(func=cmd_leaderboard)
     sub.add_parser("reset").set_defaults(func=cmd_reset)
     sub.add_parser("check").set_defaults(func=cmd_check)
-    sub.add_parser("status").set_defaults(func=cmd_status)
     args = p.parse_args(argv)
     args.func(args)
 

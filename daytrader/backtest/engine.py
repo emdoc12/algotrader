@@ -212,8 +212,14 @@ class BacktestEngine:
             if self.cfg.eod_flat and last_bar_of_day[(ts, sym)] and sym in self.positions:
                 self._close_position(ts, sym, c, reason="eod_flat")
 
-            # 4) Process scheduled orders for this (ts, sym).
+            # 4) Process scheduled orders for this (ts, sym). Skip ENTRY fills on
+            # the last bar of a day — there is no later bar to manage or exit
+            # them, so they would be held overnight, which this day-trading
+            # engine must never allow (that would let a strategy harvest gaps
+            # that live paper trading, flat at the close, can never realize).
             for sig in scheduled.get((ts, sym), []):
+                if last_bar_of_day[(ts, sym)] and sig.type == SignalType.ENTRY:
+                    continue
                 self._handle_signal(ts, sig, o, atr_map, marks)
 
             # 5) Mark-to-market equity snapshot.

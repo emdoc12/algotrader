@@ -79,7 +79,11 @@ class PaperBroker:
         if last is not None and last.get("cash") is not None:
             # Restart-safe: recover cash directly from the last snapshot.
             self._cash = float(last["cash"])
-            self.peak_equity = float(last.get("equity") or self._cash)
+            # Drawdown peak must be the historical MAX, not just the last
+            # snapshot, or a restart silently resets max-drawdown to zero.
+            hist_peak = self.db.max_equity()
+            self.peak_equity = max(float(last.get("equity") or self._cash),
+                                   hist_peak if hist_peak is not None else 0.0)
         else:
             # Cold start: derive cash from starting equity minus the cost of any
             # open positions we just loaded (long cost reduces cash, short

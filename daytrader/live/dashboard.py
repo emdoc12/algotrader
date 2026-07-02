@@ -1,7 +1,7 @@
 """Web dashboard for the four-desk AI trading competition.
 
 A single-file, dependency-free dashboard (Python stdlib only) that lets the
-owner watch Claude / OpenAI / Grok / Qwen trade identical $10k paper accounts,
+owner watch Claude / OpenAI / Grok / Qwen trade identical $25k paper accounts,
 inspect each desk's thinking and trades, and chat with each team's leader.
 
 Serving:
@@ -494,6 +494,7 @@ function fmtWhen(ts){
   return stamp + " (" + rel + ")";
 }
 function safeUrl(u){ u = String(u==null?"":u); return /^https?:\/\//i.test(u) ? u : null; }
+function fmtPF(v, n){ if(v===null||v===undefined) return (Number(n)>0?"∞":"—"); return Number(v).toFixed(2); }
 function dashToken(){ try{ return localStorage.getItem("dashToken")||""; }catch(e){ return ""; } }
 function authHeaders(extra){ const h = Object.assign({}, extra||{}); const t = dashToken(); if(t) h["X-Dashboard-Token"]=t; return h; }
 async function apiFetch(url, opts){
@@ -560,7 +561,7 @@ async function loadOverview(){
       el("td", {class: Number(s.equity)>=START?"green":"red"}, fmtMoney(s.equity)),
       el("td", {class: clsFor(s.return_pct)}, fmtPct(s.return_pct)),
       el("td", {class:"red"}, "-"+Number(s.drawdown_pct||0).toFixed(2)+"%"),
-      el("td", null, Number(s.profit_factor||0).toFixed(2)),
+      el("td", null, fmtPF(s.profit_factor, s.n_trades)),
       el("td", null, Number(s.win_rate||0).toFixed(1)+"%"),
       el("td", null, String(s.n_trades||0)),
       el("td", null, String(s.open_positions||0)),
@@ -721,7 +722,7 @@ async function loadTeam(name){
   mkStat("Equity", fmtMoney(row.equity!=null?row.equity:START), Number(row.equity)>=START?"green":"red");
   mkStat("Return", fmtPct(row.return_pct||0), clsFor(row.return_pct||0));
   mkStat("Drawdown", "-"+Number(row.drawdown_pct||0).toFixed(2)+"%", "red");
-  mkStat("Profit factor", Number(row.profit_factor||0).toFixed(2));
+  mkStat("Profit factor", fmtPF(row.profit_factor, row.n_trades));
   mkStat("Trades", String(row.n_trades||0));
   mkStat("Model", row.model||"?", "gray");
   statCard.appendChild(stats);

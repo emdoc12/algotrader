@@ -28,6 +28,25 @@ from daytrader.live import settings as _settings
 
 ET = ZoneInfo("America/New_York")
 OPEN, PLAN_BY, EOD_FLAT, CLOSE = dtime(9, 30), dtime(9, 45), dtime(15, 50), dtime(16, 0)
+# Don't START a fresh (multi-minute) trade cycle right before the close, so the
+# EOD flatten/review deadline is reliably reachable.
+NO_NEW_TRADES_AFTER = dtime(15, 30)
+
+# US equity market full-day closures (NYSE). Static table — extend yearly.
+_MARKET_HOLIDAYS = {
+    "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25",
+    "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25",
+    "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31",
+    "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24",
+}
+
+
+def _today_et() -> str:
+    return datetime.now(ET).date().isoformat()
+
+
+def _is_market_holiday(d) -> bool:
+    return d.isoformat() in _MARKET_HOLIDAYS
 
 START_CASH = float(os.environ.get("START_EQUITY", "25000"))
 INTERVAL_SEC = int(os.environ.get("AGENT_INTERVAL_SECONDS", "900"))
@@ -79,8 +98,26 @@ def _build_team(name: str, provider) -> Team:
     db = LiveDB(team_db_path(name))
     broker = PaperBroker(db, starting_equity=START_CASH)
     desk = TradingTeam(broker, db, provider=provider)
-    return Team(name=name, provider=provider, db=db, broker=broker, desk=desk,
+    team = Team(name=name, provider=provider, db=db, broker=broker, desk=desk,
                 day_start_equity=broker.equity())
+    _restore_risk_state(team)
+    return team
+
+
+def _restore_risk_state(team: Team) -> None:
+    """Recover today's circuit-breaker baseline + halted flag across restarts,
+    so a redeploy can't hand a team a fresh loss budget or un-halt it."""
+    try:
+        if team.db.kv_get("risk_date") == _today_et():
+            dse = team.db.kv_get("day_start_equity")
+            if dse:
+                team.day_start_equity = float(dse)
+            team.halted = team.db.kv_get("halted") == "1"
+        else:
+            team.day_start_equity = team.broker.equity()
+            team.halted = False
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def build_teams(only_with_keys: bool = True) -> list[Team]:
@@ -90,11 +127,7 @@ def build_teams(only_with_keys: bool = True) -> list[Team]:
     for name, provider in default_team_providers().items():
         if only_with_keys and not has_key(provider):
             continue
-        db = LiveDB(team_db_path(name))
-        broker = PaperBroker(db, starting_equity=START_CASH)
-        desk = TradingTeam(broker, db, provider=provider)
-        teams.append(Team(name=name, provider=provider, db=db, broker=broker, desk=desk,
-                          day_start_equity=broker.equity()))
+        teams.append(_build_team(name, provider))
     return teams
 
 
@@ -138,7 +171,8 @@ def _trade_stats(trades: list[dict]) -> dict:
     return {
         "n_trades": len(pnls),
         "win_rate": round(len(wins) / len(pnls) * 100, 1) if pnls else 0.0,
-        "profit_factor": round(gp / gl, 2) if gl > 0 else (round(gp, 2) if gp else 0.0),
+        # None = undefined (no losing trades yet); the UI renders it as ∞.
+        "profit_factor": round(gp / gl, 2) if gl > 0 else None,
         "total_pnl": round(sum(pnls), 2),
     }
 
@@ -252,13 +286,14 @@ class Competition:
                 print(f"[competition] activated team '{name}' ({getattr(provider,'model','?')})")
 
     # -- shared-cycle phases --------------------------------------------
-    def _market(self):
-        return market_only(symbols=None if WATCHLIST_SIZE else None)
-
     def plan_all(self):
         market = market_only()
+        d = _today_et()
         for t in self.teams:
+            if t.db.kv_get("planned_date") == d:
+                continue  # already planned today (idempotent across restarts)
             t.desk.plan_day(with_account(market, t.broker))
+            t.db.kv_set("planned_date", d)
 
     @staticmethod
     def _held_symbol_data(team, base_quotes: dict, base_atr: dict):
@@ -318,12 +353,33 @@ class Competition:
                                       len(t.broker.positions()), t.broker.drawdown_pct())
 
     def review_all(self):
-        market = market_only()
+        market = None
+        d = _today_et()
         for t in self.teams:
-            # Flatten only DAY trades at the close; swing/long holds ride on.
-            if t.broker.positions():
+            # 1) Ensure DAY trades are flat — retry every cycle until they are
+            #    (a failed flatten, e.g. Yahoo down, must not be treated as done).
+            day_open = [p for p in t.broker.positions() if p.get("horizon", "day") == "day"]
+            if day_open:
                 t.broker.flatten_all(reason="eod_flat", horizons={"day"})
+                day_open = [p for p in t.broker.positions() if p.get("horizon", "day") == "day"]
+            # 2) Run the Reviewer exactly once per day, and only after the day
+            #    book is actually flat.
+            if t.db.kv_get("reviewed_date") == d:
+                continue
+            if day_open:
+                continue  # flatten still failing; retry next cycle, don't review yet
+            if market is None:
+                market = market_only()
             t.desk.review_day(with_account(market, t.broker))
+            t.db.kv_set("reviewed_date", d)
+
+    def _save_risk(self, t: Team, date_iso: str | None = None) -> None:
+        try:
+            t.db.kv_set("risk_date", date_iso or _today_et())
+            t.db.kv_set("day_start_equity", f"{t.day_start_equity}")
+            t.db.kv_set("halted", "1" if t.halted else "0")
+        except Exception:  # noqa: BLE001
+            pass
 
     def _risk_check(self, t: Team):
         if t.halted or t.day_start_equity <= 0:
@@ -334,42 +390,70 @@ class Competition:
             # Stop the day-trading bleed; leave deliberate swing/long holds on
             # their own stops rather than force-closing a longer-term thesis.
             t.broker.flatten_all(reason="daily_loss_limit", horizons={"day"})
+            self._save_risk(t)
             t.db.log_agent("runner", "circuit_breaker", f"{day_pnl:.2f}%")
             _notify(f"🛑 Team {t.name} hit the daily loss limit ({day_pnl:.1f}%) — flattened and halted for the day.")
 
     def _new_day(self, now):
         self._day = now.date()
+        d = now.date().isoformat()
         for t in self.teams:
             t.halted = False
             t.day_start_equity = t.broker.equity()
-            t.db.log_agent("runner", "new_day", str(self._day))
+            self._save_risk(t, d)
+            t.db.log_agent("runner", "new_day", d)
 
     # -- the always-on loop ---------------------------------------------
     def run_forever(self):
         print(f"[competition] starting; teams online: {[t.name for t in self.teams]} "
               f"(others activate when their API key is set)")
         _notify(f"🤖 Trading desk competition online — teams: {[t.name for t in self.teams] or 'none yet'}")
-        planned = reviewed = False
         while True:
             try:
                 self._sync_teams()
                 now = datetime.now(ET)
                 if self._day != now.date():
                     self._new_day(now)
-                    planned = reviewed = False
-                if now.weekday() >= 5 or not (OPEN <= now.time() < CLOSE):
-                    time.sleep(60)
-                    continue
+                # Weekends and market holidays: idle. (Per-team planned/reviewed
+                # state is persisted, so restarts never double-run either phase.)
+                if now.weekday() >= 5 or _is_market_holiday(now.date()):
+                    time.sleep(300); continue
                 t = now.time()
-                if not planned and t < PLAN_BY:
-                    self.plan_all(); planned = True
-                elif t >= EOD_FLAT:
-                    if not reviewed:
-                        self.review_all(); reviewed = True
+                if t < OPEN:
+                    time.sleep(60); continue
+                # EOD is DEADLINE-based: once past 15:50 ET, flatten day trades +
+                # review — reachable even if a trade cycle overran 16:00. review_all
+                # is idempotent, so this is cheap once the day is done.
+                if t >= EOD_FLAT:
+                    self.review_all()
                     time.sleep(120); continue
-                else:
+                if t < PLAN_BY:
+                    self.plan_all()
+                elif t < NO_NEW_TRADES_AFTER:
                     self.trade_all()
+                else:
+                    # Between 15:30 and 15:50: hold — don't start a long cycle
+                    # that would blow past the EOD deadline. Manage brackets only.
+                    self._manage_only()
                 time.sleep(INTERVAL_SEC)
             except Exception as e:  # noqa: BLE001 - never die
                 print(f"[competition] loop error: {e!r}")
                 time.sleep(60)
+
+    def _manage_only(self):
+        """Run server-side bracket enforcement (trailing stops, stop/target
+        auto-exec) without a fresh LLM decision cycle — used in the pre-close
+        window when starting a full cycle would risk missing the EOD deadline."""
+        market = market_only()
+        cycle_quotes = dict(market.get("quotes") or {})
+        base_atr = {sym: m.get("atr14") for sym, m in (market.get("market") or {}).items()
+                    if m.get("atr14") is not None}
+        for t in self.teams:
+            q, a = self._held_symbol_data(t, cycle_quotes, base_atr)
+            t.broker.set_cycle_quotes(q)
+            try:
+                t.broker.manage_positions(q, a)
+            finally:
+                t.broker.set_cycle_quotes(None)
+            t.broker.db.record_equity(t.broker.cash(), t.broker.equity(),
+                                      len(t.broker.positions()), t.broker.drawdown_pct())

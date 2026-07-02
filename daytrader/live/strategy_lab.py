@@ -86,17 +86,38 @@ def _resolve_names(strategy) -> list[str]:
     return []
 
 
+def _coerce_params(strat_cls, params: dict):
+    """Validate params against the constructor signature and coerce 'HH:MM'
+    strings to datetime.time. Returns (clean_params, unknown_keys)."""
+    import inspect
+    from datetime import time as dtime
+    try:
+        valid = set(inspect.signature(strat_cls.__init__).parameters) - {"self"}
+    except (TypeError, ValueError):
+        valid = None
+    clean, unknown = {}, []
+    for k, v in (params or {}).items():
+        if valid is not None and k not in valid:
+            unknown.append(k)
+            continue
+        if isinstance(v, str) and ":" in v and v.replace(":", "").isdigit():
+            try:
+                hh, mm = v.split(":")[:2]
+                v = dtime(int(hh), int(mm))
+            except Exception:  # noqa: BLE001
+                pass
+        clean[k] = v
+    return clean, unknown
+
+
 def _instantiate(key: str, params: Optional[dict]):
     module, cls, natural = _STRATEGIES[key]
     import importlib
     mod = importlib.import_module(module)
     strat_cls = getattr(mod, cls)
-    try:
-        strat = strat_cls(**(params or {}))
-    except TypeError:
-        # Strategy rejected an unknown kwarg — fall back to defaults.
-        strat = strat_cls()
-    return strat, natural
+    clean, unknown = _coerce_params(strat_cls, params or {})
+    strat = strat_cls(**clean)
+    return strat, natural, unknown
 
 
 def run_backtest(
@@ -168,6 +189,7 @@ def run_backtest(
         pinned = {r for r in pinned if r in valid} or None
 
     allocs = []
+    unknown_params: list[str] = []
     if custom_strats:
         # Custom strategies fire in any regime unless the caller pins one.
         regset = pinned if pinned else {Regime.ANY.value}
@@ -175,9 +197,16 @@ def run_backtest(
             allocs.append(Allocation(strategy=strat, regimes=set(regset), weight=1.0))
     else:
         for key in names:
-            strat, natural = _instantiate(key, strategy_params)
+            strat, natural, unknown = _instantiate(key, strategy_params)
+            unknown_params.extend(unknown)
             regset = pinned if pinned else {natural}
             allocs.append(Allocation(strategy=strat, regimes=regset, weight=1.0))
+    # If the caller passed params that no strategy accepts, surface an error
+    # instead of silently backtesting the DEFAULT config (a false-edge trap).
+    if strategy_params and unknown_params and len(set(unknown_params)) == len(strategy_params):
+        return {"error": f"unknown strategy_params: {sorted(set(unknown_params))}; "
+                         "nothing was applied — check the parameter names",
+                "hint": "params must match the strategy constructor's arguments"}
 
     try:
         ens = Ensemble(allocs, adx_threshold=adx_threshold, market_filter=market_filter)
@@ -237,6 +266,8 @@ def run_backtest(
             "market_filter": market_filter,
             "costs": "pessimistic" if pessimistic_costs else "default",
             "starting_equity": float(starting_equity),
+            "strategy_params": strategy_params or None,
+            "ignored_params": sorted(set(unknown_params)) or None,
         },
         "metrics": {
             "n_trades": m.n_trades,

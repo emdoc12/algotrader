@@ -203,8 +203,15 @@ def _market_summary(per_symbol: dict) -> dict:
     }
 
 
-def _default_symbols(top_n: int = 18) -> list[str]:
-    """The day's watchlist from the scanner; falls back to the core universe."""
+def _default_symbols(top_n: int | None = None) -> list[str]:
+    """The day's watchlist from the scanner; falls back to the core universe.
+    Size honors the WATCHLIST_SIZE env var (default 18)."""
+    import os
+    if top_n is None:
+        try:
+            top_n = int(os.environ.get("WATCHLIST_SIZE", "18"))
+        except (TypeError, ValueError):
+            top_n = 18
     try:
         from daytrader.data.universe import watchlist
         return watchlist(top_n=top_n)
