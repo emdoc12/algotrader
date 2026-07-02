@@ -9,6 +9,32 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.15.0] — 2026-07-02
+
+### Added
+- **Three open-weight competitors → the field is now 7 desks.** DeepSeek V4 Pro
+  (`deepseek-v4-pro` @ api.deepseek.com), GLM-5.2 (`glm-5.2` @ api.z.ai), and
+  Kimi K2.6 (`kimi-k2.6` @ api.moonshot.ai) join via the OpenAI-compatible
+  provider path. Each activates only when its key is set (`DEEPSEEK_API_KEY`,
+  `ZAI_API_KEY`, `MOONSHOT_API_KEY`), so the competition stays 4-way until you
+  add them. Model/base-URL overrides (`DEEPSEEK_MODEL`, `GLM_MODEL`, `KIMI_MODEL`,
+  `*_BASE_URL`) are on the Settings page; the base-URL allowlist already permits
+  these hosts and private/localhost for self-hosting on a Spark/GX10-class box.
+  New dashboard tabs, leaderboard rows, and settings fields for all three.
+- **Per-cycle token + cost telemetry.** Every agent call's token usage is now
+  captured (`AgentResult.usage`) and persisted to a `token_usage` table with an
+  estimated USD cost (`daytrader/live/pricing.py`, per-team rates, overridable
+  via `<TEAM>_PRICE_IN`/`_OUT`). The dashboard shows **API $/day** per team on
+  the leaderboard and an **API $ today** stat on each team tab, so competition
+  spend is visible instead of guessed.
+- **Prompt caching.** The Anthropic path now marks the static system prompt +
+  tool schemas as cacheable (`cache_control`), cutting the repeated-prefix input
+  cost ~90%. The OpenAI-compatible providers (OpenAI/Grok/Qwen/DeepSeek/GLM/Kimi)
+  cache automatically server-side; their reported cached tokens are recorded and
+  billed at the discounted rate in the cost estimate.
+
+---
+
 ## [6.14.0] — 2026-07-02
 
 Large hardening release from a full multi-agent code review. Money-correctness,

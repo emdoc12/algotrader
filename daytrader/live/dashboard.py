@@ -453,9 +453,9 @@ PAGE_HTML = r"""<!DOCTYPE html>
 
 <script>
 "use strict";
-const TEAMS = ["claude","openai","grok","qwen"];
-const LABELS = {claude:"Claude", openai:"OpenAI", grok:"Grok", qwen:"Qwen"};
-const COLORS = {claude:"#36d399", openai:"#7c8cff", grok:"#f87272", qwen:"#ffd479"};
+const TEAMS = ["claude","openai","grok","qwen","deepseek","glm","kimi"];
+const LABELS = {claude:"Claude", openai:"OpenAI", grok:"Grok", qwen:"Qwen", deepseek:"DeepSeek", glm:"GLM", kimi:"Kimi"};
+const COLORS = {claude:"#36d399", openai:"#7c8cff", grok:"#f87272", qwen:"#ffd479", deepseek:"#22d3ee", glm:"#c084fc", kimi:"#fb923c"};
 const START = __START_CASH_NUM__;
 let current = "overview";
 let refreshTimer = null;
@@ -546,7 +546,7 @@ async function loadOverview(){
   lbCard.appendChild(el("h2", null, "Leaderboard"));
   const tbl = el("table");
   const head = el("tr");
-  ["#","Team","Model","Equity","Return","Drawdown","PF","Win %","Trades","Open"]
+  ["#","Team","Model","Equity","Return","Drawdown","PF","Win %","Trades","Open","API $/day"]
     .forEach(h => head.appendChild(el("th", null, h)));
   tbl.appendChild(head);
   (data.standings||[]).forEach(s => {
@@ -565,6 +565,7 @@ async function loadOverview(){
       el("td", null, Number(s.win_rate||0).toFixed(1)+"%"),
       el("td", null, String(s.n_trades||0)),
       el("td", null, String(s.open_positions||0)),
+      el("td", {class:"gray"}, s.cost_today!=null ? ("$"+Number(s.cost_today).toFixed(2)) : "—"),
     ];
     cells.forEach(c => tr.appendChild(c));
     tbl.appendChild(tr);
@@ -723,6 +724,7 @@ async function loadTeam(name){
   mkStat("Return", fmtPct(row.return_pct||0), clsFor(row.return_pct||0));
   mkStat("Drawdown", "-"+Number(row.drawdown_pct||0).toFixed(2)+"%", "red");
   mkStat("Profit factor", fmtPF(row.profit_factor, row.n_trades));
+  mkStat("API $ today", row.cost_today!=null?("$"+Number(row.cost_today).toFixed(2)):"—", "gray");
   mkStat("Trades", String(row.n_trades||0));
   mkStat("Model", row.model||"?", "gray");
   statCard.appendChild(stats);
@@ -1121,6 +1123,9 @@ function renderSettings(main, status){
   keyCard.appendChild(settingsSecretField(status, "OPENAI_API_KEY", "Team OpenAI (OPENAI_API_KEY)"));
   keyCard.appendChild(settingsSecretField(status, "XAI_API_KEY", "Team Grok (XAI_API_KEY)"));
   keyCard.appendChild(settingsSecretField(status, "DASHSCOPE_API_KEY", "Team Qwen (DASHSCOPE_API_KEY)"));
+  keyCard.appendChild(settingsSecretField(status, "DEEPSEEK_API_KEY", "Team DeepSeek (DEEPSEEK_API_KEY) — open-weight, api.deepseek.com"));
+  keyCard.appendChild(settingsSecretField(status, "ZAI_API_KEY", "Team GLM (ZAI_API_KEY) — open-weight, api.z.ai"));
+  keyCard.appendChild(settingsSecretField(status, "MOONSHOT_API_KEY", "Team Kimi (MOONSHOT_API_KEY) — open-weight, api.moonshot.ai"));
   main.appendChild(keyCard);
 
   // Connection test
@@ -1142,9 +1147,15 @@ function renderSettings(main, status){
   modelCard.appendChild(settingsTextField(status, "XAI_MODEL", "XAI_MODEL"));
   modelCard.appendChild(settingsTextField(status, "QWEN_MODEL", "QWEN_MODEL", {
     hint:"To run Qwen locally, set QWEN_BASE_URL to your local OpenAI-compatible server (vLLM/Ollama/LM Studio) and put any placeholder in DASHSCOPE_API_KEY."}));
+  modelCard.appendChild(settingsTextField(status, "DEEPSEEK_MODEL", "DEEPSEEK_MODEL", {hint:"default deepseek-v4-pro"}));
+  modelCard.appendChild(settingsTextField(status, "GLM_MODEL", "GLM_MODEL", {hint:"default glm-5.2"}));
+  modelCard.appendChild(settingsTextField(status, "KIMI_MODEL", "KIMI_MODEL", {hint:"default kimi-k2.6"}));
   modelCard.appendChild(settingsTextField(status, "OPENAI_BASE_URL", "OPENAI_BASE_URL"));
   modelCard.appendChild(settingsTextField(status, "XAI_BASE_URL", "XAI_BASE_URL"));
   modelCard.appendChild(settingsTextField(status, "QWEN_BASE_URL", "QWEN_BASE_URL"));
+  modelCard.appendChild(settingsTextField(status, "DEEPSEEK_BASE_URL", "DEEPSEEK_BASE_URL"));
+  modelCard.appendChild(settingsTextField(status, "GLM_BASE_URL", "GLM_BASE_URL"));
+  modelCard.appendChild(settingsTextField(status, "KIMI_BASE_URL", "KIMI_BASE_URL"));
   main.appendChild(modelCard);
 
   // Alpaca

@@ -191,6 +191,8 @@ def db_standings() -> list[dict]:
         dd = 0.0
         stats = {"n_trades": 0, "win_rate": 0.0, "profit_factor": 0.0, "total_pnl": 0.0}
         n_open = 0
+        cost_today = 0.0
+        cost_total = 0.0
         try:
             db = LiveDB(team_db_path(name))
             last = db.last_equity()
@@ -200,6 +202,11 @@ def db_standings() -> list[dict]:
                 dd = float(last.get("drawdown_pct", 0.0))
             stats = _trade_stats(db.recent_trades(limit=1000))
             n_open = len(db.load_open_positions())
+            try:
+                cost_today = db.usage_totals(since_iso=datetime.now(ET).strftime("%Y-%m-%dT00:00:00"))["cost_usd"]
+                cost_total = db.usage_totals()["cost_usd"]
+            except Exception:  # noqa: BLE001
+                pass
             db.close()
         except Exception:  # noqa: BLE001
             pass
@@ -212,6 +219,8 @@ def db_standings() -> list[dict]:
             "return_pct": round((eq / START_CASH - 1) * 100, 2),
             "drawdown_pct": round(dd, 2),
             "open_positions": n_open,
+            "cost_today": round(cost_today, 2),
+            "cost_total": round(cost_total, 2),
             **stats,
         })
     rows.sort(key=lambda r: r["equity"], reverse=True)
@@ -286,13 +295,28 @@ class Competition:
                 print(f"[competition] activated team '{name}' ({getattr(provider,'model','?')})")
 
     # -- shared-cycle phases --------------------------------------------
+    @staticmethod
+    def _record_usage(t: Team, role: str, res) -> None:
+        """Persist token usage + estimated cost for an agent call."""
+        try:
+            u = getattr(res, "usage", None) or {}
+            it, ot = int(u.get("input_tokens", 0)), int(u.get("output_tokens", 0))
+            if it == 0 and ot == 0:
+                return
+            from daytrader.live import pricing
+            cost = pricing.cost_usd(t.name, it, ot, u.get("cached_input_tokens", 0))
+            t.db.record_usage(role, getattr(t.provider, "model", "?"), it, ot, cost)
+        except Exception:  # noqa: BLE001
+            pass
+
     def plan_all(self):
         market = market_only()
         d = _today_et()
         for t in self.teams:
             if t.db.kv_get("planned_date") == d:
                 continue  # already planned today (idempotent across restarts)
-            t.desk.plan_day(with_account(market, t.broker))
+            res = t.desk.plan_day(with_account(market, t.broker))
+            self._record_usage(t, "strategist", res)
             t.db.kv_set("planned_date", d)
 
     @staticmethod
@@ -344,6 +368,7 @@ class Competition:
                 t.broker.manage_positions(q, a)
                 if not t.halted:
                     res = t.desk.trade_cycle(with_account(market, t.broker))
+                    self._record_usage(t, "trader", res)
                     if getattr(res, "error", None):
                         _notify(f"⚠️ Team {t.name} ({getattr(t.provider,'model','?')}) cycle error: {res.error}",
                                 throttle_key=f"err_{t.name}")
@@ -370,7 +395,8 @@ class Competition:
                 continue  # flatten still failing; retry next cycle, don't review yet
             if market is None:
                 market = market_only()
-            t.desk.review_day(with_account(market, t.broker))
+            res = t.desk.review_day(with_account(market, t.broker))
+            self._record_usage(t, "reviewer", res)
             t.db.kv_set("reviewed_date", d)
 
     def _save_risk(self, t: Team, date_iso: str | None = None) -> None:

@@ -12,6 +12,9 @@
 #   OPENAI_API_KEY       — Team OpenAI
 #   XAI_API_KEY          — Team Grok
 #   DASHSCOPE_API_KEY    — Team Qwen
+#   DEEPSEEK_API_KEY     — Team DeepSeek (open-weight)
+#   ZAI_API_KEY          — Team GLM      (open-weight)
+#   MOONSHOT_API_KEY     — Team Kimi     (open-weight)
 # Optional:
 #   GITHUB_TOKEN / GITHUB_REPO   — file dev requests as real GitHub issues
 #   DISCORD_WEBHOOK_URL          — push alerts

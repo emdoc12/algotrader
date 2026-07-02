@@ -129,6 +129,15 @@ class LiveDB:
                 k TEXT PRIMARY KEY,
                 v TEXT
             );
+            CREATE TABLE IF NOT EXISTS token_usage (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts            TEXT NOT NULL,
+                role          TEXT,
+                model         TEXT,
+                input_tokens  INTEGER DEFAULT 0,
+                output_tokens INTEGER DEFAULT 0,
+                cost_usd      REAL DEFAULT 0
+            );
             """
         )
         self.conn.commit()
@@ -381,6 +390,32 @@ class LiveDB:
             "SELECT * FROM agent_log ORDER BY id DESC LIMIT ?", (limit,)
         )
         return [dict(r) for r in cur.fetchall()]
+
+    # ------------------------------------------------------------------ #
+    # token usage / cost                                                  #
+    # ------------------------------------------------------------------ #
+    def record_usage(self, role: str, model: str, input_tokens: int,
+                     output_tokens: int, cost_usd: float) -> None:
+        self.conn.execute(
+            "INSERT INTO token_usage (ts, role, model, input_tokens, output_tokens, cost_usd) "
+            "VALUES (?,?,?,?,?,?)",
+            (_now_iso(), role, model, int(input_tokens), int(output_tokens), float(cost_usd)),
+        )
+        self.conn.commit()
+
+    def usage_totals(self, since_iso: str | None = None) -> dict:
+        """Summed tokens + cost, optionally only rows on/after ``since_iso``."""
+        if since_iso:
+            cur = self.conn.execute(
+                "SELECT COALESCE(SUM(input_tokens),0) i, COALESCE(SUM(output_tokens),0) o, "
+                "COALESCE(SUM(cost_usd),0) c FROM token_usage WHERE ts >= ?", (since_iso,))
+        else:
+            cur = self.conn.execute(
+                "SELECT COALESCE(SUM(input_tokens),0) i, COALESCE(SUM(output_tokens),0) o, "
+                "COALESCE(SUM(cost_usd),0) c FROM token_usage")
+        r = cur.fetchone()
+        return {"input_tokens": int(r["i"]), "output_tokens": int(r["o"]),
+                "cost_usd": round(float(r["c"]), 4)}
 
     # ------------------------------------------------------------------ #
     # lifecycle                                                           #

@@ -24,6 +24,7 @@ class AgentResult:
     actions: list[dict] = field(default_factory=list)   # [{tool, input, result}]
     refused: bool = False
     error: str | None = None
+    usage: dict = field(default_factory=dict)  # {input_tokens, output_tokens, cached_input_tokens}
 
 
 class Agent:

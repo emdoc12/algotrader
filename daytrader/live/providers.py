@@ -114,26 +114,48 @@ class AnthropicProvider(BaseProvider):
         max_iterations: int = 12,
     ) -> AgentResult:
         actions: list[dict] = []
+        usage = {"input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0}
+
+        def _tally(resp):
+            u = getattr(resp, "usage", None)
+            if u is None:
+                return
+            usage["input_tokens"] += ((getattr(u, "input_tokens", 0) or 0)
+                                      + (getattr(u, "cache_creation_input_tokens", 0) or 0)
+                                      + (getattr(u, "cache_read_input_tokens", 0) or 0))
+            usage["output_tokens"] += getattr(u, "output_tokens", 0) or 0
+            usage["cached_input_tokens"] += getattr(u, "cache_read_input_tokens", 0) or 0
+
         try:
             client = self._client_lazy()
             messages = [{"role": "user", "content": user_message}]
+            # Prompt caching: mark the static system prompt + tool schemas as
+            # cacheable so they aren't re-billed at full rate every iteration/cycle
+            # (a ~90% input-cost saving on the repeated prefix).
+            cached_system = [{"type": "text", "text": system,
+                              "cache_control": {"type": "ephemeral"}}]
+            cached_tools = tools
+            if tools:
+                cached_tools = [dict(t) for t in tools]
+                cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
 
             for _ in range(max_iterations):
                 resp = client.messages.create(
                     model=self.model,
                     max_tokens=max_tokens,
-                    system=system,
+                    system=cached_system,
                     thinking={"type": "adaptive"},
-                    tools=tools,
+                    tools=cached_tools,
                     messages=messages,
                 )
+                _tally(resp)
 
                 if resp.stop_reason == "refusal":
-                    return AgentResult(text="", actions=actions, refused=True)
+                    return AgentResult(text="", actions=actions, refused=True, usage=usage)
 
                 if resp.stop_reason != "tool_use":
                     text = "".join(b.text for b in resp.content if b.type == "text")
-                    return AgentResult(text=text, actions=actions)
+                    return AgentResult(text=text, actions=actions, usage=usage)
 
                 # Execute every requested tool, collect results.
                 messages.append({"role": "assistant", "content": resp.content})
@@ -151,9 +173,9 @@ class AnthropicProvider(BaseProvider):
                 messages.append({"role": "user", "content": tool_results})
 
             return AgentResult(text="(max iterations reached)", actions=actions,
-                               error="max_iterations_reached")
+                               error="max_iterations_reached", usage=usage)
         except Exception as e:  # noqa: BLE001 - network / SDK / missing-key variability
-            return AgentResult(text="", actions=actions, error=repr(e))
+            return AgentResult(text="", actions=actions, error=repr(e), usage=usage)
 
 
 def _to_openai_tools(tools: list[dict]) -> list[dict]:
@@ -229,6 +251,20 @@ class OpenAICompatibleProvider(BaseProvider):
         max_iterations: int = 12,
     ) -> AgentResult:
         actions: list[dict] = []
+        usage = {"input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0}
+
+        def _tally(resp):
+            # OpenAI-compatible providers cache the repeated prompt prefix
+            # automatically server-side; we just record what they report.
+            u = getattr(resp, "usage", None)
+            if u is None:
+                return
+            usage["input_tokens"] += getattr(u, "prompt_tokens", 0) or 0
+            usage["output_tokens"] += getattr(u, "completion_tokens", 0) or 0
+            details = getattr(u, "prompt_tokens_details", None)
+            if details is not None:
+                usage["cached_input_tokens"] += getattr(details, "cached_tokens", 0) or 0
+
         try:
             client = self._client_lazy()
             oai_tools = _to_openai_tools(tools)
@@ -245,12 +281,13 @@ class OpenAICompatibleProvider(BaseProvider):
                     base_kwargs["tools"] = oai_tools
                     base_kwargs["tool_choice"] = "auto"
                 resp = self._create(client, base_kwargs, max_tokens)
+                _tally(resp)
 
                 msg = resp.choices[0].message
                 tool_calls = getattr(msg, "tool_calls", None)
 
                 if not tool_calls:
-                    return AgentResult(text=msg.content or "", actions=actions)
+                    return AgentResult(text=msg.content or "", actions=actions, usage=usage)
 
                 # Append the assistant message (must carry the tool_calls), then
                 # one tool-role message per executed call.
@@ -285,9 +322,9 @@ class OpenAICompatibleProvider(BaseProvider):
                     })
 
             return AgentResult(text="(max iterations reached)", actions=actions,
-                               error="max_iterations_reached")
+                               error="max_iterations_reached", usage=usage)
         except Exception as e:  # noqa: BLE001 - network / SDK / missing-key variability
-            return AgentResult(text="", actions=actions, error=repr(e))
+            return AgentResult(text="", actions=actions, error=repr(e), usage=usage)
 
 
 def make_provider(spec: dict) -> BaseProvider:
@@ -336,6 +373,26 @@ def default_team_providers() -> dict[str, BaseProvider]:
             ),
             api_key_env="DASHSCOPE_API_KEY",
         ),
+        # Open-weight contenders (cloud APIs; self-hostable). Each activates only
+        # when its key is set, so the competition stays 4-way until you add them.
+        "deepseek": OpenAICompatibleProvider(
+            name="deepseek",
+            model=os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro"),
+            base_url=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+            api_key_env="DEEPSEEK_API_KEY",
+        ),
+        "glm": OpenAICompatibleProvider(
+            name="glm",
+            model=os.environ.get("GLM_MODEL", "glm-5.2"),
+            base_url=os.environ.get("GLM_BASE_URL", "https://api.z.ai/api/paas/v4"),
+            api_key_env="ZAI_API_KEY",
+        ),
+        "kimi": OpenAICompatibleProvider(
+            name="kimi",
+            model=os.environ.get("KIMI_MODEL", "kimi-k2.6"),
+            base_url=os.environ.get("KIMI_BASE_URL", "https://api.moonshot.ai/v1"),
+            api_key_env="MOONSHOT_API_KEY",
+        ),
     }
 
 
@@ -345,6 +402,9 @@ _TEAM_KEY_ENV = {
     "openai": "OPENAI_API_KEY",
     "grok": "XAI_API_KEY",
     "qwen": "DASHSCOPE_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "glm": "ZAI_API_KEY",
+    "kimi": "MOONSHOT_API_KEY",
 }
 
 
