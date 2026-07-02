@@ -9,6 +9,16 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.15.2] — 2026-07-02
+
+### Added
+- **Desk leaders can describe their tools in chat.** The chat channel is
+  tool-less by design (it's Q&A, not a trading session), so a leader couldn't
+  accurately answer "how do I execute trades?". The chat context now includes a
+  concise, auto-generated summary of the desk's real tools (place_trade with
+  stop/target/horizon/trailing, backtests, data feeds, etc.) so the leader can
+  speak accurately about its capabilities. No effect on live trading.
+
 ## [6.15.1] — 2026-07-02
 
 ### Fixed

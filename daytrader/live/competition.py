@@ -256,6 +256,19 @@ def chat_with_leader(team_name: str, message: str) -> dict:
             "recent_chat": history,
         }
         import json
+        # A concise summary of the tools the desk actually uses during live
+        # cycles, built from the real tool list so the leader can accurately
+        # answer capability questions in chat (this chat channel itself is
+        # tool-less — the tools are attached during real trading cycles).
+        caps = ""
+        try:
+            from daytrader.live.paper_broker import PaperBroker
+            from daytrader.live.tools import build_tools
+            schemas, _ = build_tools(PaperBroker(db, starting_equity=START_CASH), db)
+            caps = "\n\nDuring live trading cycles you have these tools (not attached to this chat):\n" + \
+                   "\n".join(f"- {t['name']}: {t.get('description','')[:130]}" for t in schemas)
+        except Exception:  # noqa: BLE001
+            pass
         system = (
             f"You are the LEADER of the '{team_name}' autonomous trading desk, which "
             f"trades a ${START_CASH:,.0f} paper account of US stocks/ETFs — day-trading by "
@@ -264,7 +277,12 @@ def chat_with_leader(team_name: str, message: str) -> dict:
             f"about your trades and strategy. Answer directly and concisely as the desk "
             f"lead: explain your reasoning, own your results, and take the owner's "
             f"suggestions seriously (you can say you'll adjust the plan and note it in "
-            f"the journal next session). Here is your current context:\n```json\n"
+            f"the journal next session). If asked HOW you trade/execute, describe the tools "
+            f"below accurately (you place market orders via place_trade with a required stop "
+            f"and target, can set a day/swing/long horizon and a trailing stop, and backtest "
+            f"ideas before deploying)."
+            f"{caps}"
+            f"\n\nHere is your current context:\n```json\n"
             f"{json.dumps(context, indent=2, default=str)}\n```"
         )
         db.add_chat("owner", message)
