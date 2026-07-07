@@ -349,6 +349,93 @@ class PaperBroker:
             "reason": reason,
         }
 
+    def reduce_position(self, symbol: str, fraction: float,
+                        reason: str = "partial_take") -> dict:
+        """Close a FRACTION (0<f<1) of an open position — a partial take-profit —
+        leaving a runner. f>=1 closes it fully. Books the closed portion as a
+        trade and prorates carried entry costs onto it."""
+        pos = self._positions.get(symbol)
+        if pos is None:
+            return {"ok": False, "symbol": symbol, "reason": "no open position", "pnl": 0.0}
+        try:
+            fraction = float(fraction)
+        except (TypeError, ValueError):
+            return {"ok": False, "symbol": symbol, "reason": "fraction must be a number"}
+        if fraction >= 1:
+            return self.close(symbol, reason=reason)
+        if fraction <= 0:
+            return {"ok": False, "symbol": symbol, "reason": "fraction must be in (0,1)"}
+        try:
+            raw = self.latest_price(symbol)
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "symbol": symbol, "reason": f"price unavailable: {e}", "pnl": 0.0}
+
+        side = pos["side"]
+        qty_total = pos["qty"]
+        qty_close = qty_total * fraction
+        exit_px = self._exit_fill(side, raw)
+        commission = self._commission(qty_close)
+        slip = abs(exit_px - raw) * qty_close
+        if side == Side.LONG:
+            self._cash += exit_px * qty_close - commission
+        else:
+            self._cash -= exit_px * qty_close + commission
+        direction = 1.0 if side == Side.LONG else -1.0
+        gross = direction * (exit_px - pos["entry_price"]) * qty_close
+        # Prorate the entry commission/slippage carried on the position.
+        share = qty_close / qty_total
+        entry_comm = pos.get("commission_paid", 0.0) * share
+        entry_slip = pos.get("slippage_paid", 0.0) * share
+        pnl = gross - (entry_comm + commission)
+        trade_id = self.db.record_trade({
+            "symbol": symbol, "side": side.value, "strategy": pos.get("strategy"),
+            "entry_ts": pos.get("entry_ts"), "entry_price": pos["entry_price"],
+            "qty": qty_close, "exit_ts": _now_iso(), "exit_price": exit_px,
+            "commission": entry_comm + commission, "slippage_cost": entry_slip + slip,
+            "pnl": pnl, "exit_reason": reason, "rationale": pos.get("rationale", ""),
+        })
+        # Shrink the remaining position and its carried costs.
+        pos["qty"] = qty_total - qty_close
+        pos["commission_paid"] = pos.get("commission_paid", 0.0) - entry_comm
+        pos["slippage_paid"] = pos.get("slippage_paid", 0.0) - entry_slip
+        self._persist_position(pos)
+        self.db.log_agent(pos.get("strategy") or "agent", "partial_close",
+                          f"{symbol} {fraction:.0%} @ {exit_px:.4f} pnl={pnl:.2f} ({reason})")
+        self._persist_equity()
+        return {"ok": True, "symbol": symbol, "closed_qty": round(qty_close, 6),
+                "remaining_qty": round(pos["qty"], 6), "exit_price": exit_px,
+                "pnl": round(pnl, 2), "trade_id": trade_id}
+
+    def modify_position(self, symbol: str, stop: Optional[float] = None,
+                        target: Optional[float] = None) -> dict:
+        """Modify an open position's protective stop and/or target."""
+        pos = self._positions.get(symbol)
+        if pos is None:
+            return {"ok": False, "symbol": symbol, "reason": "no open position"}
+        changed = {}
+        if stop is not None:
+            pos["stop"] = float(stop)
+            changed["stop"] = pos["stop"]
+        if target is not None:
+            pos["target"] = float(target)
+            changed["target"] = pos["target"]
+        if not changed:
+            return {"ok": False, "symbol": symbol, "reason": "provide a stop and/or target to modify"}
+        self._persist_position(pos)
+        self.db.log_agent(pos.get("strategy") or "agent", "modify_stops", f"{symbol} {changed}")
+        return {"ok": True, "symbol": symbol, **changed}
+
+    def move_stop_to_breakeven(self, symbol: str) -> dict:
+        """Set the protective stop to the entry price (lock in a no-loss runner)."""
+        pos = self._positions.get(symbol)
+        if pos is None:
+            return {"ok": False, "symbol": symbol, "reason": "no open position"}
+        be = round(float(pos["entry_price"]), 4)
+        pos["stop"] = be
+        self._persist_position(pos)
+        self.db.log_agent(pos.get("strategy") or "agent", "breakeven", f"{symbol} stop->{be:.4f}")
+        return {"ok": True, "symbol": symbol, "stop": be, "note": "stop moved to entry (breakeven)"}
+
     def flatten_all(self, reason: str = "eod_flat",
                     horizons: Optional[set] = None) -> list[dict]:
         """Close open positions. If ``horizons`` is given, close only positions

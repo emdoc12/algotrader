@@ -53,6 +53,24 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
         db.log_agent("trader", "flatten_all", inp.get("reason", ""))
         return {"ok": True, "closed": res}
 
+    def take_partial(inp: dict) -> dict:
+        try:
+            fraction = float(inp.get("fraction", 0.5))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "fraction must be a number in (0,1)"}
+        return broker.reduce_position(inp["symbol"].upper(), fraction,
+                                      reason=inp.get("reason", "partial_take"))
+
+    def modify_stops(inp: dict) -> dict:
+        stop = inp.get("stop")
+        target = inp.get("target")
+        return broker.modify_position(inp["symbol"].upper(),
+                                      stop=float(stop) if stop is not None else None,
+                                      target=float(target) if target is not None else None)
+
+    def move_stop_to_breakeven(inp: dict) -> dict:
+        return broker.move_stop_to_breakeven(inp["symbol"].upper())
+
     def get_positions(_inp: dict) -> dict:
         return {"ok": True, "positions": broker.positions(), "cash": broker.cash(),
                 "equity": broker.equity(), "drawdown_pct": broker.drawdown_pct()}
@@ -342,6 +360,9 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
         "place_trade": place_trade,
         "close_position": close_position,
         "flatten_all": flatten_all,
+        "take_partial": take_partial,
+        "modify_stops": modify_stops,
+        "move_stop_to_breakeven": move_stop_to_breakeven,
         "get_positions": get_positions,
         "get_performance": get_performance,
         "get_performance_breakdown": get_performance_breakdown,
@@ -399,6 +420,41 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
             },
         },
         {
+            "name": "take_partial",
+            "description": "Take a PARTIAL profit: close a fraction of an open position and leave the rest running. E.g. fraction 0.5 sells half. The classic move: take 50-60% at +1R, then move_stop_to_breakeven and let the runner ride your trailing stop. Records the partial as a trade.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string"},
+                    "fraction": {"type": "number", "description": "Portion to close, 0<f<1 (e.g. 0.5 = half). f>=1 closes fully."},
+                    "reason": {"type": "string"},
+                },
+                "required": ["symbol", "fraction"],
+            },
+        },
+        {
+            "name": "modify_stops",
+            "description": "Modify an open position's protective stop and/or profit target (e.g. tighten the stop as the trade works, or extend the target). Provide stop and/or target.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string"},
+                    "stop": {"type": "number", "description": "New protective stop price."},
+                    "target": {"type": "number", "description": "New profit target price."},
+                },
+                "required": ["symbol"],
+            },
+        },
+        {
+            "name": "move_stop_to_breakeven",
+            "description": "Move an open position's stop to its entry price (lock in a no-loss runner). Typically done after taking a partial profit at +1R.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"symbol": {"type": "string"}},
+                "required": ["symbol"],
+            },
+        },
+        {
             "name": "get_positions",
             "description": "Get current open positions, cash, equity, and drawdown.",
             "input_schema": {"type": "object", "properties": {}},
@@ -410,12 +466,12 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
         },
         {
             "name": "get_performance_breakdown",
-            "description": "Realized performance grouped by strategy and/or time-of-day, so you can see which setups and which session windows actually carry positive expectancy and concentrate risk there (or disable what bleeds). Each row has the group keys plus n_trades, win_rate, profit_factor, total_pnl, avg_win, avg_loss. group_by accepts 'strategy' and/or 'tod_bucket'. Time-of-day buckets are ET: open (9:30-10:00), morning (10:00-12:00), midday (12:00-14:00), late (14:00-16:00). Realized trades only.",
+            "description": "Realized performance grouped by setup / direction / trend / time-of-day, so you can see which combos actually carry positive expectancy and concentrate risk there. Free-text strategy labels are auto-normalized to the 8 canonical built-ins (+ 'other'), so 'MACD', 'macd_with_trend_short', 'MACD trend' all collapse into 'macd' — no more 40 one-off rows. Each row has the group keys plus n_trades, win_rate, profit_factor, total_pnl, avg_win, avg_loss. group_by accepts 'strategy' (canonical), 'direction' (long/short), 'with_trend' (with_trend/counter_trend), and 'tod_bucket' (ET: open 9:30-10:00, morning 10:00-12:00, midday 12:00-14:00, late 14:00-16:00). Combine e.g. ['strategy','direction','tod_bucket']. Realized trades only.",
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "group_by": {"type": "array", "items": {"type": "string", "enum": ["strategy", "tod_bucket"]},
-                                 "description": "Dimensions to group by (default ['strategy']). Use both for a strategy×time matrix."},
+                    "group_by": {"type": "array", "items": {"type": "string", "enum": ["strategy", "direction", "with_trend", "tod_bucket"]},
+                                 "description": "Dimensions to group by (default ['strategy']). Combine for a setup×direction×time matrix."},
                 },
             },
         },

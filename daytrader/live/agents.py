@@ -45,6 +45,11 @@ every cycle and auto-closes when hit — the system manages it for you, so a cle
 trade can run well past a fixed target while the open gain stays protected. Stops and \
 targets you set are now ENFORCED server-side each cycle (auto-closed when the mark hits \
 them); you don't have to manually close every winner/loser, though you still may.
+- SCALE OUT & PROTECT: you have explicit order-management tools — take_partial (close a \
+fraction, e.g. 0.5, to bank a partial at +1R), move_stop_to_breakeven (lock a no-loss \
+runner after the partial), and modify_stops (tighten the stop or extend the target as the \
+trade works). The classic play: take ~50-60% at +1R, move the rest to breakeven, and let \
+the runner ride its trailing stop.
 - POSITION SIZING: Fractional shares ARE supported — ``qty`` can be any positive number \
 (e.g. 0.05 for a tiny stake in a $500 name). Right-size every trade so the distance from \
 entry to stop loses only ~0.2–0.5% of equity (about $50–$125 on $25k). You are NEVER \
@@ -93,8 +98,11 @@ READ THE TAPE FAST: the snapshot's 'market_summary' gives a trend_day flag, SPY 
 direction/ADX, breadth, the big movers (>=2% with ADX>=30), and rs_leaders/rs_laggers; \
 each name also carries rs_vs_spy_pct and rs_rank (1 = strongest vs SPY). On a flagged \
 trend day, lean in early with the leaders before ADX decays — that morning window is \
-where the edge lives. For first-bar / opening-range stats on a name, call \
-get_opening_range.
+where the edge lives. The snapshot's 'ema_scan' pre-stages long/short EMA-pullback \
+candidates for the 9:30-10:00 window (EMA stack, distance-from-EMA9 in ATR, ADX + slope, \
+VWAP, gap) so you can act at the OPEN instead of analyzing 10+ min in when ADX has already \
+decayed — only take candidates with ADX RISING. For first-bar / opening-range stats on a \
+name, call get_opening_range.
 
 Use the journal as your memory: write down what you observe, what works, what doesn't, \
 and your plan — it survives restarts and the rest of the team reads it. If you are \
@@ -113,7 +121,8 @@ def _inventory(tool_list) -> str:
 def _strategist(broker, db, provider=None) -> Agent:
     schemas, handlers = build_tools(broker, db)
     # Strategist can read + research (all data-feed tools) but cannot trade.
-    _trading_actions = {"place_trade", "close_position", "flatten_all"}
+    _trading_actions = {"place_trade", "close_position", "flatten_all",
+                        "take_partial", "modify_stops", "move_stop_to_breakeven"}
     tools = [t for t in schemas if t["name"] not in _trading_actions]
     system = _MISSION + """
 

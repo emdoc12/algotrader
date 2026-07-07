@@ -73,13 +73,56 @@ def _stats(pnls: list[float]) -> dict:
     }
 
 
+# Collapse the LLM's free-text strategy labels into the 8 canonical built-in
+# buckets (+ "other"), so the breakdown isn't fragmented into ~40 near-dup rows
+# like "MACD" / "macd_with_trend_short" / "MACD trend continuation".
+def canonical_strategy(label) -> str:
+    s = (label or "").lower()
+    if "macd" in s:
+        return "macd"
+    if "orb" in s or "opening range" in s or "opening-range" in s or "openingrange" in s:
+        return "orb"
+    if "vwap" in s and ("revers" in s or "fade" in s or "mean" in s):
+        return "vwap_reversion"
+    if "vwap" in s:
+        return "vwap_trend"
+    if "ema" in s or "pullback" in s:
+        return "ema_pullback"
+    if "rsi" in s:
+        return "rsi2"
+    if "bollinger" in s or "bband" in s or "bb_" in s or "boll" in s:
+        return "bollinger"
+    if "pivot" in s:
+        return "pivot"
+    if "gap" in s:
+        return "gap_fade"
+    if "breakout" in s:
+        return "orb"
+    if "revers" in s or "mean revert" in s or "fade" in s:
+        return "vwap_reversion"
+    return "other"
+
+
+def with_trend_tag(label) -> str:
+    """Infer whether a label describes a with-trend or counter-trend setup."""
+    s = (label or "").lower()
+    if any(k in s for k in ("with trend", "with-trend", "with_trend", "continuation", "trend follow", "momentum", "breakout")):
+        return "with_trend"
+    if any(k in s for k in ("counter", "revers", "fade", "mean")):
+        return "counter_trend"
+    return "unknown"
+
+
 def performance_breakdown(trades, group_by=("strategy",)) -> list[dict]:
     """Group realized (closed, pnl-bearing) trades and compute per-group stats.
 
-    group_by may contain "strategy" and/or "tod_bucket". Rows are sorted by
-    total P&L descending so the bleeders sort to the bottom.
+    group_by may contain "strategy" (canonicalized to a built-in bucket),
+    "direction" (long/short, from the trade side), "with_trend"
+    (with_trend/counter_trend/unknown, inferred from the label), and
+    "tod_bucket" (ET session window). Rows are sorted by total P&L descending.
     """
-    dims = [d for d in (group_by or []) if d in ("strategy", "tod_bucket")]
+    valid = ("strategy", "direction", "with_trend", "tod_bucket")
+    dims = [d for d in (group_by or []) if d in valid]
     if not dims:
         dims = ["strategy"]
     groups: dict[tuple, list] = {}
@@ -90,7 +133,11 @@ def performance_breakdown(trades, group_by=("strategy",)) -> list[dict]:
         key = []
         for d in dims:
             if d == "strategy":
-                key.append(t.get("strategy") or "unknown")
+                key.append(canonical_strategy(t.get("strategy")))
+            elif d == "direction":
+                key.append((t.get("side") or "").lower() or "unknown")
+            elif d == "with_trend":
+                key.append(with_trend_tag(t.get("strategy")))
             else:
                 key.append(tod_bucket(t.get("entry_ts")))
         groups.setdefault(tuple(key), []).append(float(pnl))

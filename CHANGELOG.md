@@ -9,6 +9,29 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.16.0] — 2026-07-06
+
+### Added — dev requests
+- **Canonical strategy labels in the performance breakdown** (dev #7). Free-text
+  strategy names are now normalized server-side to the 8 built-in buckets (+
+  "other") before aggregation, so "MACD" / "macd_with_trend_short" / "MACD trend
+  continuation" collapse into one `macd` row instead of ~40 one-off rows with
+  n=1. `get_performance_breakdown` also gains `direction` (long/short, from the
+  trade side) and `with_trend` (with_trend/counter_trend, inferred) as group-by
+  dimensions — so you can slice setup × direction × time.
+- **Order-management controls** (dev #3): `take_partial` (close a fraction, e.g.
+  0.5, banking a partial at +1R and leaving a runner — recorded as a trade with
+  prorated costs), `move_stop_to_breakeven` (lock a no-loss runner), and
+  `modify_stops` (adjust stop/target on an open position). Given to the Trader;
+  the classic "take 50-60% at +1R, move to breakeven, trail the rest" is now one
+  tool sequence instead of an all-or-nothing manual exit.
+- **Pre-staged EMA scan for the open** (dev #1). The snapshot now carries an
+  `ema_scan` field that classifies every watchlist name as a long/short
+  EMA-pullback candidate with distance-from-EMA9 (in ATR), ADX + slope, VWAP
+  position, and gap — ranked by ADX strength and shallow pullback — so the desk
+  can act in the 9:30-10:00 window instead of analyzing 10+ minutes in after ADX
+  has decayed. Mission now steers desks to only take candidates with ADX rising.
+
 ## [6.15.2] — 2026-07-02
 
 ### Added

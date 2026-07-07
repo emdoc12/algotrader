@@ -206,6 +206,44 @@ def _market_summary(per_symbol: dict) -> dict:
     }
 
 
+def _ema_scan(per_symbol: dict) -> dict:
+    """Pre-stage EMA-pullback structure for the 9:30-10:00 window so the desk has
+    entry zones ready at the bell instead of doing manual analysis after ADX has
+    already decayed. Classifies each name as a long/short candidate by EMA stack
+    and reports distance-from-EMA9 (in ATR), ADX + slope, VWAP position, gap."""
+    longs, shorts = [], []
+    for sym, v in per_symbol.items():
+        if not v:
+            continue
+        price, ema9, ema21, atr = v.get("price"), v.get("ema9"), v.get("ema21"), v.get("atr14")
+        if price is None or ema9 is None or ema21 is None or not atr:
+            continue
+        row = {
+            "symbol": sym, "price": price, "ema9": ema9, "ema21": ema21,
+            "dist_from_ema9_atr": round((price - ema9) / atr, 2),
+            "adx14": v.get("adx14"), "adx_slope": v.get("adx_slope"),
+            "adx_rising": v.get("adx_rising"), "vs_vwap_pct": v.get("vs_vwap_pct"),
+            "day_change_pct": v.get("day_change_pct"), "gap_pct": v.get("gap_pct"),
+            "rs_rank": v.get("rs_rank"),
+        }
+        if price > ema21 and ema9 > ema21:
+            longs.append(row)
+        elif price < ema21 and ema9 < ema21:
+            shorts.append(row)
+    # Rank by real trend strength (high ADX) then shallow pullback (small |dist|).
+    _key = lambda r: (-(r.get("adx14") or 0), abs(r.get("dist_from_ema9_atr") or 99))
+    longs.sort(key=_key)
+    shorts.sort(key=_key)
+    return {
+        "note": ("EMA-pullback candidates pre-staged for the open. Prefer names with "
+                 "ADX>=25 and RISING slope (adx_rising) and a shallow pullback "
+                 "(|dist_from_ema9_atr| small); skip decaying ADX — that's the "
+                 "post-open trap the desk keeps hitting."),
+        "long_candidates": longs[:8],
+        "short_candidates": shorts[:8],
+    }
+
+
 def _default_symbols(top_n: int | None = None) -> list[str]:
     """The day's watchlist from the scanner; falls back to the core universe.
     Size honors the WATCHLIST_SIZE env var (default 18)."""
@@ -252,6 +290,7 @@ def market_only(symbols: list[str] | None = None, interval: str = "5m") -> dict:
         "interval": interval,
         "market": per_symbol,
         "market_summary": _market_summary(per_symbol),
+        "ema_scan": _ema_scan(per_symbol),
         "fresh_signals": fresh,
         "quotes": quote_map,
     }
