@@ -31,6 +31,10 @@ OPEN, PLAN_BY, EOD_FLAT, CLOSE = dtime(9, 30), dtime(9, 45), dtime(15, 50), dtim
 # Don't START a fresh (multi-minute) trade cycle right before the close, so the
 # EOD flatten/review deadline is reliably reachable.
 NO_NEW_TRADES_AFTER = dtime(15, 30)
+# Between full (LLM) trade cycles, poll stops/targets/auto-scale this often so a
+# fast move can't run far past a stop before the next check (tightens the
+# cycle-polled stop from ~15 min to this — reduces stop-through severity).
+STOP_POLL_SEC = int(os.environ.get("STOP_POLL_SECONDS", "120"))
 
 # US equity market full-day closures (NYSE). Static table — extend yearly.
 _MARKET_HOLIDAYS = {
@@ -375,11 +379,13 @@ class Competition:
         cycle_quotes = dict(market.get("quotes") or {})
         base_atr = {sym: m.get("atr14") for sym, m in (market.get("market") or {}).items()
                     if m.get("atr14") is not None}
+        spy_dir = (market.get("market_summary") or {}).get("spy_direction")
         for t in self.teams:
             self._risk_check(t)  # may halt + flatten this team's DAY trades
             # Per-team maps that also cover held-outside-scan symbols.
             q, a = self._held_symbol_data(t, cycle_quotes, base_atr)
             t.broker.set_cycle_quotes(q)
+            t.broker.set_cycle_context(spy_direction=spy_dir)
             try:
                 # Enforce server-side brackets EVERY cycle, even for halted teams
                 # — their surviving swing/long holds still need their stops run.
@@ -479,10 +485,51 @@ class Competition:
                     # Between 15:30 and 15:50: hold — don't start a long cycle
                     # that would blow past the EOD deadline. Manage brackets only.
                     self._manage_only()
-                time.sleep(INTERVAL_SEC)
+                # Sleep to the next cycle, but keep enforcing stops/targets every
+                # STOP_POLL_SEC in between so a fast move can't blow through a stop.
+                self._interruptible_sleep(INTERVAL_SEC)
             except Exception as e:  # noqa: BLE001 - never die
                 print(f"[competition] loop error: {e!r}")
                 time.sleep(60)
+
+    def _stop_poll(self):
+        """Lightweight between-cycle bracket enforcement: fetch quotes for
+        currently-held symbols only and run manage_positions (no LLM, no full
+        snapshot). Stops/targets/auto-scale fire promptly; ATR-trailing still
+        ratchets on the next full cycle."""
+        held: set = set()
+        for t in self.teams:
+            try:
+                held |= {p["symbol"] for p in t.broker.positions()}
+            except Exception:  # noqa: BLE001
+                pass
+        if not held:
+            return
+        from daytrader.data import quotes as _quotes
+        qmap = _quotes.get_quotes(list(held))
+        if not qmap:
+            return
+        for t in self.teams:
+            try:
+                t.broker.set_cycle_quotes(qmap)
+                t.broker.manage_positions(qmap, {})
+            except Exception:  # noqa: BLE001
+                pass
+            finally:
+                t.broker.set_cycle_quotes(None)
+
+    def _interruptible_sleep(self, total: float):
+        """Sleep `total` seconds, running a stop-poll every STOP_POLL_SEC."""
+        slept = 0.0
+        while slept < total:
+            chunk = min(STOP_POLL_SEC, total - slept)
+            time.sleep(chunk)
+            slept += chunk
+            if slept < total:
+                try:
+                    self._stop_poll()
+                except Exception as e:  # noqa: BLE001
+                    print(f"[competition] stop-poll error: {e!r}")
 
     def _manage_only(self):
         """Run server-side bracket enforcement (trailing stops, stop/target
@@ -492,9 +539,11 @@ class Competition:
         cycle_quotes = dict(market.get("quotes") or {})
         base_atr = {sym: m.get("atr14") for sym, m in (market.get("market") or {}).items()
                     if m.get("atr14") is not None}
+        spy_dir = (market.get("market_summary") or {}).get("spy_direction")
         for t in self.teams:
             q, a = self._held_symbol_data(t, cycle_quotes, base_atr)
             t.broker.set_cycle_quotes(q)
+            t.broker.set_cycle_context(spy_direction=spy_dir)
             try:
                 t.broker.manage_positions(q, a)
             finally:

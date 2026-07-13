@@ -158,9 +158,31 @@ class LiveDB:
             self._ensure_column("open_positions", "horizon", "TEXT DEFAULT 'day'")
             self._ensure_column("open_positions", "trail_atr_mult", "REAL")
             self._ensure_column("open_positions", "trail_pct", "REAL")
+            self._ensure_column("open_positions", "with_trend", "TEXT")
+            self._ensure_column("open_positions", "init_stop", "REAL")
+            self._ensure_column("open_positions", "planned_risk", "REAL")
+            self._ensure_column("open_positions", "auto_scale_r", "REAL")
+            self._ensure_column("open_positions", "auto_scale_frac", "REAL")
+            self._ensure_column("open_positions", "scaled", "INTEGER DEFAULT 0")
+            self._ensure_column("trades", "with_trend", "TEXT")
+            self._ensure_column("trades", "planned_risk", "REAL")
+            self._ensure_column("trades", "risk_overrun", "INTEGER DEFAULT 0")
             self.conn.commit()
         except Exception:  # noqa: BLE001 - never block startup on a migration
             pass
+
+    def recent_journal_by_topics(self, topics: tuple, limit: int = 15) -> list[dict]:
+        """Newest journal entries whose topic is in ``topics`` — used to carry
+        end-of-day lessons/plans forward even when buried past the recency
+        window by intraday notes."""
+        if not topics:
+            return []
+        marks = ",".join("?" * len(topics))
+        cur = self.conn.execute(
+            f"SELECT * FROM journal WHERE topic IN ({marks}) ORDER BY id DESC LIMIT ?",
+            (*topics, limit),
+        )
+        return [dict(r) for r in cur.fetchall()]
 
     # ------------------------------------------------------------------ #
     # chat (owner <-> team leader)                                        #
@@ -192,7 +214,7 @@ class LiveDB:
         cols = (
             "symbol", "side", "strategy", "entry_ts", "entry_price", "qty",
             "exit_ts", "exit_price", "commission", "slippage_cost", "pnl",
-            "exit_reason", "rationale",
+            "exit_reason", "rationale", "with_trend", "planned_risk", "risk_overrun",
         )
         params = [trade_dict.get(c) for c in cols]
         cur = self.conn.execute(
@@ -218,6 +240,7 @@ class LiveDB:
         cols = (
             "symbol", "side", "qty", "entry_price", "entry_ts", "strategy",
             "stop", "target", "rationale", "horizon", "trail_atr_mult", "trail_pct",
+            "with_trend", "init_stop", "planned_risk", "auto_scale_r", "auto_scale_frac", "scaled",
         )
         params = [pos_dict.get(c) for c in cols]
         self.conn.execute(

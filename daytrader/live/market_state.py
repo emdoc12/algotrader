@@ -18,6 +18,8 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 ET_ZONE = ZoneInfo("America/New_York")
+import os as _os
+_STOP_POLL_SEC = int(_os.environ.get("STOP_POLL_SECONDS", "120"))
 
 from daytrader.core import indicators as ind
 from daytrader.data import loader, quotes
@@ -206,6 +208,76 @@ def _market_summary(per_symbol: dict) -> dict:
     }
 
 
+def _add_rs_persistence(per_symbol: dict, data: dict, benchmark: str = "SPY") -> None:
+    """Annotate each name with how STABLE its relative strength has been this
+    session — not just who leads right now. Targets the recurring loss pattern of
+    entering a one-bar 'RS leader' that flips to laggard in 15-20 min.
+
+    Adds per symbol:
+      rs_persistence   — fraction of the session's bars the name's RS line was
+                         positive vs SPY (0-1); high = durable leadership.
+      rs_slope_20m/60m — change in the RS line (pct pts) over ~20m / ~60m;
+                         positive = leadership accelerating, negative = decaying.
+      rs_rank_change_20m — cross-sectional rank moved over ~20m (+ = climbed).
+      rs_stable        — bool: durable leader (persistence>=0.7 & slope_20m>=0)
+                         or durable laggard (persistence<=0.3 & slope_20m<=0).
+    """
+    B20, B60 = 4, 12  # 5m bars ≈ 20 / 60 minutes
+
+    def _today_close(df):
+        d = df.index[-1].normalize()
+        c = df[df.index.normalize() == d]["close"]
+        return c
+
+    spy = data.get(benchmark)
+    if spy is None or len(spy) == 0:
+        return
+    spy_c = _today_close(spy)
+    if len(spy_c) < 2:
+        return
+    spy_ret = spy_c / float(spy_c.iloc[0]) - 1.0
+
+    rs_lines: dict[str, "pd.Series"] = {}
+    for sym in list(per_symbol):
+        if not per_symbol[sym]:
+            continue
+        df = data.get(sym)
+        if df is None or len(df) == 0:
+            continue
+        c = _today_close(df)
+        if len(c) < 2:
+            continue
+        sym_ret = c / float(c.iloc[0]) - 1.0
+        aligned = pd.concat([sym_ret, spy_ret], axis=1, join="inner").dropna()
+        if len(aligned) < 2:
+            continue
+        rs_lines[sym] = aligned.iloc[:, 0] - aligned.iloc[:, 1]  # RS line (fraction)
+
+    if not rs_lines:
+        return
+    rs_df = pd.DataFrame(rs_lines)
+    ranks = rs_df.rank(axis=1, ascending=False)  # 1 = strongest RS
+
+    for sym, rs in rs_lines.items():
+        n = len(rs)
+        last = float(rs.iloc[-1])
+        persistence = round(float((rs.tail(B60) > 0).mean()), 2)
+        slope20 = round((last - float(rs.iloc[-1 - B20])) * 100, 2) if n > B20 else None
+        slope60 = round((last - float(rs.iloc[-1 - B60])) * 100, 2) if n > B60 else None
+        rank_chg = None
+        if len(ranks) > B20:
+            rn, rt = ranks[sym].iloc[-1], ranks[sym].iloc[-1 - B20]
+            if pd.notna(rn) and pd.notna(rt):
+                rank_chg = int(rt - rn)  # positive = climbed the rankings
+        stable = ((persistence >= 0.7 and (slope20 or 0) >= 0)
+                  or (persistence <= 0.3 and (slope20 or 0) <= 0))
+        per_symbol[sym]["rs_persistence"] = persistence
+        per_symbol[sym]["rs_slope_20m"] = slope20
+        per_symbol[sym]["rs_slope_60m"] = slope60
+        per_symbol[sym]["rs_rank_change_20m"] = rank_chg
+        per_symbol[sym]["rs_stable"] = bool(stable)
+
+
 def _ema_scan(per_symbol: dict) -> dict:
     """Pre-stage EMA-pullback structure for the 9:30-10:00 window so the desk has
     entry zones ready at the bell instead of doing manual analysis after ADX has
@@ -282,6 +354,7 @@ def market_only(symbols: list[str] | None = None, interval: str = "5m") -> dict:
     per_symbol = {sym: _latest_indicators(df, live_price=quote_map.get(sym))
                   for sym, df in data.items() if sym in symbols}
     _add_relative_strength(per_symbol, data)
+    _add_rs_persistence(per_symbol, data)
     fresh = _fresh_signals(data)
     now_et = datetime.now(timezone.utc).astimezone()
     out = {
@@ -348,7 +421,15 @@ def with_account(market_snap: dict, broker) -> dict:
     db = getattr(broker, "db", None)
     if db is not None:
         try:
-            out["journal"] = db.recent_journal(limit=20)
+            out["journal"] = db.recent_journal(limit=40)
+        except Exception:  # noqa: BLE001
+            pass
+        # Cross-session memory: surface the newest lessons/plans/risk notes even
+        # when buried past the recency window — so EOD Reviewer findings reliably
+        # reach the next day's planner (fixes "review lessons never carry forward").
+        try:
+            out["recent_lessons"] = db.recent_journal_by_topics(
+                ("lesson", "plan", "risk", "review"), limit=15)
         except Exception:  # noqa: BLE001
             pass
         try:
@@ -382,6 +463,37 @@ def with_account(market_snap: dict, broker) -> dict:
             out["session_realized_pnl"] = round(realized, 2)
         except Exception:  # noqa: BLE001
             pass
+        # Risk audit: planned vs realized, flagging stop-throughs (realized loss
+        # materially exceeding the planned entry→stop risk). Grounds the "stop
+        # filled far past my planned risk" complaint in data.
+        try:
+            audit = []
+            for tr in db.recent_trades(limit=60):
+                if not tr.get("risk_overrun"):
+                    continue
+                audit.append({
+                    "symbol": tr.get("symbol"), "side": tr.get("side"),
+                    "planned_risk": tr.get("planned_risk"), "realized_pnl": tr.get("pnl"),
+                    "exit_reason": tr.get("exit_reason"), "exit_ts": tr.get("exit_ts"),
+                })
+            out["risk_audit"] = {
+                "stop_throughs": audit[:10],
+                "note": ("Trades where realized loss exceeded planned entry→stop risk "
+                         "by >25% — usually stop-through between polls on a fast move."),
+            }
+        except Exception:  # noqa: BLE001
+            pass
+    # Stop-execution transparency: stops are POLLED (server-side each cycle + a
+    # faster between-cycle poll), NOT continuous native exchange stops. Size for
+    # gap risk — a fast move can fill worse than the stop between polls.
+    out["stop_execution"] = {
+        "mode": "cycle_polled",
+        "poll_interval_sec": _STOP_POLL_SEC,
+        "note": ("Stops/targets/trailing/auto-scale are enforced server-side on each "
+                 "trade cycle AND on a faster between-cycle poll — but not tick-by-tick. "
+                 "A fast move can fill past your stop between polls (stop-through); size "
+                 "for that gap risk, especially on 2x/3x levered ETFs."),
+    }
     return out
 
 

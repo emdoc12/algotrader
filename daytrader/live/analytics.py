@@ -121,7 +121,7 @@ def performance_breakdown(trades, group_by=("strategy",)) -> list[dict]:
     (with_trend/counter_trend/unknown, inferred from the label), and
     "tod_bucket" (ET session window). Rows are sorted by total P&L descending.
     """
-    valid = ("strategy", "direction", "with_trend", "tod_bucket")
+    valid = ("strategy", "strategy_raw", "direction", "with_trend", "tod_bucket")
     dims = [d for d in (group_by or []) if d in valid]
     if not dims:
         dims = ["strategy"]
@@ -134,10 +134,16 @@ def performance_breakdown(trades, group_by=("strategy",)) -> list[dict]:
         for d in dims:
             if d == "strategy":
                 key.append(canonical_strategy(t.get("strategy")))
+            elif d == "strategy_raw":
+                # preserve the exact label (so custom strategies don't collapse to "other")
+                key.append((t.get("strategy") or "unknown").strip() or "unknown")
             elif d == "direction":
                 key.append((t.get("side") or "").lower() or "unknown")
             elif d == "with_trend":
-                key.append(with_trend_tag(t.get("strategy")))
+                # prefer the value RECORDED at entry (from SPY direction);
+                # fall back to inferring from the label for older trades.
+                wt = t.get("with_trend")
+                key.append(wt if wt else with_trend_tag(t.get("strategy")))
             else:
                 key.append(tod_bucket(t.get("entry_ts")))
         groups.setdefault(tuple(key), []).append(float(pnl))

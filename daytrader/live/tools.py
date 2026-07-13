@@ -39,6 +39,8 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
             horizon=inp.get("horizon", "day"),
             trail_atr_mult=inp.get("trail_atr_mult"),
             trail_pct=inp.get("trail_pct"),
+            auto_scale_r=inp.get("auto_scale_r"),
+            auto_scale_frac=inp.get("auto_scale_frac"),
         )
         db.log_agent("trader", "place_trade", str({k: inp.get(k) for k in ("symbol", "side", "qty", "horizon")}))
         return res
@@ -316,7 +318,14 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
 
     def journal_write(inp: dict) -> dict:
         jid = db.add_journal(inp.get("author", "team"), inp.get("topic", "note"), inp.get("note", ""))
-        return {"ok": True, "id": jid}
+        # Read back to CONFIRM persistence — the snapshot you were handed was
+        # built before this write, so your entry won't appear there; it IS saved
+        # and carries to the next session (topic 'lesson'/'plan' surface in
+        # 'recent_lessons'). This confirmation stops the "silently dropped" doubt.
+        persisted = any(j.get("id") == jid for j in db.recent_journal(limit=5))
+        return {"ok": True, "id": jid, "persisted": persisted,
+                "note": "Saved. Not in your current snapshot (built pre-write); "
+                        "visible to all roles next cycle and carried forward as a lesson/plan."}
 
     def request_dev_help(inp: dict) -> dict:
         res = file_dev_request(inp["title"], inp.get("body", ""), inp.get("labels"), db=db)
@@ -395,6 +404,8 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                     "horizon": {"type": "string", "enum": ["day", "swing", "long"], "description": "Intended hold. Default 'day' (flattened at close). 'swing'/'long' survive the close. Prefer 'day' unless the setup genuinely warrants more time."},
                     "trail_atr_mult": {"type": "number", "description": "Optional trailing stop = this many ATRs behind price; ratchets in your favor each cycle and auto-closes when hit. Use to let a winner run instead of a fixed target."},
                     "trail_pct": {"type": "number", "description": "Optional trailing stop as a percent of price (alternative to trail_atr_mult). E.g. 1.5 = trail 1.5%."},
+                    "auto_scale_r": {"type": "number", "description": "Server-enforced scale-out trigger, in R multiples (R = entry→stop). DEFAULT 1.0: at +1R the system auto-banks part of the position and moves the stop to breakeven. Set with auto_scale_frac."},
+                    "auto_scale_frac": {"type": "number", "description": "Fraction to auto-bank at +auto_scale_r (DEFAULT 0.5 = half). Set to 0 to DISABLE server-enforced scale-out for this trade and manage exits yourself."},
                 },
                 "required": ["symbol", "side", "qty", "stop", "target", "rationale"],
             },
@@ -470,8 +481,8 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "group_by": {"type": "array", "items": {"type": "string", "enum": ["strategy", "direction", "with_trend", "tod_bucket"]},
-                                 "description": "Dimensions to group by (default ['strategy']). Combine for a setup×direction×time matrix."},
+                    "group_by": {"type": "array", "items": {"type": "string", "enum": ["strategy", "strategy_raw", "direction", "with_trend", "tod_bucket"]},
+                                 "description": "Dimensions to group by (default ['strategy']). 'strategy' = canonical built-in bucket; 'strategy_raw' = the exact label (so custom strategies like 'trend_follow' don't collapse into 'other'); 'direction' = long/short; 'with_trend' = with_trend/counter_trend (recorded from SPY direction at entry); 'tod_bucket' = ET session window. Combine for a setup×direction×time matrix."},
                 },
             },
         },

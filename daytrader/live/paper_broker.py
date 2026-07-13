@@ -38,6 +38,16 @@ MAX_TRADE_RISK_PCT = float(os.environ.get("MAX_TRADE_RISK_PCT", "2.0"))   # entr
 MAX_GROSS_EXPOSURE = float(os.environ.get("MAX_GROSS_EXPOSURE", "2.0"))   # Σ|position notional| ≤ this × equity
 REQUIRE_STOP = os.environ.get("REQUIRE_STOP", "1") not in ("0", "false", "False", "")
 
+# Server-enforced scale-out: by default, bank AUTO_SCALE_DEFAULT_FRAC of a
+# position at +AUTO_SCALE_DEFAULT_R and move the stop to breakeven. Set the frac
+# to 0 (globally via AUTO_SCALE_DEFAULT_FRAC, or per-trade) to disable.
+AUTO_SCALE_DEFAULT_R = float(os.environ.get("AUTO_SCALE_DEFAULT_R", "1.0"))
+AUTO_SCALE_DEFAULT_FRAC = float(os.environ.get("AUTO_SCALE_DEFAULT_FRAC", "0.5"))
+# How much realized loss may exceed planned risk before it's flagged (stop-through).
+RISK_OVERRUN_MULT = float(os.environ.get("RISK_OVERRUN_MULT", "1.25"))
+# How stops are enforced (surfaced to the desks for transparency).
+STOP_POLL_SEC = int(os.environ.get("STOP_POLL_SECONDS", "120"))
+
 
 class PaperBroker:
     def __init__(
@@ -56,6 +66,9 @@ class PaperBroker:
         # use these prices so the broker matches what the agent reasoned over.
         # Cleared between cycles; equity marks and EOD flattens use live quotes.
         self._cycle_quotes: Optional[dict[str, float]] = None
+        # SPY's direction ("up"/"down") for the current cycle, so entries can be
+        # tagged with_trend / counter_trend at fill time.
+        self._cycle_spy_direction: Optional[str] = None
 
         # ---- restart recovery -------------------------------------------------
         for row in self.db.load_open_positions():
@@ -73,6 +86,12 @@ class PaperBroker:
                 "horizon": (row["horizon"] if "horizon" in row.keys() and row["horizon"] else "day"),
                 "trail_atr_mult": (row["trail_atr_mult"] if "trail_atr_mult" in row.keys() else None),
                 "trail_pct": (row["trail_pct"] if "trail_pct" in row.keys() else None),
+                "with_trend": (row["with_trend"] if "with_trend" in row.keys() else None),
+                "init_stop": (row["init_stop"] if "init_stop" in row.keys() else row["stop"]),
+                "planned_risk": (row["planned_risk"] if "planned_risk" in row.keys() else None),
+                "auto_scale_r": (row["auto_scale_r"] if "auto_scale_r" in row.keys() else None),
+                "auto_scale_frac": (row["auto_scale_frac"] if "auto_scale_frac" in row.keys() else None),
+                "scaled": bool(row["scaled"]) if "scaled" in row.keys() and row["scaled"] else False,
             }
 
         last = self.db.last_equity()
@@ -100,6 +119,11 @@ class PaperBroker:
     # ------------------------------------------------------------------ #
     # pricing                                                             #
     # ------------------------------------------------------------------ #
+    def set_cycle_context(self, spy_direction: Optional[str] = None) -> None:
+        """Per-cycle market context (currently SPY's direction) used to tag new
+        entries as with_trend / counter_trend at fill time."""
+        self._cycle_spy_direction = spy_direction
+
     def set_cycle_quotes(self, quote_map: Optional[dict[str, float]]) -> None:
         """Pin a per-cycle quote map. Fills served from these prices match
         exactly what the snapshot showed the agent. Pass ``None`` to clear."""
@@ -162,7 +186,24 @@ class PaperBroker:
             "horizon": pos.get("horizon", "day"),
             "trail_atr_mult": pos.get("trail_atr_mult"),
             "trail_pct": pos.get("trail_pct"),
+            "with_trend": pos.get("with_trend"),
+            "init_stop": pos.get("init_stop"),
+            "planned_risk": pos.get("planned_risk"),
+            "auto_scale_r": pos.get("auto_scale_r"),
+            "auto_scale_frac": pos.get("auto_scale_frac"),
+            "scaled": 1 if pos.get("scaled") else 0,
         })
+
+    def _audit(self, pos: dict, qty_closed: float, pnl: float):
+        """(with_trend, planned_risk for this qty, risk_overrun flag). Planned
+        risk is recomputed from the INITIAL stop so partials/scale-outs prorate
+        cleanly; overrun flags a stop-through (realized loss >> planned)."""
+        init_stop = pos.get("init_stop")
+        if init_stop is None:
+            init_stop = pos.get("stop")
+        planned = abs(pos["entry_price"] - init_stop) * qty_closed if init_stop is not None else None
+        overrun = 1 if (planned and pnl < 0 and (-pnl) > RISK_OVERRUN_MULT * planned) else 0
+        return pos.get("with_trend"), (round(planned, 2) if planned is not None else None), overrun
 
     def open(
         self,
@@ -176,6 +217,8 @@ class PaperBroker:
         horizon: str = "day",
         trail_atr_mult: Optional[float] = None,
         trail_pct: Optional[float] = None,
+        auto_scale_r: Optional[float] = None,
+        auto_scale_frac: Optional[float] = None,
     ) -> dict:
         """Market entry at the latest live price plus slippage.
 
@@ -185,6 +228,11 @@ class PaperBroker:
 
         ``trail_atr_mult`` / ``trail_pct`` enable a server-side trailing stop that
         :meth:`manage_positions` ratchets in the favorable direction each cycle.
+
+        ``auto_scale_r`` / ``auto_scale_frac`` enable server-enforced scale-out:
+        when the mark reaches +auto_scale_r R (R = entry→initial-stop), the system
+        banks auto_scale_frac of the position and moves the stop to breakeven.
+        Defaults come from AUTO_SCALE_DEFAULT_*; set frac to 0 to disable.
         """
         side = Side(side)
         qty = float(qty)
@@ -193,6 +241,8 @@ class PaperBroker:
             horizon = "day"
         trail_atr_mult = float(trail_atr_mult) if trail_atr_mult else None
         trail_pct = float(trail_pct) if trail_pct else None
+        auto_scale_r = float(auto_scale_r) if auto_scale_r is not None else AUTO_SCALE_DEFAULT_R
+        auto_scale_frac = float(auto_scale_frac) if auto_scale_frac is not None else AUTO_SCALE_DEFAULT_FRAC
         if qty <= 0:
             return self._fail(symbol, side, qty, "qty must be positive")
         if symbol in self._positions:
@@ -257,6 +307,13 @@ class PaperBroker:
             self._cash += notional - commission
 
         entry_ts = _now_iso()
+        with_trend = None
+        if self._cycle_spy_direction in ("up", "down"):
+            with_trend = ("with_trend" if
+                          ((side == Side.LONG and self._cycle_spy_direction == "up")
+                           or (side == Side.SHORT and self._cycle_spy_direction == "down"))
+                          else "counter_trend")
+        planned_risk = abs(fill - stop) * qty if stop is not None else None
         self._positions[symbol] = {
             "symbol": symbol,
             "side": side,
@@ -270,6 +327,12 @@ class PaperBroker:
             "horizon": horizon,
             "trail_atr_mult": trail_atr_mult,
             "trail_pct": trail_pct,
+            "with_trend": with_trend,
+            "init_stop": stop,
+            "planned_risk": planned_risk,
+            "auto_scale_r": auto_scale_r,
+            "auto_scale_frac": auto_scale_frac,
+            "scaled": False,
             # carried for realized-pnl accounting at close:
             "commission_paid": commission,
             "slippage_paid": slip,
@@ -315,6 +378,7 @@ class PaperBroker:
         total_commission = pos.get("commission_paid", 0.0) + commission
         total_slip = pos.get("slippage_paid", 0.0) + slip
         pnl = gross - total_commission
+        wt, planned_risk, overrun = self._audit(pos, qty, pnl)
 
         trade_id = self.db.record_trade({
             "symbol": symbol,
@@ -330,6 +394,9 @@ class PaperBroker:
             "pnl": pnl,
             "exit_reason": reason,
             "rationale": pos.get("rationale", ""),
+            "with_trend": wt,
+            "planned_risk": planned_risk,
+            "risk_overrun": overrun,
         })
         del self._positions[symbol]
         self.db.delete_position(symbol)
@@ -387,12 +454,14 @@ class PaperBroker:
         entry_comm = pos.get("commission_paid", 0.0) * share
         entry_slip = pos.get("slippage_paid", 0.0) * share
         pnl = gross - (entry_comm + commission)
+        wt, planned_risk, overrun = self._audit(pos, qty_close, pnl)
         trade_id = self.db.record_trade({
             "symbol": symbol, "side": side.value, "strategy": pos.get("strategy"),
             "entry_ts": pos.get("entry_ts"), "entry_price": pos["entry_price"],
             "qty": qty_close, "exit_ts": _now_iso(), "exit_price": exit_px,
             "commission": entry_comm + commission, "slippage_cost": entry_slip + slip,
             "pnl": pnl, "exit_reason": reason, "rationale": pos.get("rationale", ""),
+            "with_trend": wt, "planned_risk": planned_risk, "risk_overrun": overrun,
         })
         # Shrink the remaining position and its carried costs.
         pos["qty"] = qty_total - qty_close
@@ -478,6 +547,30 @@ class PaperBroker:
             mark = float(mark)
             side = pos["side"]
 
+            # 0) server-enforced scale-out at +Nx R: bank a fraction and move the
+            #    stop to breakeven once the trade reaches its reward multiple.
+            frac = pos.get("auto_scale_frac")
+            r_mult = pos.get("auto_scale_r")
+            init_stop = pos.get("init_stop") if pos.get("init_stop") is not None else pos.get("stop")
+            if (not pos.get("scaled") and frac and frac > 0 and r_mult and r_mult > 0
+                    and init_stop is not None):
+                risk_ps = abs(pos["entry_price"] - init_stop)
+                if risk_ps > 0:
+                    tgt = (pos["entry_price"] + r_mult * risk_ps if side == Side.LONG
+                           else pos["entry_price"] - r_mult * risk_ps)
+                    reached = mark >= tgt if side == Side.LONG else mark <= tgt
+                    if reached:
+                        res = self.reduce_position(sym, frac, reason=f"auto_scale_{r_mult:g}R")
+                        # position may still exist (partial); mark it + breakeven
+                        if sym in self._positions:
+                            self._positions[sym]["scaled"] = True
+                            self.move_stop_to_breakeven(sym)
+                        events.append({"symbol": sym, "action": "auto_scale",
+                                       "closed": res.get("closed_qty"), "pnl": res.get("pnl")})
+                        pos = self._positions.get(sym)
+                        if pos is None:
+                            continue
+
             # 1) ratchet trailing stop (only ever tightens toward price)
             trail_dist = None
             if pos.get("trail_atr_mult") and atr_map.get(sym):
@@ -546,6 +639,11 @@ class PaperBroker:
                 "horizon": pos.get("horizon", "day"),
                 "trail_atr_mult": pos.get("trail_atr_mult"),
                 "trail_pct": pos.get("trail_pct"),
+                "with_trend": pos.get("with_trend"),
+                "planned_risk": pos.get("planned_risk"),
+                "scaled": bool(pos.get("scaled")),
+                "auto_scale_r": pos.get("auto_scale_r"),
+                "auto_scale_frac": pos.get("auto_scale_frac"),
                 "rationale": pos.get("rationale", ""),
             })
         return out

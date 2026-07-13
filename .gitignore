@@ -5,7 +5,9 @@ __pycache__/
 bot_data.db
 cache/
 *.pkl
-data/
+# Runtime data dir only (root-level). NOT daytrader/data/, which is SOURCE —
+# the bare "data/" rule silently un-tracked the feeds package for months.
+/data/
 settings.json
 *.db
 *.db-shm

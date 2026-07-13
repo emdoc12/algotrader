@@ -9,6 +9,56 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.17.0] — 2026-07-13
+
+### Fixed — INCIDENT: research/web tools were never committed
+- **The entire `daytrader/data/feeds/` package was silently gitignored** (a bare
+  `data/` rule in .gitignore matched the *source* dir) and had **never been
+  committed to `main`** — so the deployed app has been running WITHOUT the
+  web_search / web_fetch / YouTube / Polygon / Unusual Whales / Quiver / Finviz /
+  BullFlow tools the whole time (`tools.py` imported them, the import failed, and
+  it degraded to "data feeds unavailable"). Fixed the .gitignore (now `/data/`,
+  root-only) and restored + committed the package. base.py, web.py, and
+  unusual_whales.py are exact; polygon/quiver/finviz/bullflow are faithful
+  RECONSTRUCTIONS (verify their endpoints if you set those keys). Web/YouTube
+  tools (no key) work immediately; the SSRF/byte-cap guards are included.
+
+### Fixed — bug
+- **Journal lessons now reliably carry across sessions** (reported as
+  "journal_write returns ok but entries vanish"). Writes were never actually
+  dropped (verified) — but the Reviewer is handed a snapshot built *before* its
+  write (so it can't see its own entry), and EOD lessons got buried past the
+  20-entry recency window before the next planner read them. Fixes: snapshot now
+  carries a dedicated `recent_lessons` (topic-filtered: lesson/plan/risk/review,
+  its own window) that always reaches the next planner; `journal_write` returns a
+  `persisted` confirmation; the journal window grew to 40.
+
+### Added — dev requests
+- **RS persistence / leadership-stability** in the snapshot: per-symbol
+  `rs_persistence`, `rs_slope_20m/60m`, `rs_rank_change_20m`, `rs_stable` — so
+  desks can gate RS-continuation/vwap-trend entries on *durable* leadership
+  instead of chasing one-bar leaders that mean-revert.
+- **with_trend recorded at entry** from SPY's direction (not inferred from the
+  label) → the breakdown's `with_trend` dimension is now meaningful.
+- **Custom strategy names survive** the breakdown: new `strategy_raw` group_by
+  preserves exact labels so custom setups don't collapse into "other".
+- **Server-enforced +1R auto-scale** (default on): at +1R the system banks
+  `auto_scale_frac` (default 0.5) and moves the stop to breakeven — no manual
+  tool call needed. Override per trade (`auto_scale_frac: 0` disables) or
+  globally via `AUTO_SCALE_DEFAULT_*`.
+- **Planned-vs-realized risk audit**: trades record planned risk + a
+  `risk_overrun` flag (realized loss >25% over planned = stop-through); surfaced
+  as `risk_audit` in the snapshot.
+- **Stop-execution transparency**: snapshot `stop_execution` states stops are
+  *cycle-polled* (now also on a faster between-cycle poll, default 120s, not
+  tick-by-tick) so desks size for gap risk. The between-cycle poll tightens stop
+  enforcement from ~15 min to ~2 min, reducing stop-through severity.
+
+### Deferred (next pass)
+- adx_decay_exit + min_trend_duration_bars (backtest-engine entry/exit filters),
+  sector-cluster indicators, and pre-staged auto-fire open-window orders — these
+  need dedicated engine/scheduler work and will get their own release.
+
 ## [6.16.0] — 2026-07-06
 
 ### Added — dev requests
