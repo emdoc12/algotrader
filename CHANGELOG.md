@@ -9,6 +9,30 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.18.0] — 2026-07-13
+
+### Added — the four deferred dev requests
+- **`min_trend_duration_bars`** on backtest_strategy / backtest_custom_strategy:
+  only enter after the symbol's ADX has been >= adx_threshold AND strictly rising
+  for N consecutive bars — filters short-lived regime spikes so a desk can test
+  whether an edge is concentrated in sustained trends.
+- **`adx_decay_exit`** on both backtests (engine-level): force-close a held
+  position when its ADX drops >= `adx_drop_from_peak` from its post-entry peak OR
+  slopes negative for >= `negative_slope_bars` bars — models intra-trade
+  deceleration (the SQQQ-style loss the fixed duration filter couldn't catch).
+- **Sector-cluster indicators** in `market_summary.sector_clusters`: per-sector
+  (semis, mega-tech, EV, financials, energy, china, crypto-proxy, index) counts
+  of RSI>70/>80/<30/<20, avg ADX + rising/falling, and an overbought/oversold
+  cluster flag — so an exhaustion cluster (e.g. 9 semis all RSI>85) is visible on
+  cycle 1 instead of requiring a manual scan.
+- **Pre-staged auto-fire orders** for the 9:30-10:00 window: `stage_order`
+  (symbol/side/qty/stop/target + `fire_after` ET time + optional `max_ema9_dist_atr`
+  / `min_adx` gates), `list_staged_orders`, `cancel_staged_order`. The system
+  auto-fires a staged order within ~2 min of its target time (on the stop-poll)
+  IF the entry conditions still hold, else skips it — removing the calculation
+  step from the time-critical window. Available to the Strategist (pre-open) and
+  Trader. New `staged_orders` table.
+
 ## [6.17.0] — 2026-07-13
 
 ### Fixed — INCIDENT: research/web tools were never committed

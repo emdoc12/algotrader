@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, time as dtime
 from zoneinfo import ZoneInfo
 
+from daytrader.core.types import Side
 from daytrader.live.agents import TradingTeam
 from daytrader.live.db import LiveDB
 from daytrader.live.market_state import market_only, with_account
@@ -492,11 +493,69 @@ class Competition:
                 print(f"[competition] loop error: {e!r}")
                 time.sleep(60)
 
+    @staticmethod
+    def _fire_staged_for_team(team):
+        """Check each pending staged order; once its fire_after time has passed,
+        re-verify the entry conditions (distance from EMA9, min ADX) and submit
+        it — or skip it if the setup no longer holds. Runs off the stop-poll so
+        orders fire within ~2 min of their target time."""
+        try:
+            pending = team.db.list_staged_orders(status="pending")
+        except Exception:  # noqa: BLE001
+            return
+        if not pending:
+            return
+        from daytrader.core import indicators as _ind
+        from daytrader.data import loader as _loader, quotes as _quotes
+        now_t = datetime.now(ET).time()
+        for o in pending:
+            fa = o.get("fire_after")
+            if fa:
+                try:
+                    hh, mm = str(fa).split(":")[:2]
+                    if now_t < dtime(int(hh), int(mm)):
+                        continue  # not due yet
+                except Exception:  # noqa: BLE001
+                    pass
+            sym = o["symbol"]
+            try:
+                df = _loader.load(sym, interval="5m", max_age_hours=0.1)
+                price = _quotes.get_quote(sym) or float(df["close"].iloc[-1])
+                ema9 = float(_ind.ema(df["close"], 9).iloc[-1])
+                atr = float(_ind.atr(df, 14).iloc[-1])
+                adxv = float(_ind.adx(df, 14).iloc[-1])
+            except Exception as e:  # noqa: BLE001
+                team.db.update_staged_order(o["id"], "skipped", f"data unavailable: {e!r}")
+                continue
+            reasons = []
+            if o.get("max_ema9_dist_atr") is not None and atr > 0:
+                dist = abs(price - ema9) / atr
+                if dist > float(o["max_ema9_dist_atr"]):
+                    reasons.append(f"price {dist:.2f}xATR from EMA9 (> {o['max_ema9_dist_atr']})")
+            if o.get("min_adx") is not None and adxv < float(o["min_adx"]):
+                reasons.append(f"ADX {adxv:.0f} < min {o['min_adx']}")
+            if reasons:
+                team.db.update_staged_order(o["id"], "skipped", "; ".join(reasons))
+                continue
+            res = team.broker.open(
+                symbol=sym, side=Side.LONG if o["side"] == "long" else Side.SHORT,
+                qty=float(o["qty"]), stop=o.get("stop"), target=o.get("target"),
+                strategy=o.get("strategy") or "staged", rationale=o.get("rationale", ""),
+                horizon=o.get("horizon", "day"))
+            team.db.update_staged_order(
+                o["id"], "fired" if res.get("ok") else "skipped",
+                "filled @ %.4f" % res["fill_price"] if res.get("ok") else str(res.get("reason")))
+
     def _stop_poll(self):
         """Lightweight between-cycle bracket enforcement: fetch quotes for
         currently-held symbols only and run manage_positions (no LLM, no full
         snapshot). Stops/targets/auto-scale fire promptly; ATR-trailing still
         ratchets on the next full cycle."""
+        # Fire any due pre-staged orders first (so they hit near their target
+        # time, ~2-min granularity, not the 15-min trade cycle).
+        for t in self.teams:
+            if not t.halted:
+                self._fire_staged_for_team(t)
         held: set = set()
         for t in self.teams:
             try:

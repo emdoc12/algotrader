@@ -73,6 +73,45 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
     def move_stop_to_breakeven(inp: dict) -> dict:
         return broker.move_stop_to_breakeven(inp["symbol"].upper())
 
+    def stage_order(inp: dict) -> dict:
+        """Pre-stage an order to auto-fire at/after a time IF conditions hold."""
+        raw_side = str(inp.get("side", "")).strip().lower()
+        if raw_side in _LONG_WORDS:
+            side = "long"
+        elif raw_side in _SHORT_WORDS:
+            side = "short"
+        else:
+            return {"ok": False, "error": f"side must be long or short (got {inp.get('side')!r})"}
+        try:
+            qty = float(inp["qty"])
+            assert qty > 0
+        except (KeyError, TypeError, ValueError, AssertionError):
+            return {"ok": False, "error": "qty must be a positive number"}
+        oid = db.add_staged_order({
+            "symbol": inp["symbol"].upper(), "side": side, "qty": qty,
+            "stop": inp.get("stop"), "target": inp.get("target"),
+            "strategy": inp.get("strategy", "staged"), "rationale": inp.get("rationale", ""),
+            "horizon": inp.get("horizon", "day"),
+            "fire_after": inp.get("fire_after", "09:35"),
+            "max_ema9_dist_atr": inp.get("max_ema9_dist_atr"),
+            "min_adx": inp.get("min_adx"),
+        })
+        db.log_agent("trader", "stage_order", f"{side} {qty} {inp['symbol'].upper()} @>{inp.get('fire_after','09:35')}")
+        return {"ok": True, "id": oid,
+                "note": "Staged. Auto-fires at/after fire_after (ET) IF the entry conditions "
+                        "(distance from EMA9, min ADX) still hold; otherwise it's skipped."}
+
+    def list_staged_orders(_inp: dict) -> dict:
+        return {"ok": True, "pending": db.list_staged_orders(status="pending")}
+
+    def cancel_staged_order(inp: dict) -> dict:
+        try:
+            oid = int(inp.get("id"))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "id (integer) required"}
+        ok = db.update_staged_order(oid, status="cancelled", result="cancelled by trader")
+        return {"ok": ok, "id": oid}
+
     def get_positions(_inp: dict) -> dict:
         return {"ok": True, "positions": broker.positions(), "cash": broker.cash(),
                 "equity": broker.equity(), "drawdown_pct": broker.drawdown_pct()}
@@ -234,6 +273,8 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                 starting_equity=float(inp.get("starting_equity", 25000.0)),
                 pessimistic_costs=bool(inp.get("pessimistic_costs", False)),
                 strategy_params=inp.get("strategy_params"),
+                min_trend_duration_bars=int(inp.get("min_trend_duration_bars", 1)),
+                adx_decay_exit=inp.get("adx_decay_exit"),
             )
         except Exception as e:  # noqa: BLE001
             return {"error": repr(e)}
@@ -274,6 +315,8 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                 market_filter=bool(inp.get("market_filter", True)),
                 starting_equity=float(inp.get("starting_equity", 25000.0)),
                 pessimistic_costs=bool(inp.get("pessimistic_costs", False)),
+                min_trend_duration_bars=int(inp.get("min_trend_duration_bars", 1)),
+                adx_decay_exit=inp.get("adx_decay_exit"),
             )
         except Exception as e:  # noqa: BLE001
             return {"error": repr(e)}
@@ -372,6 +415,9 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
         "take_partial": take_partial,
         "modify_stops": modify_stops,
         "move_stop_to_breakeven": move_stop_to_breakeven,
+        "stage_order": stage_order,
+        "list_staged_orders": list_staged_orders,
+        "cancel_staged_order": cancel_staged_order,
         "get_positions": get_positions,
         "get_performance": get_performance,
         "get_performance_breakdown": get_performance_breakdown,
@@ -466,6 +512,37 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
             },
         },
         {
+            "name": "stage_order",
+            "description": "Pre-stage an order (e.g. before the open) that AUTO-FIRES at/after a target ET time IF the entry conditions still hold — removing the calculation step from the time-critical 9:30-10:00 window. You specify symbol/side/qty/stop/target now; at fire_after (ET, e.g. '09:35') the system checks the live conditions and submits, or SKIPS if they no longer hold. Fires within ~2 min of fire_after (checked on the stop-poll). Use with ema_scan to pre-stage the day's best candidates.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string"},
+                    "side": {"type": "string", "enum": ["long", "short"]},
+                    "qty": {"type": "number"},
+                    "stop": {"type": "number"},
+                    "target": {"type": "number"},
+                    "strategy": {"type": "string"},
+                    "rationale": {"type": "string"},
+                    "horizon": {"type": "string", "enum": ["day", "swing", "long"]},
+                    "fire_after": {"type": "string", "description": "ET time to fire at/after, 'HH:MM' (default 09:35)."},
+                    "max_ema9_dist_atr": {"type": "number", "description": "Skip if |price-EMA9| exceeds this many ATRs at fire time (entry still near EMA9)."},
+                    "min_adx": {"type": "number", "description": "Skip if the symbol's ADX is below this at fire time."},
+                },
+                "required": ["symbol", "side", "qty", "stop", "target"],
+            },
+        },
+        {
+            "name": "list_staged_orders",
+            "description": "List your pending pre-staged auto-fire orders.",
+            "input_schema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "cancel_staged_order",
+            "description": "Cancel a pending staged order by its id (from list_staged_orders).",
+            "input_schema": {"type": "object", "properties": {"id": {"type": "integer"}}, "required": ["id"]},
+        },
+        {
             "name": "get_positions",
             "description": "Get current open positions, cash, equity, and drawdown.",
             "input_schema": {"type": "object", "properties": {}},
@@ -547,6 +624,8 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                     "market_filter": {"type": "boolean", "description": "Require SPY-trend alignment (default true)."},
                     "pessimistic_costs": {"type": "boolean", "description": "Stress-test with harsh slippage (default false)."},
                     "strategy_params": {"type": "object", "description": "Per-strategy parameter overrides passed to the strategy constructor."},
+                    "min_trend_duration_bars": {"type": "integer", "description": "Only enter after the symbol's ADX has been >= adx_threshold AND strictly rising for this many consecutive bars (default 1 = no filter). Use to test whether the edge survives when filtering out short-lived regime spikes."},
+                    "adx_decay_exit": {"type": "object", "description": "Intra-trade ADX-decay early exit, e.g. {\"adx_drop_from_peak\": 2.0, \"negative_slope_bars\": 3}: force-close a held position if its ADX drops >= adx_drop_from_peak from its post-entry peak OR slopes negative for >= negative_slope_bars bars. Tests cutting during mid-trend deceleration."},
                 },
             },
         },
@@ -579,6 +658,8 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                     "adx_threshold": {"type": "number", "description": "ADX cutoff for trend vs range (default 25)."},
                     "market_filter": {"type": "boolean", "description": "Require SPY-trend alignment (default true)."},
                     "pessimistic_costs": {"type": "boolean", "description": "Stress-test with harsh slippage (default false)."},
+                    "min_trend_duration_bars": {"type": "integer", "description": "Only enter after the symbol's ADX has been >= adx_threshold AND strictly rising for this many consecutive bars (default 1 = no filter)."},
+                    "adx_decay_exit": {"type": "object", "description": "Intra-trade ADX-decay early exit, e.g. {\"adx_drop_from_peak\": 2.0, \"negative_slope_bars\": 3} — force-close if ADX drops from its post-entry peak or slopes negative for N bars."},
                 },
             },
         },

@@ -106,8 +106,12 @@ trend day, lean in early with the leaders before ADX decays — that morning win
 where the edge lives. The snapshot's 'ema_scan' pre-stages long/short EMA-pullback \
 candidates for the 9:30-10:00 window (EMA stack, distance-from-EMA9 in ATR, ADX + slope, \
 VWAP, gap) so you can act at the OPEN instead of analyzing 10+ min in when ADX has already \
-decayed — only take candidates with ADX RISING. For first-bar / opening-range stats on a \
-name, call get_opening_range.
+decayed — only take candidates with ADX RISING. To beat the open-window clock, PRE-STAGE \
+your best 1-2 candidates with stage_order (before/at the open); the system auto-fires them \
+at fire_after ET only if the conditions still hold, removing the calculation step from the \
+time-critical window. 'market_summary.sector_clusters' flags overbought/oversold exhaustion \
+by sector (e.g. 9 semis all RSI>85) on cycle 1 — a warning against momentum-longing an \
+exhausted cluster. For first-bar / opening-range stats on a name, call get_opening_range.
 
 Use the journal as your memory: write down what you observe, what works, what doesn't, \
 and your plan — it survives restarts and the rest of the team reads it. Your most recent \

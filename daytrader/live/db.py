@@ -129,6 +129,23 @@ class LiveDB:
                 k TEXT PRIMARY KEY,
                 v TEXT
             );
+            CREATE TABLE IF NOT EXISTS staged_orders (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts                TEXT NOT NULL,
+                symbol            TEXT NOT NULL,
+                side              TEXT NOT NULL,
+                qty               REAL NOT NULL,
+                stop              REAL,
+                target            REAL,
+                strategy          TEXT,
+                rationale         TEXT,
+                horizon           TEXT DEFAULT 'day',
+                fire_after        TEXT,
+                max_ema9_dist_atr REAL,
+                min_adx           REAL,
+                status            TEXT DEFAULT 'pending',
+                result            TEXT
+            );
             CREATE TABLE IF NOT EXISTS token_usage (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
                 ts            TEXT NOT NULL,
@@ -413,6 +430,35 @@ class LiveDB:
             "SELECT * FROM agent_log ORDER BY id DESC LIMIT ?", (limit,)
         )
         return [dict(r) for r in cur.fetchall()]
+
+    # ------------------------------------------------------------------ #
+    # staged (pre-open auto-fire) orders                                  #
+    # ------------------------------------------------------------------ #
+    def add_staged_order(self, o: dict) -> int:
+        cols = ("symbol", "side", "qty", "stop", "target", "strategy", "rationale",
+                "horizon", "fire_after", "max_ema9_dist_atr", "min_adx")
+        cur = self.conn.execute(
+            f"INSERT INTO staged_orders (ts, {', '.join(cols)}, status) "
+            f"VALUES (?, {', '.join('?' * len(cols))}, 'pending')",
+            (_now_iso(), *[o.get(c) for c in cols]),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def list_staged_orders(self, status: str | None = "pending") -> list[dict]:
+        if status:
+            cur = self.conn.execute(
+                "SELECT * FROM staged_orders WHERE status=? ORDER BY id", (status,))
+        else:
+            cur = self.conn.execute("SELECT * FROM staged_orders ORDER BY id DESC LIMIT 50")
+        return [dict(r) for r in cur.fetchall()]
+
+    def update_staged_order(self, oid: int, status: str, result: str | None = None) -> bool:
+        cur = self.conn.execute(
+            "UPDATE staged_orders SET status=?, result=? WHERE id=?",
+            (status, result, int(oid)))
+        self.conn.commit()
+        return cur.rowcount > 0
 
     # ------------------------------------------------------------------ #
     # token usage / cost                                                  #

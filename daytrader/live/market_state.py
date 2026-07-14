@@ -139,6 +139,57 @@ def _add_relative_strength(
         per_symbol[sym]["rs_rank"] = rank
 
 
+# Coarse sector map for clustering the watchlist. Unmapped names are skipped.
+_SECTORS = {
+    "semis": {"NVDA", "AMD", "INTC", "MU", "AVGO", "QCOM", "TXN", "AMAT", "LRCX",
+              "ASML", "TSM", "MRVL", "ON", "ADI", "KLAC", "MCHP", "NXPI",
+              "SOXL", "SOXS", "SMH", "SOXX", "NVDL"},
+    "mega_tech": {"AAPL", "MSFT", "GOOGL", "GOOG", "AMZN", "META", "NFLX",
+                  "QQQ", "TQQQ", "SQQQ", "XLK"},
+    "ev_auto": {"TSLA", "RIVN", "LCID", "F", "GM", "NIO"},
+    "financials": {"JPM", "BAC", "WFC", "GS", "MS", "C", "SCHW", "XLF"},
+    "energy": {"XOM", "CVX", "OXY", "SLB", "COP", "XLE", "USO"},
+    "china": {"BABA", "PDD", "JD", "BIDU", "FXI", "KWEB"},
+    "crypto_proxy": {"COIN", "MSTR", "MARA", "RIOT", "BITO", "IBIT", "CLSK"},
+    "index": {"SPY", "VOO", "IWM", "DIA", "VTI"},
+}
+
+
+def _sector_clusters(per_symbol: dict) -> list[dict]:
+    """Per-sector RSI/ADX/breadth aggregates with overbought/oversold flags, so
+    an exhaustion cluster (e.g. 9 semis all RSI>85) is visible on cycle 1 instead
+    of requiring the trader to scan every name."""
+    out = []
+    for sector, members in _SECTORS.items():
+        rows = [(s, v) for s, v in per_symbol.items() if s in members and v]
+        if len(rows) < 2:
+            continue
+        rsis = [v.get("rsi14") for _, v in rows if v.get("rsi14") is not None]
+        adxs = [v.get("adx14") for _, v in rows if v.get("adx14") is not None]
+        slopes = [v.get("adx_slope") for _, v in rows if v.get("adx_slope") is not None]
+        n = len(rows)
+        ob70 = sum(1 for r in rsis if r >= 70)
+        ob80 = sum(1 for r in rsis if r >= 80)
+        os30 = sum(1 for r in rsis if r <= 30)
+        os20 = sum(1 for r in rsis if r <= 20)
+        avg_adx = round(sum(adxs) / len(adxs), 1) if adxs else None
+        avg_slope = round(sum(slopes) / len(slopes), 2) if slopes else 0.0
+        flag = None
+        if ob70 >= 5 or ob80 >= 3:
+            flag = "overbought_cluster"
+        elif os30 >= 5 or os20 >= 3:
+            flag = "oversold_cluster"
+        out.append({
+            "sector": sector, "n": n,
+            "rsi_gt70": ob70, "rsi_gt80": ob80, "rsi_lt30": os30, "rsi_lt20": os20,
+            "avg_adx": avg_adx, "adx_rising": avg_slope > 0, "avg_adx_slope": avg_slope,
+            "flag": flag,
+        })
+    # Flagged clusters first, then by size.
+    out.sort(key=lambda c: (c["flag"] is None, -c["n"]))
+    return out
+
+
 def _market_summary(per_symbol: dict) -> dict:
     """Top-level read of the tape for fast regime/trend-day detection.
 
@@ -204,6 +255,7 @@ def _market_summary(per_symbol: dict) -> dict:
         "big_movers": big_movers[:8],
         "rs_leaders": leaders,
         "rs_laggers": laggers,
+        "sector_clusters": _sector_clusters(per_symbol),
         "note": note,
     }
 

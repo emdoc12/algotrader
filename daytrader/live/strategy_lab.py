@@ -132,6 +132,8 @@ def run_backtest(
     pessimistic_costs: bool = False,
     strategy_params: Optional[dict] = None,
     custom: Optional[object] = None,
+    min_trend_duration_bars: int = 1,
+    adx_decay_exit: Optional[dict] = None,
 ) -> dict:
     """Backtest built-in strategies (by name/profile) OR a custom rule config.
 
@@ -214,8 +216,41 @@ def run_backtest(
     except Exception as e:  # noqa: BLE001
         return {"error": f"signal generation failed: {e!r}"}
 
+    # Min-trend-duration filter: keep an ENTRY only if that symbol's ADX has been
+    # >= adx_threshold AND strictly rising for the last N bars (filters
+    # short-lived regime spikes that immediately reverse).
+    n_before = len(signals)
+    try:
+        N = int(min_trend_duration_bars)
+    except (TypeError, ValueError):
+        N = 1
+    if N > 1 and signals:
+        from daytrader.core.indicators import adx as _adx
+        from daytrader.core.types import SignalType as _ST
+        adx_series = {s: _adx(df, 14) for s, df in data.items()}
+        kept = []
+        for sig in signals:
+            if getattr(sig, "type", None) != _ST.ENTRY:
+                kept.append(sig)
+                continue
+            ser = adx_series.get(sig.symbol)
+            if ser is None:
+                continue
+            try:
+                i = ser.index.get_loc(sig.ts)
+            except KeyError:
+                continue
+            if not isinstance(i, int) or i < N:
+                continue
+            v = ser.values
+            ok = all(v[k] >= adx_threshold and v[k] > v[k - 1] for k in range(i - N + 1, i + 1))
+            if ok:
+                kept.append(sig)
+        signals = kept
+
     cost = CostModel.pessimistic() if pessimistic_costs else CostModel()
-    cfg = EngineConfig(starting_equity=float(starting_equity), cost=cost)
+    cfg = EngineConfig(starting_equity=float(starting_equity), cost=cost,
+                       adx_decay_exit=adx_decay_exit if isinstance(adx_decay_exit, dict) else None)
     try:
         engine = BacktestEngine(cfg)
         trades, equity = engine.run(data, signals)
@@ -268,6 +303,10 @@ def run_backtest(
             "starting_equity": float(starting_equity),
             "strategy_params": strategy_params or None,
             "ignored_params": sorted(set(unknown_params)) or None,
+            "min_trend_duration_bars": N,
+            "adx_decay_exit": adx_decay_exit if isinstance(adx_decay_exit, dict) else None,
+            "entries_after_filters": len(signals),
+            "entries_before_filters": n_before,
         },
         "metrics": {
             "n_trades": m.n_trades,

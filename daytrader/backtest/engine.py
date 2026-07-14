@@ -65,6 +65,12 @@ class EngineConfig:
     allow_short: bool = True
     breakeven_at_r: float = 0.0           # move stop to entry after +N*R (0=off)
     trail_atr_mult: float = 0.0           # trail stop at close -/+ mult*ATR (0=off)
+    # Intra-trade ADX-decay early exit. When set to e.g.
+    # {"adx_drop_from_peak": 2.0, "negative_slope_bars": 3}, a held position is
+    # force-closed if that symbol's ADX drops >= adx_drop_from_peak from its
+    # post-entry peak OR its ADX slope is negative for >= negative_slope_bars
+    # consecutive bars — models trends that decelerate mid-hold. None = off.
+    adx_decay_exit: Optional[dict] = None
 
 
 # A sizing function: (equity, signal, entry_price, atr) -> share quantity (>=0)
@@ -97,6 +103,37 @@ class BacktestEngine:
         self._day_start_equity = self.cfg.starting_equity
         self._day = None
         self._halted_day = False
+        self._adx_state: dict = {}
+
+    def _check_adx_decay(self, ts, sym, close_px, adx_series):
+        """Force-close a held position when its ADX decays mid-trend (drops from
+        its post-entry peak, or slopes negative for N bars)."""
+        cfg = self.cfg.adx_decay_exit or {}
+        pos = self.positions.get(sym)
+        if pos is None:
+            return
+        try:
+            cur = float(adx_series.get(ts))
+        except Exception:  # noqa: BLE001
+            return
+        if cur != cur:  # NaN
+            return
+        st = self._adx_state.get(sym)
+        if st is None or st.get("entry_ts") != pos.entry_ts:
+            # New position on this symbol — seed the peak, wait for the next bar.
+            self._adx_state[sym] = {"entry_ts": pos.entry_ts, "peak": cur, "neg": 0, "last": cur}
+            return
+        if cur > st["peak"]:
+            st["peak"] = cur
+        st["neg"] = st["neg"] + 1 if cur < st["last"] else 0
+        st["last"] = cur
+        drop = cfg.get("adx_drop_from_peak")
+        nbars = cfg.get("negative_slope_bars")
+        triggered = (drop and (st["peak"] - cur) >= float(drop)) or \
+                    (nbars and st["neg"] >= int(nbars))
+        if triggered:
+            self._close_position(ts, sym, close_px, reason="adx_decay")
+            self._adx_state.pop(sym, None)
 
     # ---- fill helpers -------------------------------------------------
     def _apply_entry_cost(self, side: Side, price: float) -> float:
@@ -142,6 +179,12 @@ class BacktestEngine:
         # Precompute ATR per symbol for sizing (causal).
         from daytrader.core.indicators import atr as atr_ind
         atr_map = {s: atr_ind(df, 14) for s, df in data.items()}
+        # Per-symbol ADX series + per-position decay state (only when enabled).
+        adx_map = {}
+        self._adx_state = {}
+        if self.cfg.adx_decay_exit:
+            from daytrader.core.indicators import adx as adx_ind
+            adx_map = {s: adx_ind(df, 14) for s, df in data.items()}
 
         # Map each symbol's timestamp -> integer position for next-bar lookup.
         index_of: dict[str, dict[pd.Timestamp, int]] = {}
@@ -200,6 +243,10 @@ class BacktestEngine:
             # 1) Manage an existing position in this symbol (stops/targets/EOD).
             atr_now = float(atr_map[sym].get(ts, np.nan)) if ts in atr_map[sym].index else np.nan
             self._manage_position(ts, sym, o, h, l, c, atr_now)
+
+            # 1b) Intra-trade ADX-decay early exit.
+            if self.cfg.adx_decay_exit and sym in self.positions and sym in adx_map:
+                self._check_adx_decay(ts, sym, c, adx_map[sym])
 
             # 2) Daily loss-limit check (halts new entries, flattens book).
             cur_eq = self._equity(marks)
