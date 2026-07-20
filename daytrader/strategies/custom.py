@@ -161,145 +161,227 @@ class CustomRuleStrategy(Strategy):
 
     # -- feature matrix (all causal) ------------------------------------
     def _features(self, df: pd.DataFrame) -> dict:
-        close = df["close"]
-        high, low = df["high"], df["low"]
-        macd_line, macd_sig, macd_hist = ind.macd(close)
-        bb_mid, bb_up, bb_lo, _bb_width = ind.bollinger(close, 20, 2.0)
-        vwap = ind.vwap_session(df)
-        atr = ind.atr(df, 14)
-        prior_close = close.shift(1)
-        day = df.index.normalize()
-        # True session open = the first bar's OPEN (not its close).
-        day_open = df["open"].groupby(day).transform("first")
-        # Prior SESSION's close, broadcast to every bar of the current day.
-        # (Do NOT use transform("last").shift(1): that shifts by one ROW, so
-        # every bar after a day's first would read TODAY's close — a look-ahead
-        # leak. Group to one value per day, shift by one DAY, then map back.)
-        last_by_day = close.groupby(day).last().shift(1)
-        prev_day_close = pd.Series(
-            np.asarray(day.map(last_by_day), dtype="float64"), index=df.index)
-        feats = {
-            "price": close, "open": df["open"], "high": high, "low": low,
-            "volume": df["volume"],
-            "ema9": ind.ema(close, 9), "ema21": ind.ema(close, 21),
-            "ema50": ind.ema(close, 50), "sma20": ind.sma(close, 20),
-            "rsi": ind.rsi(close, 14), "rsi2": ind.rsi(close, 2),
-            "atr": atr, "atr_pct": atr / close * 100,
-            "adx": ind.adx(df, 14),
-            "vwap": vwap, "vs_vwap_pct": (close / vwap - 1) * 100,
-            "macd": macd_line, "macd_signal": macd_sig, "macd_hist": macd_hist,
-            "bb_upper": bb_up, "bb_lower": bb_lo, "bb_mid": bb_mid,
-            "bb_pct": (close - bb_lo) / (bb_up - bb_lo).replace(0, np.nan) * 100,
-            "day_change_pct": (close / day_open - 1) * 100,
-            "gap_pct": (day_open / prev_day_close - 1) * 100,
-            "ret1": close.pct_change(1) * 100,
-            "ret3": close.pct_change(3) * 100,
-        }
-        # Relative strength vs SPY (only if a SPY close series was injected).
-        spy = getattr(self, "_spy_close", None)
-        if spy is not None:
-            spy_al = spy.reindex(df.index).ffill()
-            rs = (close.pct_change(6) - spy_al.pct_change(6)) * 100   # ~30m RS diff
-            rs_slope = rs - rs.shift(4)
-            rs_persist = (rs > 0).astype(float).rolling(12, min_periods=1).mean()
-            feats["rs_vs_spy_pct"] = rs
-            feats["rs_slope_20m"] = rs_slope
-            feats["rs_persistence"] = rs_persist
-            feats["rs_stable"] = ((rs_persist >= 0.7) & (rs_slope >= 0)).astype(float)
-        else:
-            nanv = pd.Series(np.nan, index=df.index)
-            for k in ("rs_vs_spy_pct", "rs_slope_20m", "rs_persistence", "rs_stable"):
-                feats[k] = nanv
-        # Consecutive-bar ADX rising / decaying streaks.
-        adx_ser = feats["adx"]
-        rising = adx_ser.diff() > 0
-        falling = adx_ser.diff() < 0
-        feats["adx_rising_nbars"] = rising.astype(int).groupby((~rising).cumsum()).cumsum()
-        feats["adx_decaying_nbars"] = falling.astype(int).groupby((~falling).cumsum()).cumsum()
-        return {k: v.values for k, v in feats.items()}
+        return build_features(df, getattr(self, "_spy_close", None))
 
     def generate(self, df: pd.DataFrame) -> list[Signal]:
-        n = len(df)
-        if n < 60:
-            return []
-        symbol = df["symbol"].iloc[0]
-        F = self._features(df)
-        c = df["close"].values
-        atr = F["atr"]
-        idx = df.index
-        day = df.index.normalize()
-        no_before = _parse_time(self.cfg["no_entry_before"], dtime(9, 35))
-        no_after = _parse_time(self.cfg["no_entry_after"], dtime(15, 45))
-        side = Side.LONG if self.cfg["side"] == "long" else Side.SHORT
-        smult, rr = self.cfg["stop_atr_mult"], self.cfg["rr"]
-        max_per_day = self.cfg["max_entries_per_day"]
+        return _generate_signals(self, df)
 
-        def operand(spec_f, spec_prev, i):
-            arr = F[spec_f]
-            j = i - 1 if spec_prev else i
-            if j < 0:
-                return np.nan
-            return arr[j]
 
-        signals: list[Signal] = []
-        per_day: dict = {}
-        for i in range(55, n):
-            t = idx[i].time()
-            if t < no_before or t >= no_after:
-                continue
-            if np.isnan(atr[i]) or atr[i] <= 0:
-                continue
-            d = day[i]
-            if per_day.get(d, 0) >= max_per_day:
-                continue
+def build_features(df: pd.DataFrame, spy_close=None) -> dict:
+    """Compute the full causal feature matrix (dict of {name: np.ndarray}) used by
+    the custom-strategy DSL, the backtest, and the staged-order condition check.
+    ``spy_close`` (optional) enables the rs_* relative-strength features."""
+    close = df["close"]
+    high, low = df["high"], df["low"]
+    macd_line, macd_sig, macd_hist = ind.macd(close)
+    bb_mid, bb_up, bb_lo, _bb_width = ind.bollinger(close, 20, 2.0)
+    vwap = ind.vwap_session(df)
+    atr = ind.atr(df, 14)
+    prior_close = close.shift(1)
+    day = df.index.normalize()
+    # True session open = the first bar's OPEN (not its close).
+    day_open = df["open"].groupby(day).transform("first")
+    # Prior SESSION's close, broadcast to every bar of the current day.
+    # (Do NOT use transform("last").shift(1): that shifts by one ROW, so
+    # every bar after a day's first would read TODAY's close — a look-ahead
+    # leak. Group to one value per day, shift by one DAY, then map back.)
+    last_by_day = close.groupby(day).last().shift(1)
+    prev_day_close = pd.Series(
+        np.asarray(day.map(last_by_day), dtype="float64"), index=df.index)
+    feats = {
+        "price": close, "open": df["open"], "high": high, "low": low,
+        "volume": df["volume"],
+        "ema9": ind.ema(close, 9), "ema21": ind.ema(close, 21),
+        "ema50": ind.ema(close, 50), "sma20": ind.sma(close, 20),
+        "rsi": ind.rsi(close, 14), "rsi2": ind.rsi(close, 2),
+        "atr": atr, "atr_pct": atr / close * 100,
+        "adx": ind.adx(df, 14),
+        "vwap": vwap, "vs_vwap_pct": (close / vwap - 1) * 100,
+        "macd": macd_line, "macd_signal": macd_sig, "macd_hist": macd_hist,
+        "bb_upper": bb_up, "bb_lower": bb_lo, "bb_mid": bb_mid,
+        "bb_pct": (close - bb_lo) / (bb_up - bb_lo).replace(0, np.nan) * 100,
+        "day_change_pct": (close / day_open - 1) * 100,
+        "gap_pct": (day_open / prev_day_close - 1) * 100,
+        "ret1": close.pct_change(1) * 100,
+        "ret3": close.pct_change(3) * 100,
+    }
+    # Relative strength vs SPY (only if a SPY close series was injected).
+    spy = spy_close
+    if spy is not None:
+        spy_al = spy.reindex(df.index).ffill()
+        rs = (close.pct_change(6) - spy_al.pct_change(6)) * 100   # ~30m RS diff
+        rs_slope = rs - rs.shift(4)
+        rs_persist = (rs > 0).astype(float).rolling(12, min_periods=1).mean()
+        feats["rs_vs_spy_pct"] = rs
+        feats["rs_slope_20m"] = rs_slope
+        feats["rs_persistence"] = rs_persist
+        feats["rs_stable"] = ((rs_persist >= 0.7) & (rs_slope >= 0)).astype(float)
+    else:
+        nanv = pd.Series(np.nan, index=df.index)
+        for k in ("rs_vs_spy_pct", "rs_slope_20m", "rs_persistence", "rs_stable"):
+            feats[k] = nanv
+    # Consecutive-bar ADX rising / decaying streaks.
+    adx_ser = feats["adx"]
+    rising = adx_ser.diff() > 0
+    falling = adx_ser.diff() < 0
+    feats["adx_rising_nbars"] = rising.astype(int).groupby((~rising).cumsum()).cumsum()
+    feats["adx_decaying_nbars"] = falling.astype(int).groupby((~falling).cumsum()).cumsum()
+    return {k: v.values for k, v in feats.items()}
 
-            ok = True
-            for cond in self.cfg["entry"]:
-                ln = operand(cond["lf"], cond["lp"], i)
-                if cond["rconst"] is not None:
-                    rn = cond["rconst"]
-                else:
-                    rn = operand(cond["rf"], cond["rp"], i)
-                op = cond["op"]
-                if op in ("cross_above", "cross_below"):
-                    lp = operand(cond["lf"], True, i)
-                    rp = cond["rconst"] if cond["rconst"] is not None else operand(cond["rf"], True, i)
-                    if np.isnan(ln) or np.isnan(rn) or np.isnan(lp) or np.isnan(rp):
-                        ok = False; break
-                    if op == "cross_above":
-                        ok = lp <= rp and ln > rn
-                    else:
-                        ok = lp >= rp and ln < rn
-                else:
-                    if np.isnan(ln) or (isinstance(rn, float) and np.isnan(rn)):
-                        ok = False; break
-                    if op == "<": ok = ln < rn
-                    elif op == "<=": ok = ln <= rn
-                    elif op == ">": ok = ln > rn
-                    elif op == ">=": ok = ln >= rn
-                    elif op == "==": ok = abs(ln - rn) < 1e-9
-                    elif op == "!=": ok = abs(ln - rn) >= 1e-9
-                if not ok:
-                    break
 
-            if not ok:
-                continue
+def normalize_conditions(conditions) -> list[dict]:
+    """Validate + normalize a raw [{left, op, right}, ...] list into the internal
+    {op, lf, lp, rf, rp, rconst} form. Raises StrategyConfigError on problems."""
+    if not isinstance(conditions, list) or not conditions:
+        raise StrategyConfigError("conditions must be a non-empty list")
+    out = []
+    for i, cond in enumerate(conditions):
+        if not isinstance(cond, dict):
+            raise StrategyConfigError(f"condition {i} must be an object")
+        op = str(cond.get("op", "")).strip()
+        if op not in _OPS:
+            raise StrategyConfigError(f"condition {i}: op must be one of {sorted(_OPS)}")
+        if "left" not in cond or "right" not in cond:
+            raise StrategyConfigError(f"condition {i}: needs 'left' and 'right'")
+        lf, lp = _canon_feature(cond["left"])
+        right = cond["right"]
+        if isinstance(right, (int, float)):
+            rf, rp, rconst = None, False, float(right)
+        else:
+            rf, rp = _canon_feature(right)
+            rconst = None
+        out.append({"op": op, "lf": lf, "lp": lp, "rf": rf, "rp": rp, "rconst": rconst})
+    return out
 
-            price = c[i]
-            if side == Side.LONG:
-                stop = price - smult * atr[i]
-                risk = price - stop
-                target = price + rr * risk
+
+def eval_condition(cond: dict, F: dict, i: int) -> bool:
+    """Evaluate one NORMALIZED condition against feature matrix F at bar i."""
+    def operand(spec_f, spec_prev):
+        arr = F.get(spec_f)
+        if arr is None:
+            return np.nan
+        j = i - 1 if spec_prev else i
+        return arr[j] if j >= 0 else np.nan
+
+    ln = operand(cond["lf"], cond["lp"])
+    rn = cond["rconst"] if cond["rconst"] is not None else operand(cond["rf"], cond["rp"])
+    op = cond["op"]
+    if op in ("cross_above", "cross_below"):
+        lp = operand(cond["lf"], True)
+        rp = cond["rconst"] if cond["rconst"] is not None else operand(cond["rf"], True)
+        if any(np.isnan(x) for x in (ln, rn, lp, rp)):
+            return False
+        return (lp <= rp and ln > rn) if op == "cross_above" else (lp >= rp and ln < rn)
+    if np.isnan(ln) or (isinstance(rn, float) and np.isnan(rn)):
+        return False
+    return {
+        "<": ln < rn, "<=": ln <= rn, ">": ln > rn, ">=": ln >= rn,
+        "==": abs(ln - rn) < 1e-9, "!=": abs(ln - rn) >= 1e-9,
+    }[op]
+
+
+def check_conditions(df: pd.DataFrame, conditions, spy_close=None):
+    """Evaluate a raw conditions list against the LAST bar of df. Returns
+    (ok: bool, detail: str). Used to gate staged-order firing."""
+    try:
+        norm = normalize_conditions(conditions)
+    except StrategyConfigError as e:
+        return False, f"invalid conditions: {e}"
+    if df is None or len(df) < 40:
+        return False, "insufficient bars to evaluate conditions"
+    F = build_features(df, spy_close)
+    i = len(df) - 1
+    failed = []
+    for raw, cond in zip(conditions, norm):
+        if not eval_condition(cond, F, i):
+            failed.append(f"{raw.get('left')} {raw.get('op')} {raw.get('right')}")
+    return (not failed), ("all conditions met" if not failed else "unmet: " + "; ".join(failed))
+
+
+def _generate_signals(self, df: pd.DataFrame) -> list[Signal]:
+    """The custom-strategy entry loop (module-level so it can sit after the shared
+    feature/condition helpers). Called by CustomRuleStrategy.generate."""
+    n = len(df)
+    if n < 60:
+        return []
+    symbol = df["symbol"].iloc[0]
+    F = self._features(df)
+    c = df["close"].values
+    atr = F["atr"]
+    idx = df.index
+    day = df.index.normalize()
+    no_before = _parse_time(self.cfg["no_entry_before"], dtime(9, 35))
+    no_after = _parse_time(self.cfg["no_entry_after"], dtime(15, 45))
+    side = Side.LONG if self.cfg["side"] == "long" else Side.SHORT
+    smult, rr = self.cfg["stop_atr_mult"], self.cfg["rr"]
+    max_per_day = self.cfg["max_entries_per_day"]
+
+    def operand(spec_f, spec_prev, i):
+        arr = F[spec_f]
+        j = i - 1 if spec_prev else i
+        if j < 0:
+            return np.nan
+        return arr[j]
+
+    signals: list[Signal] = []
+    per_day: dict = {}
+    for i in range(55, n):
+        t = idx[i].time()
+        if t < no_before or t >= no_after:
+            continue
+        if np.isnan(atr[i]) or atr[i] <= 0:
+            continue
+        d = day[i]
+        if per_day.get(d, 0) >= max_per_day:
+            continue
+
+        ok = True
+        for cond in self.cfg["entry"]:
+            ln = operand(cond["lf"], cond["lp"], i)
+            if cond["rconst"] is not None:
+                rn = cond["rconst"]
             else:
-                stop = price + smult * atr[i]
-                risk = stop - price
-                target = price - rr * risk
-            if risk <= 0:
-                continue
-            signals.append(Signal(
-                ts=idx[i], symbol=symbol, side=side, type=SignalType.ENTRY,
-                strategy=self.name, stop=round(stop, 4), target=round(target, 4),
-                reason=f"{self.name} {side.value} @ {price:.2f}",
-            ))
-            per_day[d] = per_day.get(d, 0) + 1
-        return signals
+                rn = operand(cond["rf"], cond["rp"], i)
+            op = cond["op"]
+            if op in ("cross_above", "cross_below"):
+                lp = operand(cond["lf"], True, i)
+                rp = cond["rconst"] if cond["rconst"] is not None else operand(cond["rf"], True, i)
+                if np.isnan(ln) or np.isnan(rn) or np.isnan(lp) or np.isnan(rp):
+                    ok = False; break
+                if op == "cross_above":
+                    ok = lp <= rp and ln > rn
+                else:
+                    ok = lp >= rp and ln < rn
+            else:
+                if np.isnan(ln) or (isinstance(rn, float) and np.isnan(rn)):
+                    ok = False; break
+                if op == "<": ok = ln < rn
+                elif op == "<=": ok = ln <= rn
+                elif op == ">": ok = ln > rn
+                elif op == ">=": ok = ln >= rn
+                elif op == "==": ok = abs(ln - rn) < 1e-9
+                elif op == "!=": ok = abs(ln - rn) >= 1e-9
+            if not ok:
+                break
+
+        if not ok:
+            continue
+
+        price = c[i]
+        if side == Side.LONG:
+            stop = price - smult * atr[i]
+            risk = price - stop
+            target = price + rr * risk
+        else:
+            stop = price + smult * atr[i]
+            risk = stop - price
+            target = price - rr * risk
+        if risk <= 0:
+            continue
+        signals.append(Signal(
+            ts=idx[i], symbol=symbol, side=side, type=SignalType.ENTRY,
+            strategy=self.name, stop=round(stop, 4), target=round(target, 4),
+            reason=f"{self.name} {side.value} @ {price:.2f}",
+        ))
+        per_day[d] = per_day.get(d, 0) + 1
+    return signals

@@ -87,6 +87,18 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
             assert qty > 0
         except (KeyError, TypeError, ValueError, AssertionError):
             return {"ok": False, "error": "qty must be a positive number"}
+        # Optional general feature conditions (same grammar as backtest_custom_strategy),
+        # validated now and re-checked at fire time.
+        conditions = inp.get("conditions")
+        conditions_json = None
+        if conditions:
+            from daytrader.strategies.custom import normalize_conditions, StrategyConfigError
+            try:
+                normalize_conditions(conditions)
+            except StrategyConfigError as e:
+                return {"ok": False, "error": f"invalid conditions: {e}"}
+            import json as _json
+            conditions_json = _json.dumps(conditions)
         oid = db.add_staged_order({
             "symbol": inp["symbol"].upper(), "side": side, "qty": qty,
             "stop": inp.get("stop"), "target": inp.get("target"),
@@ -95,11 +107,13 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
             "fire_after": inp.get("fire_after", "09:35"),
             "max_ema9_dist_atr": inp.get("max_ema9_dist_atr"),
             "min_adx": inp.get("min_adx"),
+            "conditions": conditions_json,
         })
         db.log_agent("trader", "stage_order", f"{side} {qty} {inp['symbol'].upper()} @>{inp.get('fire_after','09:35')}")
         return {"ok": True, "id": oid,
-                "note": "Staged. Auto-fires at/after fire_after (ET) IF the entry conditions "
-                        "(distance from EMA9, min ADX) still hold; otherwise it's skipped."}
+                "note": "Staged. Auto-fires at/after fire_after (ET) IF the min_adx / "
+                        "max_ema9_dist_atr gates AND any 'conditions' still hold at fire "
+                        "time (checked on the ~2-min poll); otherwise it's skipped."}
 
     def list_staged_orders(_inp: dict) -> dict:
         return {"ok": True, "pending": db.list_staged_orders(status="pending")}
@@ -513,7 +527,7 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
         },
         {
             "name": "stage_order",
-            "description": "Pre-stage an order (e.g. before the open) that AUTO-FIRES at/after a target ET time IF the entry conditions still hold — removing the calculation step from the time-critical 9:30-10:00 window. You specify symbol/side/qty/stop/target now; at fire_after (ET, e.g. '09:35') the system checks the live conditions and submits, or SKIPS if they no longer hold. Fires within ~2 min of fire_after (checked on the stop-poll). Use with ema_scan to pre-stage the day's best candidates.",
+            "description": "Pre-stage an order (e.g. before the open, or to catch a bar-resolved trigger between cycles) that AUTO-FIRES at/after a target ET time IF its conditions still hold — removing the calculation step from the time-critical window AND catching triggers that print between 20-min cycles. You specify symbol/side/qty/stop/target now; from fire_after (ET) the system re-checks conditions every ~2 min (stop-poll) and submits when they hold, or SKIPS if they don't. Use with ema_scan / macd_trigger to pre-stage the day's best candidates.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -528,6 +542,8 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                     "fire_after": {"type": "string", "description": "ET time to fire at/after, 'HH:MM' (default 09:35)."},
                     "max_ema9_dist_atr": {"type": "number", "description": "Skip if |price-EMA9| exceeds this many ATRs at fire time (entry still near EMA9)."},
                     "min_adx": {"type": "number", "description": "Skip if the symbol's ADX is below this at fire time."},
+                    "conditions": {"type": "array", "items": {"type": "object"},
+                                   "description": "General entry conditions using the SAME grammar as backtest_custom_strategy (each {left, op, right}; features like macd_hist, macd_hist_prev, adx, ema9, rs_stable, etc.). ALL must hold at fire time. E.g. [{\"left\":\"macd_hist\",\"op\":\"<\",\"right\":\"macd_hist_prev\"},{\"left\":\"macd_hist_prev\",\"op\":\"<\",\"right\":0}] to catch a downward MACD-hist re-expansion. Lets you pre-stage the exact validated trigger."},
                 },
                 "required": ["symbol", "side", "qty", "stop", "target"],
             },

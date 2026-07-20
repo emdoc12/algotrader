@@ -184,6 +184,7 @@ class LiveDB:
             self._ensure_column("trades", "with_trend", "TEXT")
             self._ensure_column("trades", "planned_risk", "REAL")
             self._ensure_column("trades", "risk_overrun", "INTEGER DEFAULT 0")
+            self._ensure_column("staged_orders", "conditions", "TEXT")
             self.conn.commit()
         except Exception:  # noqa: BLE001 - never block startup on a migration
             pass
@@ -436,7 +437,7 @@ class LiveDB:
     # ------------------------------------------------------------------ #
     def add_staged_order(self, o: dict) -> int:
         cols = ("symbol", "side", "qty", "stop", "target", "strategy", "rationale",
-                "horizon", "fire_after", "max_ema9_dist_atr", "min_adx")
+                "horizon", "fire_after", "max_ema9_dist_atr", "min_adx", "conditions")
         cur = self.conn.execute(
             f"INSERT INTO staged_orders (ts, {', '.join(cols)}, status) "
             f"VALUES (?, {', '.join('?' * len(cols))}, 'pending')",

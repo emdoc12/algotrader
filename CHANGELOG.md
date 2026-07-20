@@ -9,6 +9,22 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.21.0] — 2026-07-20
+
+### Added — dev request
+- **`stage_order` now accepts general feature `conditions`** using the same
+  grammar as `backtest_custom_strategy` (each `{left, op, right}`; features incl.
+  `macd_hist`, `macd_hist_prev`, `adx`, `ema9`, `rs_stable`, `adx_rising_nbars`,
+  etc.). All conditions are re-checked on the ~2-min stop-poll before firing, so
+  a desk can pre-stage its exact validated trigger (e.g. a downward MACD-hist
+  re-expansion) and stop losing bar-resolved signals to 20-min cycle timing or
+  the 14:00 gate. Conditions are validated at stage time and evaluated against
+  the latest bar at fire time (SPY auto-loaded when an rs_* feature is used).
+- Refactored the custom-strategy DSL: the feature matrix (`build_features`) and
+  condition evaluation (`normalize_conditions` / `eval_condition` /
+  `check_conditions`) are now shared module functions used by both the backtest
+  and the staged-order fire check — no duplicated logic.
+
 ## [6.20.0] — 2026-07-20
 
 ### Added — dev requests

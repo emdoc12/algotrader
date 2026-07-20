@@ -534,6 +534,23 @@ class Competition:
                     reasons.append(f"price {dist:.2f}xATR from EMA9 (> {o['max_ema9_dist_atr']})")
             if o.get("min_adx") is not None and adxv < float(o["min_adx"]):
                 reasons.append(f"ADX {adxv:.0f} < min {o['min_adx']}")
+            # General feature conditions (same DSL grammar), evaluated on the last bar.
+            if o.get("conditions"):
+                try:
+                    import json as _json
+                    from daytrader.strategies.custom import check_conditions
+                    conds = _json.loads(o["conditions"])
+                    spy_close = None
+                    if any("rs_" in str(c.get("left", "")) + str(c.get("right", "")) for c in conds):
+                        try:
+                            spy_close = _loader.load("SPY", interval="5m", max_age_hours=0.1)["close"]
+                        except Exception:  # noqa: BLE001
+                            spy_close = None
+                    ok, detail = check_conditions(df, conds, spy_close=spy_close)
+                    if not ok:
+                        reasons.append(detail)
+                except Exception as e:  # noqa: BLE001
+                    reasons.append(f"condition-eval error: {e!r}")
             if reasons:
                 team.db.update_staged_order(o["id"], "skipped", "; ".join(reasons))
                 continue
