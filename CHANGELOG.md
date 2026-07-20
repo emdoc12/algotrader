@@ -9,6 +9,34 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.20.0] — 2026-07-20
+
+### Added — dev requests
+- **`macd_trigger` snapshot field** — mechanizes the desk's one proven A+ setup:
+  each cycle it scans the watchlist for a FRESH MACD sign-flip in the direction
+  of the name's EMA trend, with ADX>=25 & rising, price within 1.5xATR of EMA9,
+  SPY-aligned, and flags the 10:00-14:00 window. Returns per hit: symbol, side,
+  macd_hist now/prev, adx+slope, dist_from_ema9_atr, vs_vwap_pct, rs_rank — no
+  more per-cycle manual reconstruction of the only edge that pays.
+- **Snapshot data-quality guard** — each name now carries `data_quality` flags
+  (`quote_vs_bar_X pct` when the live quote deviates >1.5% from the last bar
+  close; `vwap_unavailable`) plus `tradeable_mark`/`indicator_source` so the desk
+  knows the fill mark (live quote) vs the indicator basis (bar close). Also fixes
+  a real bug: VWAP/`vs_vwap_pct` were emitting NaN (NaN is truthy) instead of
+  null when session VWAP wasn't yet available.
+- **RS + multi-bar-ADX features in `backtest_custom_strategy`** — new features
+  `rs_vs_spy_pct`, `rs_slope_20m`, `rs_persistence`, `rs_stable` (SPY injected
+  into the backtest), plus `adx_rising_nbars` / `adx_decaying_nbars`. Unlocks
+  RS-continuation / RS-reversal strategy families and ADX-streak filters the desk
+  couldn't previously test.
+
+### Still not testable in-backtest (deferred, need universe-in-engine plumbing)
+- Cross-sectional `rs_rank` and sector-cluster features inside
+  backtest_custom_strategy, and a breadth-threshold backtest param (#6 / gap_fade
+  breadth hybrid). These require feeding the whole universe (not one symbol) into
+  the backtest engine — a larger change. Use `rs_vs_spy_pct`/`rs_stable` as a
+  proxy for now.
+
 ## [6.19.1] — 2026-07-20
 
 ### Fixed — CRITICAL: all non-web_fetch external tools were erroring

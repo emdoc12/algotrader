@@ -194,8 +194,12 @@ def run_backtest(
     unknown_params: list[str] = []
     if custom_strats:
         # Custom strategies fire in any regime unless the caller pins one.
+        # Inject SPY's close so RS-vs-SPY features are computable in the backtest.
+        spy_df = data.get("SPY")
         regset = pinned if pinned else {Regime.ANY.value}
         for strat in custom_strats:
+            if spy_df is not None:
+                strat._spy_close = spy_df["close"]
             allocs.append(Allocation(strategy=strat, regimes=set(regset), weight=1.0))
     else:
         for key in names:

@@ -45,10 +45,24 @@ def _latest_indicators(df: pd.DataFrame, live_price: float | None = None) -> dic
     adx = adx_series.iloc[-1]
     adx_prev = adx_series.iloc[-4] if len(adx_series) >= 4 else adx
     adx_slope = float(adx) - float(adx_prev) if pd.notna(adx) and pd.notna(adx_prev) else 0.0
-    vwap = ind.vwap_session(df).iloc[-1]
+    _mline, _msig, _mhist = ind.macd(close)
+    macd_hist = float(_mhist.iloc[-1]) if pd.notna(_mhist.iloc[-1]) else None
+    macd_hist_prev = float(_mhist.iloc[-2]) if len(_mhist) >= 2 and pd.notna(_mhist.iloc[-2]) else None
+    vwap_raw = ind.vwap_session(df).iloc[-1]
+    vwap_ok = pd.notna(vwap_raw) and float(vwap_raw) > 0
+    vwap = float(vwap_raw) if vwap_ok else None
     bar_close = float(close.iloc[-1])
     price = float(live_price) if live_price is not None else bar_close
     day_open = float(df["open"][df.index.normalize() == df.index[-1].normalize()].iloc[0])
+    # Data-quality guard: flag a stale/mismatched quote and unavailable VWAP so
+    # the desk doesn't size/stop off bad marks. Tradeable mark = price (live
+    # quote); indicators (EMA/ATR/RSI/VWAP) are derived from bar_close.
+    dq = []
+    dev = abs(price - bar_close) / bar_close if bar_close else 0.0
+    if dev > 0.015:
+        dq.append(f"quote_vs_bar_{dev * 100:.1f}pct")
+    if not vwap_ok:
+        dq.append("vwap_unavailable")
     return {
         "price": round(price, 2),
         "bar_close": round(bar_close, 2),
@@ -62,9 +76,14 @@ def _latest_indicators(df: pd.DataFrame, live_price: float | None = None) -> dic
         "adx14": round(float(adx), 1),
         "adx_slope": round(adx_slope, 1),
         "adx_rising": adx_slope > 0,
-        "vwap": round(float(vwap), 2),
-        "vs_vwap_pct": round((price / float(vwap) - 1) * 100, 2) if vwap else 0.0,
+        "macd_hist": round(macd_hist, 4) if macd_hist is not None else None,
+        "macd_hist_prev": round(macd_hist_prev, 4) if macd_hist_prev is not None else None,
+        "vwap": round(vwap, 2) if vwap_ok else None,
+        "vs_vwap_pct": round((price / vwap - 1) * 100, 2) if vwap_ok else None,
         "regime": Regime.TREND.value if adx >= 25 else Regime.RANGE.value,
+        "data_quality": dq or None,
+        "tradeable_mark": "price (live quote)",
+        "indicator_source": "bar_close",
     }
 
 
@@ -330,6 +349,46 @@ def _add_rs_persistence(per_symbol: dict, data: dict, benchmark: str = "SPY") ->
         per_symbol[sym]["rs_stable"] = bool(stable)
 
 
+def _macd_trigger(per_symbol: dict, spy_direction: str | None, now_t) -> dict:
+    """The desk's one proven A+ setup, mechanized: a FRESH MACD with-trend cross
+    on a non-extended, rising-ADX>=25 name aligned with SPY, in the 10:00-14:00
+    window. Removes the per-cycle manual reconstruction of the only edge that pays."""
+    from datetime import time as _dtime
+    in_window = _dtime(10, 0) <= now_t <= _dtime(14, 0) if now_t is not None else True
+    hits = []
+    for sym, v in per_symbol.items():
+        if not v:
+            continue
+        h, hp = v.get("macd_hist"), v.get("macd_hist_prev")
+        ema_trend, adx, rising = v.get("ema_trend"), v.get("adx14") or 0, v.get("adx_rising")
+        price, ema9, atr = v.get("price"), v.get("ema9"), v.get("atr14")
+        if h is None or hp is None or not atr or price is None or ema9 is None:
+            continue
+        dist = abs(price - ema9) / atr
+        # Fresh sign flip this bar, in the direction of the name's EMA trend.
+        cross_up = h > 0 >= hp
+        cross_dn = h < 0 <= hp
+        side = None
+        if cross_up and ema_trend == "up" and spy_direction == "up":
+            side = "long"
+        elif cross_dn and ema_trend == "down" and spy_direction == "down":
+            side = "short"
+        if side is None or adx < 25 or not rising or dist > 1.5:
+            continue
+        hits.append({
+            "symbol": sym, "side": side, "macd_hist": h, "macd_hist_prev": hp,
+            "adx14": adx, "adx_slope": v.get("adx_slope"),
+            "dist_from_ema9_atr": round(dist, 2), "vs_vwap_pct": v.get("vs_vwap_pct"),
+            "rs_rank": v.get("rs_rank"),
+        })
+    hits.sort(key=lambda r: (r.get("rs_rank") or 99))
+    note = ("A+ fresh MACD with-trend cross candidates (ADX>=25 rising, within 1.5xATR of "
+            "EMA9, SPY-aligned).")
+    if not in_window:
+        note += " NOTE: outside the 10:00-14:00 edge window — watch-only."
+    return {"in_window": bool(in_window), "count": len(hits), "note": note, "triggers": hits}
+
+
 def _ema_scan(per_symbol: dict) -> dict:
     """Pre-stage EMA-pullback structure for the 9:30-10:00 window so the desk has
     entry zones ready at the bell instead of doing manual analysis after ADX has
@@ -409,12 +468,15 @@ def market_only(symbols: list[str] | None = None, interval: str = "5m") -> dict:
     _add_rs_persistence(per_symbol, data)
     fresh = _fresh_signals(data)
     now_et = datetime.now(timezone.utc).astimezone()
+    summary = _market_summary(per_symbol)
+    now_et_t = datetime.now(ET_ZONE).time()
     out = {
         "timestamp": now_et.isoformat(),
         "universe": symbols,
         "interval": interval,
         "market": per_symbol,
-        "market_summary": _market_summary(per_symbol),
+        "market_summary": summary,
+        "macd_trigger": _macd_trigger(per_symbol, summary.get("spy_direction"), now_et_t),
         "ema_scan": _ema_scan(per_symbol),
         "fresh_signals": fresh,
         "quotes": quote_map,

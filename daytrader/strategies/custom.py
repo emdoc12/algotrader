@@ -64,6 +64,9 @@ _FEATURES = {
     "macd", "macd_signal", "macd_hist",
     "bb_upper", "bb_lower", "bb_mid", "bb_pct",
     "day_change_pct", "gap_pct", "ret1", "ret3",
+    # Relative-strength vs SPY (needs SPY injected; NaN otherwise) + multi-bar ADX.
+    "rs_vs_spy_pct", "rs_slope_20m", "rs_persistence", "rs_stable",
+    "adx_rising_nbars", "adx_decaying_nbars",
 }
 
 
@@ -192,6 +195,27 @@ class CustomRuleStrategy(Strategy):
             "ret1": close.pct_change(1) * 100,
             "ret3": close.pct_change(3) * 100,
         }
+        # Relative strength vs SPY (only if a SPY close series was injected).
+        spy = getattr(self, "_spy_close", None)
+        if spy is not None:
+            spy_al = spy.reindex(df.index).ffill()
+            rs = (close.pct_change(6) - spy_al.pct_change(6)) * 100   # ~30m RS diff
+            rs_slope = rs - rs.shift(4)
+            rs_persist = (rs > 0).astype(float).rolling(12, min_periods=1).mean()
+            feats["rs_vs_spy_pct"] = rs
+            feats["rs_slope_20m"] = rs_slope
+            feats["rs_persistence"] = rs_persist
+            feats["rs_stable"] = ((rs_persist >= 0.7) & (rs_slope >= 0)).astype(float)
+        else:
+            nanv = pd.Series(np.nan, index=df.index)
+            for k in ("rs_vs_spy_pct", "rs_slope_20m", "rs_persistence", "rs_stable"):
+                feats[k] = nanv
+        # Consecutive-bar ADX rising / decaying streaks.
+        adx_ser = feats["adx"]
+        rising = adx_ser.diff() > 0
+        falling = adx_ser.diff() < 0
+        feats["adx_rising_nbars"] = rising.astype(int).groupby((~rising).cumsum()).cumsum()
+        feats["adx_decaying_nbars"] = falling.astype(int).groupby((~falling).cumsum()).cumsum()
         return {k: v.values for k, v in feats.items()}
 
     def generate(self, df: pd.DataFrame) -> list[Signal]:

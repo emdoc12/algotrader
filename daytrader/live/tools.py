@@ -642,7 +642,8 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                 "crossovers). FEATURES: price, open, high, low, volume, ema9, ema21, ema50, "
                 "sma20, rsi, rsi2, atr, atr_pct, adx, vwap, vs_vwap_pct, macd, macd_signal, "
                 "macd_hist, bb_upper, bb_lower, bb_mid, bb_pct, day_change_pct, gap_pct, "
-                "ret1, ret3. Exits (ATR stop, rr target, EOD-flat) are handled by the engine "
+                "ret1, ret3, rs_vs_spy_pct, rs_slope_20m, rs_persistence, rs_stable (0/1), "
+                "adx_rising_nbars, adx_decaying_nbars. Exits (ATR stop, rr target, EOD-flat) are handled by the engine "
                 "— same as the built-ins, so results are directly comparable. Returns the "
                 "same metrics + verdict as backtest_strategy."
             ),
