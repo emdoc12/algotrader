@@ -139,15 +139,20 @@ class AnthropicProvider(BaseProvider):
                 cached_tools = [dict(t) for t in tools]
                 cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
 
+            # Fable 5 / Mythos 5 have thinking ALWAYS ON and reject the `thinking`
+            # param (explicit values 400); Opus/Sonnet take adaptive thinking.
+            fable_class = self.model.startswith(("claude-fable", "claude-mythos"))
             for _ in range(max_iterations):
-                resp = client.messages.create(
+                create_kwargs = dict(
                     model=self.model,
                     max_tokens=max_tokens,
                     system=cached_system,
-                    thinking={"type": "adaptive"},
                     tools=cached_tools,
                     messages=messages,
                 )
+                if not fable_class:
+                    create_kwargs["thinking"] = {"type": "adaptive"}
+                resp = client.messages.create(**create_kwargs)
                 _tally(resp)
 
                 if resp.stop_reason == "refusal":
@@ -350,17 +355,17 @@ def default_team_providers() -> dict[str, BaseProvider]:
     """The four contestants, fully overridable by environment variables."""
     return {
         "claude": AnthropicProvider(
-            model=os.environ.get("CLAUDE_MODEL", "claude-opus-4-8"),
+            model=os.environ.get("CLAUDE_MODEL", "claude-fable-5"),
         ),
         "openai": OpenAICompatibleProvider(
             name="openai",
-            model=os.environ.get("OPENAI_MODEL", "gpt-5.5"),
+            model=os.environ.get("OPENAI_MODEL", "gpt-5.6-sol"),
             base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
             api_key_env="OPENAI_API_KEY",
         ),
         "grok": OpenAICompatibleProvider(
             name="grok",
-            model=os.environ.get("XAI_MODEL", "grok-4.3"),
+            model=os.environ.get("XAI_MODEL", "grok-4.5"),
             base_url=os.environ.get("XAI_BASE_URL", "https://api.x.ai/v1"),
             api_key_env="XAI_API_KEY",
         ),
@@ -389,7 +394,7 @@ def default_team_providers() -> dict[str, BaseProvider]:
         ),
         "kimi": OpenAICompatibleProvider(
             name="kimi",
-            model=os.environ.get("KIMI_MODEL", "kimi-k2.6"),
+            model=os.environ.get("KIMI_MODEL", "kimi-k3"),
             base_url=os.environ.get("KIMI_BASE_URL", "https://api.moonshot.ai/v1"),
             api_key_env="MOONSHOT_API_KEY",
         ),

@@ -9,6 +9,28 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.19.0] — 2026-07-20
+
+### Changed — model refresh (verified vs. providers' own docs)
+- Updated the stale default pins to current GA: **OpenAI gpt-5.5 → `gpt-5.6-sol`**,
+  **xAI grok-4.3 → `grok-4.5`**, **Moonshot kimi-k2.6 → `kimi-k3`** (K2.6 was
+  being sunset), and **Anthropic claude-opus-4-8 → `claude-fable-5`** (new top
+  tier). Qwen (`qwen3.7-max`), DeepSeek (`deepseek-v4-pro`), and GLM (`glm-5.2`)
+  were already current. All overridable via `*_MODEL` env / Settings.
+- **Fable 5 compatibility:** the Anthropic provider now omits the `thinking`
+  param for Fable/Mythos models (thinking is always-on there and the param is
+  rejected); Opus/Sonnet still use adaptive thinking.
+- Updated cost-telemetry rates: Claude → $10/$50 (Fable 5, up from $5/$25). GPT
+  stays $5/$30; Grok/Kimi rates are approximate for the new revs (override with
+  `<TEAM>_PRICE_IN/_OUT` for exact figures).
+
+### Notes
+- Swapping a live desk's model resets its leaderboard comparability (a "new
+  season" for that desk).
+- Fable 5 requires 30-day data retention — a zero-data-retention Anthropic org
+  will get 400s; keep Claude on `claude-opus-4-8` via CLAUDE_MODEL if that
+  applies to you.
+
 ## [6.18.0] — 2026-07-13
 
 ### Added — the four deferred dev requests

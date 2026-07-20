@@ -1149,7 +1149,7 @@ function renderSettings(main, status){
     hint:"To run Qwen locally, set QWEN_BASE_URL to your local OpenAI-compatible server (vLLM/Ollama/LM Studio) and put any placeholder in DASHSCOPE_API_KEY."}));
   modelCard.appendChild(settingsTextField(status, "DEEPSEEK_MODEL", "DEEPSEEK_MODEL", {hint:"default deepseek-v4-pro"}));
   modelCard.appendChild(settingsTextField(status, "GLM_MODEL", "GLM_MODEL", {hint:"default glm-5.2"}));
-  modelCard.appendChild(settingsTextField(status, "KIMI_MODEL", "KIMI_MODEL", {hint:"default kimi-k2.6"}));
+  modelCard.appendChild(settingsTextField(status, "KIMI_MODEL", "KIMI_MODEL", {hint:"default kimi-k3"}));
   modelCard.appendChild(settingsTextField(status, "OPENAI_BASE_URL", "OPENAI_BASE_URL"));
   modelCard.appendChild(settingsTextField(status, "XAI_BASE_URL", "XAI_BASE_URL"));
   modelCard.appendChild(settingsTextField(status, "QWEN_BASE_URL", "QWEN_BASE_URL"));
