@@ -110,8 +110,10 @@ def http_json(
         if hit and now - hit[0] < cache_ttl:
             return hit[1]
         req = urllib.request.Request(url, headers=headers or {})
-        opener = _SAFE_OPENER if enforce_public else urllib.request
-        raw = opener.open(req, timeout=timeout).read(_MAX_BYTES)
+        # NB: the urllib.request MODULE exposes urlopen(), not open(); only an
+        # OpenerDirector (the SSRF-guarded opener) has .open().
+        opener = _SAFE_OPENER.open if enforce_public else urllib.request.urlopen
+        raw = opener(req, timeout=timeout).read(_MAX_BYTES)
         data = json.loads(raw)
         _CACHE[url] = (now, data)
         return data
@@ -135,8 +137,8 @@ def http_text(url: str, params: dict | None = None, headers: dict | None = None,
         if enforce_public and not safe_public_url(url):
             return None
         req = urllib.request.Request(url, headers=headers or {})
-        opener = _SAFE_OPENER if enforce_public else urllib.request
-        return opener.open(req, timeout=timeout).read(_MAX_BYTES).decode("utf-8", "ignore")
+        opener = _SAFE_OPENER.open if enforce_public else urllib.request.urlopen
+        return opener(req, timeout=timeout).read(_MAX_BYTES).decode("utf-8", "ignore")
     except Exception:  # noqa: BLE001
         return None
 

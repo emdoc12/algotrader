@@ -9,6 +9,18 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.19.1] — 2026-07-20
+
+### Fixed — CRITICAL: all non-web_fetch external tools were erroring
+- `http_json`/`http_text` in the restored feeds package called `opener.open()`
+  where the fallback opener is the `urllib.request` *module* — which has
+  `urlopen()`, not `open()` — so every non-SSRF-guarded call raised
+  `AttributeError("module 'urllib.request' has no attribute 'open'")`. That broke
+  ALL uw_* / poly_* / finviz_* / bullflow_* / web_search / youtube_* tools
+  (web_fetch used the guarded opener, which has `.open()`, so it alone worked).
+  Introduced in the v6.17.0 reconstruction; now uses `urlopen` for the plain path
+  and the OpenerDirector's `.open` for the SSRF-guarded path. SSRF guard intact.
+
 ## [6.19.0] — 2026-07-20
 
 ### Changed — model refresh (verified vs. providers' own docs)
