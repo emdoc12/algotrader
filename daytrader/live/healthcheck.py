@@ -82,12 +82,17 @@ def health_snapshot() -> dict:
             log = db.recent_agent_log(limit=200)
             if log:
                 row["last_cycle"] = log[0].get("ts")
+            # Errors at/before this watermark were dismissed from the dashboard
+            # (non-destructive: the rows stay in agent_log for history).
+            ack = db.kv_get("errors_ack_ts") or ""
             for e in log:
                 ts = e.get("ts", ""); act = e.get("action", ""); detail = (e.get("detail") or "")
                 problem = act in ("error", "circuit_breaker") or "refus" in detail.lower() \
                     or "error" in detail.lower() or "exception" in detail.lower()
                 if act == "circuit_breaker" and ts[:10] == today:
                     row["halted"] = True
+                if ack and ts <= ack:
+                    continue  # acknowledged/cleared
                 if problem:
                     if ts[:10] == today:
                         row["errors_today"] += 1

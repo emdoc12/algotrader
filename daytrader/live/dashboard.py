@@ -93,6 +93,31 @@ def close_dev_request(team: str, req_id, status: str = "closed",
         db.close()
 
 
+def clear_recent_errors(team: str | None = None) -> dict:
+    """Dismiss the 'recent errors & refusals' panel by advancing a per-team
+    acknowledgment watermark to now. Non-destructive: the agent_log rows stay
+    put; the health view just stops surfacing errors at/before the watermark.
+    Pass a team name to clear one desk, or None to clear all."""
+    from daytrader.live.db import _now_iso
+    targets = [team] if team else team_names()
+    now = _now_iso()
+    cleared = []
+    for name in targets:
+        if name not in team_names():
+            continue
+        db = _team_db(name)
+        if db is None:
+            continue
+        try:
+            db.kv_set("errors_ack_ts", now)
+            cleared.append(name)
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            db.close()
+    return {"ok": True, "cleared": cleared, "ts": now}
+
+
 def team_payload(name: str) -> dict:
     """Everything a single team tab needs, tolerant of a missing DB."""
     db = _team_db(name)
@@ -237,6 +262,14 @@ class _Handler(BaseHTTPRequestHandler):
                     status=data.get("status", "closed"),
                     resolution=data.get("resolution", "closed from dashboard"),
                 ))
+                return
+            if path == "/api/errors/clear":
+                try:
+                    data = json.loads(self._read_body().decode("utf-8") or "{}")
+                except Exception:  # noqa: BLE001
+                    data = {}
+                team = (data.get("team") or "").strip() or None
+                self._json(clear_recent_errors(team))
                 return
             if path.startswith("/api/team/") and path.endswith("/chat"):
                 middle = path[len("/api/team/"):-len("/chat")]
@@ -947,6 +980,17 @@ async function closeDevReq(team, id){
   else if(current === "health") loadHealth();
 }
 
+async function clearErrors(){
+  try{
+    await apiFetch("/api/errors/clear", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({}),
+    });
+  }catch(e){ /* ignore; reload reflects truth */ }
+  if(current === "health") loadHealth();
+}
+
 // ---- health ------------------------------------------------------------- //
 async function loadHealth(){
   const main = document.getElementById("main");
@@ -1015,8 +1059,15 @@ async function loadHealth(){
 
   // Recent errors
   const ec = el("div", {class:"card"});
-  ec.appendChild(el("h2", null, "Recent errors & refusals"));
+  const ehdr = el("div", {style:"display:flex;align-items:center;justify-content:space-between;gap:10px"});
+  ehdr.appendChild(el("h2", {style:"margin:0"}, "Recent errors & refusals"));
   const errs = h.recent_errors || [];
+  if(errs.length){
+    ehdr.appendChild(el("button", {class:"btn-ghost",
+      style:"padding:4px 12px;font-size:11px;flex:0 0 auto",
+      onclick:()=>clearErrors()}, "Clear"));
+  }
+  ec.appendChild(ehdr);
   if(!errs.length){ ec.appendChild(el("div",{class:"muted",style:"font-size:13px"}, "None recorded. 🎉")); }
   else errs.forEach(e => {
     const row = el("div", {style:"padding:6px 0;border-bottom:1px solid var(--line);font-size:12px"});

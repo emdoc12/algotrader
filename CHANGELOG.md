@@ -9,6 +9,17 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.22.0] — 2026-07-21
+
+### Added
+- **"Clear" button on the Health tab's "Recent errors & refusals" panel.**
+  Dismisses the currently-shown errors for every desk by advancing a per-team
+  acknowledgment watermark (`errors_ack_ts`) to now. Non-destructive: the
+  underlying `agent_log` rows are untouched (history preserved) — the health
+  view simply stops surfacing error/refusal rows at or before the watermark,
+  and any *new* error after clearing appears normally. Backed by a new
+  `POST /api/errors/clear` endpoint (CSRF/token-gated like the others).
+
 ## [6.21.1] — 2026-07-21
 
 ### Fixed — live issues
