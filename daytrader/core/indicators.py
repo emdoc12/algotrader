@@ -51,12 +51,22 @@ def bollinger(close: pd.Series, window: int = 20, n_std: float = 2.0):
 
 
 def vwap_session(df: pd.DataFrame) -> pd.Series:
-    """Session-anchored VWAP, reset each trading day. df needs high/low/close/volume."""
+    """Session-anchored VWAP, reset each trading day. df needs high/low/close/volume.
+
+    Bars with missing volume are treated as zero-volume (they contribute nothing)
+    rather than NaN. This matters at the RIGHT edge: intraday feeds (Yahoo) routinely
+    report ``volume: null`` for the most recent, still-forming bar even on the most
+    liquid names. Because a cumulative sum leaves NaN in place at a NaN position, a
+    single null last-bar volume would otherwise make the *last* VWAP value NaN — the
+    exact bar the live snapshot reads — flagging VWAP "unavailable" for SPY/NVDA/etc.
+    Zero-filling keeps VWAP defined as long as any real volume has traded today; a
+    session with genuinely no volume data still yields NaN (correctly unavailable)."""
     typical = (df["high"] + df["low"] + df["close"]) / 3.0
+    vol = df["volume"].fillna(0.0)
     day = df.index.normalize()
-    pv = typical * df["volume"]
+    pv = typical * vol
     cum_pv = pv.groupby(day).cumsum()
-    cum_v = df["volume"].groupby(day).cumsum().replace(0.0, np.nan)
+    cum_v = vol.groupby(day).cumsum().replace(0.0, np.nan)
     return cum_pv / cum_v
 
 
@@ -64,9 +74,10 @@ def session_vwap_bands(df: pd.DataFrame, n_std: float = 2.0):
     """VWAP plus rolling intraday standard-deviation bands."""
     vw = vwap_session(df)
     typical = (df["high"] + df["low"] + df["close"]) / 3.0
+    vol = df["volume"].fillna(0.0)
     day = df.index.normalize()
-    dev2 = ((typical - vw) ** 2 * df["volume"]).groupby(day).cumsum()
-    cum_v = df["volume"].groupby(day).cumsum().replace(0.0, np.nan)
+    dev2 = ((typical - vw) ** 2 * vol).groupby(day).cumsum()
+    cum_v = vol.groupby(day).cumsum().replace(0.0, np.nan)
     std = np.sqrt(dev2 / cum_v)
     return vw, vw + n_std * std, vw - n_std * std
 

@@ -9,6 +9,31 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.22.1] — 2026-07-21
+
+### Fixed — dev request (recurring trading blocker)
+- **Intraday VWAP now populates for liquid watchlist names** (SPY, NVDA, AMD,
+  INTC, MU, AMAT, LRCX, …). Root cause: Yahoo's intraday chart API routinely
+  reports `volume: null` for the most recent, still-forming bar even on the most
+  liquid symbols. Since a cumulative sum leaves NaN in place at a NaN position,
+  that single null last-bar volume made the *last* session-VWAP value NaN — the
+  exact bar the live snapshot reads — so VWAP showed `vwap_unavailable` on names
+  that clearly have volume. `vwap_session` (and `session_vwap_bands`) now
+  zero-fill missing bar volume before the cumulative sum: a forming/volume-less
+  bar contributes nothing (VWAP carries the prior value) instead of nulling the
+  readout. VWAP is defined whenever any real volume has traded in the session.
+  This unblocks the 10:00–12:00 VWAP-trend LONG lane that depends on it.
+- **Clearer VWAP fallback status.** Each symbol now carries a `vwap_status`
+  field (`ok` / `no_volume` / `undefined`), and the `data_quality` flag on an
+  unavailable VWAP is now `vwap_unavailable_no_volume` vs `…_undefined` so the
+  desk can tell a genuine session-wide data gap from a not-yet-meaningful VWAP,
+  rather than a single opaque `vwap_unavailable`.
+
+### Changed
+- **Claude desk moved back to `claude-opus-4-8`** (from `claude-fable-5`, which
+  was running ~$5/day). Pricing readout updated to Opus 4.8 rates (5/25 per 1M).
+  Override via `CLAUDE_MODEL`.
+
 ## [6.22.0] — 2026-07-21
 
 ### Added

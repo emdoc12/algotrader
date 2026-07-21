@@ -11,7 +11,7 @@ import os
 
 # team -> (input $/1M, output $/1M)
 _DEFAULT_PRICING = {
-    "claude":   (10.00, 50.00),  # claude-fable-5 (top tier; Opus 4.8 was 5/25)
+    "claude":   (5.00, 25.00),   # claude-opus-4-8
     "openai":   (5.00, 30.00),   # gpt-5.5
     "grok":     (1.25, 2.50),    # grok-4.5 (approx; verify)
     "qwen":     (2.50, 7.50),    # qwen3.7-max

@@ -51,6 +51,12 @@ def _latest_indicators(df: pd.DataFrame, live_price: float | None = None) -> dic
     vwap_raw = ind.vwap_session(df).iloc[-1]
     vwap_ok = pd.notna(vwap_raw) and float(vwap_raw) > 0
     vwap = float(vwap_raw) if vwap_ok else None
+    # Distinguish the two unavailable cases so the desk knows whether to wait or
+    # skip: a session with no traded volume at all (genuine data gap) vs. VWAP
+    # simply not yet meaningful. After the zero-fill fix in vwap_session, a
+    # forming last bar no longer nulls VWAP, so this only trips on a real gap.
+    vwap_status = "ok" if vwap_ok else (
+        "no_volume" if float(df["volume"].fillna(0.0).tail(80).sum()) <= 0 else "undefined")
     bar_close = float(close.iloc[-1])
     price = float(live_price) if live_price is not None else bar_close
     day_open = float(df["open"][df.index.normalize() == df.index[-1].normalize()].iloc[0])
@@ -62,7 +68,7 @@ def _latest_indicators(df: pd.DataFrame, live_price: float | None = None) -> dic
     if dev > 0.015:
         dq.append(f"quote_vs_bar_{dev * 100:.1f}pct")
     if not vwap_ok:
-        dq.append("vwap_unavailable")
+        dq.append(f"vwap_unavailable_{vwap_status}")
     return {
         "price": round(price, 2),
         "bar_close": round(bar_close, 2),
@@ -79,6 +85,7 @@ def _latest_indicators(df: pd.DataFrame, live_price: float | None = None) -> dic
         "macd_hist": round(macd_hist, 4) if macd_hist is not None else None,
         "macd_hist_prev": round(macd_hist_prev, 4) if macd_hist_prev is not None else None,
         "vwap": round(vwap, 2) if vwap_ok else None,
+        "vwap_status": vwap_status,
         "vs_vwap_pct": round((price / vwap - 1) * 100, 2) if vwap_ok else None,
         "regime": Regime.TREND.value if adx >= 25 else Regime.RANGE.value,
         "data_quality": dq or None,
