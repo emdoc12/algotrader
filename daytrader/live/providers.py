@@ -54,6 +54,15 @@ def _encode_result(result) -> str:
     return s
 
 
+def _approx_tokens(text: str) -> int:
+    """Rough token count (~4 chars/token) for a fallback cost estimate when a
+    provider's response omits the usage object. Better a defensible estimate
+    than a $0 readout that implies the model ran for free."""
+    if not text:
+        return 0
+    return max(1, len(text) // 4)
+
+
 def _run_handler(handlers: Handlers, name: str, inp: dict) -> dict:
     """Execute a tool handler, mapping unknown tools / exceptions to error dicts."""
     handler = handlers.get(name)
@@ -115,16 +124,31 @@ class AnthropicProvider(BaseProvider):
     ) -> AgentResult:
         actions: list[dict] = []
         usage = {"input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0}
+        # Character-based fallback, accumulated per request, used only if the API
+        # never reports real token counts (so cost is never a misleading $0).
+        est = {"input_tokens": 0, "output_tokens": 0}
+        reported = {"any": False}
 
         def _tally(resp):
             u = getattr(resp, "usage", None)
             if u is None:
                 return
-            usage["input_tokens"] += ((getattr(u, "input_tokens", 0) or 0)
-                                      + (getattr(u, "cache_creation_input_tokens", 0) or 0)
-                                      + (getattr(u, "cache_read_input_tokens", 0) or 0))
-            usage["output_tokens"] += getattr(u, "output_tokens", 0) or 0
+            it = ((getattr(u, "input_tokens", 0) or 0)
+                  + (getattr(u, "cache_creation_input_tokens", 0) or 0)
+                  + (getattr(u, "cache_read_input_tokens", 0) or 0))
+            ot = getattr(u, "output_tokens", 0) or 0
+            if it or ot:
+                reported["any"] = True
+            usage["input_tokens"] += it
+            usage["output_tokens"] += ot
             usage["cached_input_tokens"] += getattr(u, "cache_read_input_tokens", 0) or 0
+
+        def _finish(**kw):
+            # If no real usage ever came back, fall back to the char estimate.
+            if not reported["any"]:
+                usage["input_tokens"] = est["input_tokens"]
+                usage["output_tokens"] = est["output_tokens"]
+            return AgentResult(usage=usage, **kw)
 
         try:
             client = self._client_lazy()
@@ -154,13 +178,22 @@ class AnthropicProvider(BaseProvider):
                     create_kwargs["thinking"] = {"type": "adaptive"}
                 resp = client.messages.create(**create_kwargs)
                 _tally(resp)
+                # Estimate this request's tokens (only after a successful call, so
+                # a rejected request is never billed) for the fallback: input is
+                # system + tools + the full message history re-sent each iteration.
+                est["input_tokens"] += (_approx_tokens(system)
+                                        + _approx_tokens(json.dumps(tools, default=str))
+                                        + _approx_tokens(json.dumps(messages, default=str)))
+                est["output_tokens"] += _approx_tokens(json.dumps(
+                    [getattr(b, "text", "") or getattr(b, "input", "") for b in resp.content],
+                    default=str))
 
                 if resp.stop_reason == "refusal":
-                    return AgentResult(text="", actions=actions, refused=True, usage=usage)
+                    return _finish(text="", actions=actions, refused=True)
 
                 if resp.stop_reason != "tool_use":
                     text = "".join(b.text for b in resp.content if b.type == "text")
-                    return AgentResult(text=text, actions=actions, usage=usage)
+                    return _finish(text=text, actions=actions)
 
                 # Execute every requested tool, collect results.
                 messages.append({"role": "assistant", "content": resp.content})
@@ -177,10 +210,10 @@ class AnthropicProvider(BaseProvider):
                     })
                 messages.append({"role": "user", "content": tool_results})
 
-            return AgentResult(text="(max iterations reached)", actions=actions,
-                               error="max_iterations_reached", usage=usage)
+            return _finish(text="(max iterations reached)", actions=actions,
+                           error="max_iterations_reached")
         except Exception as e:  # noqa: BLE001 - network / SDK / missing-key variability
-            return AgentResult(text="", actions=actions, error=repr(e), usage=usage)
+            return _finish(text="", actions=actions, error=repr(e))
 
 
 def _to_openai_tools(tools: list[dict]) -> list[dict]:
@@ -257,6 +290,10 @@ class OpenAICompatibleProvider(BaseProvider):
     ) -> AgentResult:
         actions: list[dict] = []
         usage = {"input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0}
+        # Character-based fallback for endpoints that omit the usage object
+        # (some OpenAI-compatible proxies do), so cost is never a misleading $0.
+        est = {"input_tokens": 0, "output_tokens": 0}
+        reported = {"any": False}
 
         def _tally(resp):
             # OpenAI-compatible providers cache the repeated prompt prefix
@@ -264,11 +301,21 @@ class OpenAICompatibleProvider(BaseProvider):
             u = getattr(resp, "usage", None)
             if u is None:
                 return
-            usage["input_tokens"] += getattr(u, "prompt_tokens", 0) or 0
-            usage["output_tokens"] += getattr(u, "completion_tokens", 0) or 0
+            it = getattr(u, "prompt_tokens", 0) or 0
+            ot = getattr(u, "completion_tokens", 0) or 0
+            if it or ot:
+                reported["any"] = True
+            usage["input_tokens"] += it
+            usage["output_tokens"] += ot
             details = getattr(u, "prompt_tokens_details", None)
             if details is not None:
                 usage["cached_input_tokens"] += getattr(details, "cached_tokens", 0) or 0
+
+        def _finish(**kw):
+            if not reported["any"]:
+                usage["input_tokens"] = est["input_tokens"]
+                usage["output_tokens"] = est["output_tokens"]
+            return AgentResult(usage=usage, **kw)
 
         try:
             client = self._client_lazy()
@@ -287,12 +334,20 @@ class OpenAICompatibleProvider(BaseProvider):
                     base_kwargs["tool_choice"] = "auto"
                 resp = self._create(client, base_kwargs, max_tokens)
                 _tally(resp)
+                # Estimate only after a successful call, so a rejected request is
+                # never billed. Input = tools + full message history re-sent each iter.
+                est["input_tokens"] += (_approx_tokens(json.dumps(oai_tools, default=str))
+                                        + _approx_tokens(json.dumps(messages, default=str)))
 
                 msg = resp.choices[0].message
                 tool_calls = getattr(msg, "tool_calls", None)
+                est["output_tokens"] += (_approx_tokens(msg.content or "")
+                                         + _approx_tokens(json.dumps(
+                                             [getattr(tc.function, "arguments", "") for tc in (tool_calls or [])],
+                                             default=str)))
 
                 if not tool_calls:
-                    return AgentResult(text=msg.content or "", actions=actions, usage=usage)
+                    return _finish(text=msg.content or "", actions=actions)
 
                 # Append the assistant message (must carry the tool_calls), then
                 # one tool-role message per executed call.
@@ -326,10 +381,10 @@ class OpenAICompatibleProvider(BaseProvider):
                         "content": _encode_result(result),
                     })
 
-            return AgentResult(text="(max iterations reached)", actions=actions,
-                               error="max_iterations_reached", usage=usage)
+            return _finish(text="(max iterations reached)", actions=actions,
+                           error="max_iterations_reached")
         except Exception as e:  # noqa: BLE001 - network / SDK / missing-key variability
-            return AgentResult(text="", actions=actions, error=repr(e), usage=usage)
+            return _finish(text="", actions=actions, error=repr(e))
 
 
 def make_provider(spec: dict) -> BaseProvider:
@@ -359,7 +414,7 @@ def default_team_providers() -> dict[str, BaseProvider]:
         ),
         "openai": OpenAICompatibleProvider(
             name="openai",
-            model=os.environ.get("OPENAI_MODEL", "gpt-5.6-sol"),
+            model=os.environ.get("OPENAI_MODEL", "gpt-5.5"),
             base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
             api_key_env="OPENAI_API_KEY",
         ),

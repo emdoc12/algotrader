@@ -9,6 +9,25 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.21.1] — 2026-07-21
+
+### Fixed — live issues
+- **OpenAI desk erroring every cycle.** The `openai` pin `gpt-5.6-sol` rejects
+  function tools on Chat Completions (`400: Function tools with reasoning_effort
+  are not supported … in /v1/chat/completions` — that model needs the Responses
+  API). Reverted the default pin back to **`gpt-5.5`**, which runs the desk's
+  tool loop on Chat Completions as before. Override still available via
+  `OPENAI_MODEL`.
+- **"API $/day" showing $0 for every team despite active trading.** Some
+  providers/proxies return a response with no `usage` object, so the recorded
+  token count (and therefore cost) was zero even on successful cycles. Both
+  providers now fall back to a character-based token estimate (~4 chars/token,
+  accumulated over the full re-sent context per iteration) **only when the API
+  reports no real usage**, so cost is never a misleading $0 when the model
+  actually ran. Real reported usage is always preferred; failed/rejected
+  requests are still billed at $0 (the estimate is only applied after a
+  successful response).
+
 ## [6.21.0] — 2026-07-20
 
 ### Added — dev request
