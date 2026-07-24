@@ -9,6 +9,13 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.22.2] — 2026-07-24
+
+### Changed
+- **Claude desk upgraded to `claude-opus-5`** (from `claude-opus-4-8`). Opus 5
+  is priced identically to Opus 4.8 (5/25 per 1M) and takes the same adaptive
+  thinking, so no provider changes were needed. Override via `CLAUDE_MODEL`.
+
 ## [6.22.1] — 2026-07-21
 
 ### Fixed — dev request (recurring trading blocker)

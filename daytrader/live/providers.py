@@ -410,7 +410,7 @@ def default_team_providers() -> dict[str, BaseProvider]:
     """The four contestants, fully overridable by environment variables."""
     return {
         "claude": AnthropicProvider(
-            model=os.environ.get("CLAUDE_MODEL", "claude-opus-4-8"),
+            model=os.environ.get("CLAUDE_MODEL", "claude-opus-5"),
         ),
         "openai": OpenAICompatibleProvider(
             name="openai",
