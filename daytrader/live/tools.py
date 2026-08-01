@@ -11,9 +11,23 @@ from daytrader.core.types import Side
 from daytrader.live.dev_requests import file_dev_request
 
 
+def _team_from_db(db) -> str:
+    """Desk name from the DB filename (``team_<name>.db``) — used to attribute
+    research hypotheses without threading a team arg through every call site."""
+    try:
+        import os
+        base = os.path.basename(getattr(db, "path", "") or "")
+        if base.startswith("team_") and base.endswith(".db"):
+            return base[5:-3]
+    except Exception:  # noqa: BLE001
+        pass
+    return "unknown"
+
+
 def build_tools(broker, db) -> tuple[list[dict], dict]:
     """Return (tool_schemas, handlers) bound to a broker + db."""
 
+    team_name = _team_from_db(db)
     _LONG_WORDS = {"long", "buy", "b", "bull", "bullish"}
     _SHORT_WORDS = {"short", "sell", "s", "bear", "bearish"}
 
@@ -360,6 +374,85 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
         return {"ok": True, "name": name, "conditions": len(norm["entry"]),
                 "note": "Saved. Backtest it with backtest_custom_strategy(name=...) anytime."}
 
+    def propose_hypothesis(inp: dict) -> dict:
+        """Pre-register a research hypothesis. You will NOT get a result back.
+
+        This is the research loop, not a backtest: the idea is registered with
+        its pass/fail bar fixed up front, then judged later by pure compute
+        against hard out-of-sample data. You cannot retrofit criteria, retest a
+        rejected idea, or see the answer in this call.
+        """
+        from daytrader.research.hypothesis import HypothesisError
+        from daytrader.research.registry import ResearchDB
+        inp = inp or {}
+        cfg = inp.get("rule") or inp.get("config")
+        if not cfg:
+            return {"ok": False, "error": "rule (a custom-strategy config) is required"}
+        rdb = None
+        try:
+            rdb = ResearchDB()
+            n_periods = int(inp.get("n_periods", 5))
+            res = rdb.register(
+                {"rule": cfg,
+                 "universe": inp.get("universe") or inp.get("symbols") or ["SPY"],
+                 "interval": inp.get("interval", "1h"),
+                 "name": inp.get("name")},
+                team=team_name, rationale=inp.get("rationale", ""),
+                criteria=inp.get("criteria"), n_periods=n_periods)
+            if res.get("ok"):
+                summary = rdb.summary()
+                db.log_agent("research", "propose_hypothesis",
+                             f"#{res['id']} {inp.get('name') or ''}")
+                res["note"] = (
+                    f"Pre-registered as #{res['id']}. It will be evaluated on {n_periods} "
+                    "non-overlapping out-of-sample periods after the close. The bar is "
+                    f"corrected for the {summary['tested']} hypotheses already tested "
+                    "across ALL desks, so it tightens as the family grows. Expect "
+                    "rejection — that is the normal outcome. Do NOT re-propose this idea.")
+            return res
+        except HypothesisError as e:
+            return {"ok": False, "error": str(e)}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": repr(e)}
+        finally:
+            if rdb is not None:
+                rdb.close()
+
+    def research_log(inp: dict) -> dict:
+        """What has already been tested — read this BEFORE proposing."""
+        from daytrader.research.registry import ResearchDB
+        import json as _json
+        rdb = None
+        try:
+            rdb = ResearchDB()
+            rows = rdb.recent(limit=int((inp or {}).get("limit", 25)))
+            out = []
+            for r in rows:
+                res = {}
+                if r.get("result"):
+                    try:
+                        res = _json.loads(r["result"])
+                    except Exception:  # noqa: BLE001
+                        res = {}
+                out.append({
+                    "id": r["id"], "team": r["team"], "name": r["name"],
+                    "status": r["status"], "rationale": (r["rationale"] or "")[:160],
+                    "periods_profitable": (f"{res.get('n_periods_profitable')}/{res.get('n_periods')}"
+                                           if res.get("ok") else None),
+                    "n_trades": res.get("n_trades"),
+                    "net_pnl": res.get("total_net_pnl"),
+                    "p_value": r["p_value"], "required_alpha": r["required_alpha"],
+                    "why_rejected": (r["reject_reason"] or "")[:200] or None,
+                })
+            return {"ok": True, "summary": rdb.summary(), "hypotheses": out,
+                    "note": "A rejected hypothesis is permanently closed — proposing it "
+                            "again is refused by content hash."}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": repr(e)}
+        finally:
+            if rdb is not None:
+                rdb.close()
+
     def list_custom_strategies(_inp: dict) -> dict:
         import json as _json
         rows = db.list_custom_strategies()
@@ -442,6 +535,8 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
         "backtest_strategy": backtest_strategy,
         "backtest_custom_strategy": backtest_custom_strategy,
         "save_custom_strategy": save_custom_strategy,
+        "propose_hypothesis": propose_hypothesis,
+        "research_log": research_log,
         "list_custom_strategies": list_custom_strategies,
         "journal_write": journal_write,
         "request_dev_help": request_dev_help,
@@ -697,6 +792,49 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                     "notes": {"type": "string", "description": "Why it works / backtest result summary."},
                 },
                 "required": ["config"],
+            },
+        },
+        {
+            "name": "propose_hypothesis",
+            "description": (
+                "Pre-register a research hypothesis for out-of-sample testing. This is NOT a "
+                "backtest and returns NO result — that is the point. You state the rule and the "
+                "pass/fail bar up front; code judges it later against hard out-of-sample data "
+                "you cannot see, and you cannot change the criteria afterwards. "
+                "IMPORTANT: the significance bar is corrected for every hypothesis ever tested "
+                "across ALL desks, so it gets harder as the research family grows, and REJECTION "
+                "IS THE NORMAL OUTCOME — most real ideas fail, and a run of rejections means the "
+                "process is working, not that you should loosen the rule. A rejected idea is "
+                "closed permanently (matched by content hash, so renaming it will not get it "
+                "re-tested). Call research_log first to see what has already been ruled out. "
+                "Propose things you genuinely believe and can justify mechanically, not "
+                "variations mined to pass."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "rule": {"type": "object", "description": "Strategy config in the same grammar as backtest_custom_strategy (side, entry conditions, stop_atr_mult, rr, session window)."},
+                    "name": {"type": "string", "description": "Short label for the hypothesis."},
+                    "rationale": {"type": "string", "description": "WHY you think this edge exists — the mechanism, not the backtest. Recorded permanently alongside the verdict."},
+                    "universe": {"type": "array", "items": {"type": "string"}, "description": "Symbols to test (default ['SPY'])."},
+                    "interval": {"type": "string", "enum": ["5m", "15m", "1h", "1d"], "description": "Bar interval. Default '1h' — it is the only interval with enough history (730d) for a real multi-period walk-forward; 5m/15m cap at ~60d."},
+                    "n_periods": {"type": "integer", "description": "Non-overlapping out-of-sample periods to test across (default 5, minimum 3)."},
+                    "criteria": {"type": "object", "description": "Pre-registered pass bar: {min_periods_profitable, min_trades, base_alpha}. Fixed at registration — it can never be edited to fit the result."},
+                },
+                "required": ["rule"],
+            },
+        },
+        {
+            "name": "research_log",
+            "description": (
+                "The record of every hypothesis pre-registered across all desks: what was "
+                "tested, what was rejected and exactly why, and the running count that sets the "
+                "current significance bar. Read this BEFORE proposing so you neither repeat a "
+                "closed idea nor re-learn something already ruled out."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "description": "How many recent entries (default 25)."}},
             },
         },
         {

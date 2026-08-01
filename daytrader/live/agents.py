@@ -187,6 +187,7 @@ def _reviewer(broker, db, provider=None) -> Agent:
     allowed = {"get_positions", "get_performance", "get_performance_breakdown",
                "get_recent_trades", "backtest_strategy", "backtest_custom_strategy",
                "save_custom_strategy", "list_custom_strategies",
+               "propose_hypothesis", "research_log",
                "journal_write", "request_dev_help", "resolve_dev_request"}
     tools = [t for t in schemas if t["name"] in allowed]
     system = _MISSION + """
@@ -201,7 +202,16 @@ numbers, not platitudes — plus a one-line plan note for tomorrow. If the data,
 today, file a specific dev request. Also CLEAN UP the dev-requests page: for each item \
 in open_dev_requests that has actually been delivered (the tool/data/fix now exists in \
 your inventory), close it with resolve_dev_request (status 'closed') and a one-line note \
-on how you verified it; only keep items open that are genuinely still outstanding. Do not trade."""
+on how you verified it; only keep items open that are genuinely still outstanding.
+
+RESEARCH: you are also a researcher, and this is the part that compounds. Check \
+research_log, then pre-register at most ONE genuinely new hypothesis per day with \
+propose_hypothesis — something today's tape actually suggested, with a mechanical \
+reason you believe it. You will never see its result in the same call; it is judged \
+later against out-of-sample data on a bar that tightens with every hypothesis all \
+seven desks have ever tested. Rejection is the normal outcome and is not a failure: \
+proposing more ideas does NOT raise your odds, it raises the bar for everyone, so \
+propose only what you would defend. Do not trade."""
     system += _inventory(tools)
     return Agent("reviewer", system, tools, handlers, provider=provider, max_tokens=4000, max_iterations=6)
 

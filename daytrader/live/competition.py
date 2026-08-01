@@ -447,6 +447,28 @@ class Competition:
             res = t.desk.review_day(with_account(market, t.broker))
             self._record_usage(t, "reviewer", res)
             t.db.kv_set("reviewed_date", d)
+        # 3) Drain the research queue once the desks have proposed — pure
+        #    compute, no tokens. Reports only survivors; silence is expected.
+        self._run_research(d)
+
+    def _run_research(self, date_iso: str) -> None:
+        """Evaluate pending hypotheses once per day, after the reviewers run."""
+        if not self.teams:
+            return
+        state = self.teams[0].db  # any team's kv works as the shared day-latch
+        try:
+            if state.kv_get("research_date") == date_iso:
+                return
+            # Only run once every desk has had its chance to propose today.
+            if any(t.db.kv_get("reviewed_date") != date_iso for t in self.teams):
+                return
+            from daytrader.research.loop import run_pending
+            out = run_pending(starting_equity=START_CASH)
+            state.kv_set("research_date", date_iso)
+            print(f"[research] evaluated {out['tested']} hypotheses; "
+                  f"{len(out['accepted'])} survived | {out['summary']}")
+        except Exception as e:  # noqa: BLE001 - research must never break the trading loop
+            print(f"[research] error: {e!r}")
 
     def _save_risk(self, t: Team, date_iso: str | None = None) -> None:
         try:

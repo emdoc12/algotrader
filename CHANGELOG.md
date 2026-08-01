@@ -9,6 +9,56 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.24.0] — 2026-08-01
+
+### Added — automated strategy research loop
+The desks now run continuous strategy research between trading: they propose
+hypotheses, and **code does the judging**. Models are useful for generating and
+mechanizing ideas; they have no edge at discretionary calls, so every
+accept/reject here is pure compute (zero tokens).
+
+New package `daytrader/research/`, built around the one danger that dominates at
+scale — testing many strategies manufactures false positives:
+
+- **Pre-registration** (`registry.py`) — a hypothesis is registered with its
+  pass/fail criteria *before* any result exists. `register()` refuses a spec
+  carrying outcome fields; `record_result()` is write-once, so a disappointing
+  result can never be re-run and re-recorded until it passes.
+- **Failure log** — every proposal is keyed by a canonical content hash over the
+  *normalized* rule, so a rejected idea cannot come back renamed, re-ordered, or
+  spelled with a feature alias (`ema_9` vs `ema9`). Permanently closed.
+- **Hard out-of-sample** (`evaluate.py`) — N contiguous, non-overlapping periods,
+  each scored independently on a frozen rule. Two details that decide whether the
+  numbers mean anything: each period runs with an indicator **warmup prefix**
+  (else the first ~50 bars are silently signal-less), and each period **restarts
+  from the same equity** (else period 1's P&L changes period 5's position sizes,
+  coupling trials the gate treats as independent).
+- **Multiple-comparison correction** (`gate.py`) — Bonferroni over the running
+  family: `required_alpha = base_alpha / n_tests_to_date`, counted **globally
+  across all seven desks**. Per-desk families would give each desk its own 5%
+  budget and leave the true family-wise error rate near 30%.
+- **Silence is the expected output** — the loop notifies only on a survivor.
+
+Surfaces: `propose_hypothesis` + `research_log` tools (reviewer role), a
+**Research** dashboard tab showing the full tested/rejected record and the live
+significance bar, and a once-daily drain wired into `review_all`.
+
+### Notes on two design decisions
+- **Interval defaults to `1h`.** Five genuine 30-day periods need ~150 days of
+  history; the Yahoo loader caps 5m at ~60 days. 1h serves 730 days. Lower
+  fidelity per bar, far more statistical power — 5m remains available for
+  short-horizon confirmation.
+- **Period-consistency is a hard criterion, not part of the p-value.** Folding a
+  binomial over N periods into the significance test looked more conservative but
+  was wrong: it has a hard floor of `0.5**n` (0.031 at 5 periods), which sits
+  above the corrected bar from the *second* test onward. That would have made the
+  gate not merely strict but arithmetically unpassable, rejecting real edges for
+  a counting reason. The bootstrap over trade P&L (continuous, no floor) is the
+  significance test; `min_periods_profitable` remains a hard pre-registered bar;
+  `p_periods` is still reported as evidence. `gate.feasible()` now flags when the
+  corrected bar drops below the bootstrap's resolution, so an exhausted family is
+  reported rather than silently rejecting everything forever.
+
 ## [6.23.0] — 2026-07-24
 
 ### Added — dev requests

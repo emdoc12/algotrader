@@ -93,6 +93,52 @@ def close_dev_request(team: str, req_id, status: str = "closed",
         db.close()
 
 
+def research_payload() -> dict:
+    """The research record: what's been tested, what survived, and the live bar."""
+    try:
+        from daytrader.research.gate import feasible, required_alpha
+        from daytrader.research.registry import ResearchDB
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"research module unavailable: {e!r}", "hypotheses": []}
+    rdb = None
+    try:
+        rdb = ResearchDB()
+        summary = rdb.summary()
+        rows = []
+        for r in rdb.recent(limit=200):
+            res = {}
+            if r.get("result"):
+                try:
+                    res = json.loads(r["result"])
+                except Exception:  # noqa: BLE001
+                    res = {}
+            rows.append({
+                "id": r["id"], "team": r["team"], "name": r["name"],
+                "status": r["status"], "registered_ts": r["registered_ts"],
+                "tested_ts": r["tested_ts"], "rationale": r["rationale"],
+                "p_value": r["p_value"], "required_alpha": r["required_alpha"],
+                "periods": (f"{res.get('n_periods_profitable')}/{res.get('n_periods')}"
+                            if res.get("ok") else None),
+                "n_trades": res.get("n_trades"),
+                "net_pnl": res.get("total_net_pnl"),
+                "win_rate": res.get("win_rate"),
+                "interval": res.get("interval"),
+                "why": r["reject_reason"],
+            })
+        nxt = required_alpha(0.05, summary["next_test_ordinal"])
+        return {
+            "summary": summary,
+            "next_required_alpha": nxt,
+            "feasible": feasible(nxt),
+            "hypotheses": rows,
+        }
+    except Exception as e:  # noqa: BLE001
+        return {"error": repr(e), "hypotheses": []}
+    finally:
+        if rdb is not None:
+            rdb.close()
+
+
 def clear_recent_errors(team: str | None = None) -> dict:
     """Dismiss the 'recent errors & refusals' panel by advancing a per-team
     acknowledgment watermark to now. Non-destructive: the agent_log rows stay
@@ -214,6 +260,9 @@ class _Handler(BaseHTTPRequestHandler):
             if path == "/api/health":
                 from daytrader.live.healthcheck import health_snapshot
                 self._json(health_snapshot())
+                return
+            if path == "/api/research":
+                self._json(research_payload())
                 return
             if path.startswith("/api/team/"):
                 rest = path[len("/api/team/"):]
@@ -551,6 +600,7 @@ function buildTabs(){
   };
   mk("overview", "Overview");
   for(const tm of TEAMS) mk(tm, LABELS[tm]);
+  mk("research", "Research");
   mk("health", "Health");
   mk("settings", "Settings");
 }
@@ -561,6 +611,7 @@ function switchTab(id){
   if(id === "overview") loadOverview();
   else if(id === "settings") loadSettings();
   else if(id === "health") loadHealth();
+  else if(id === "research") loadResearch();
   else loadTeam(id);
 }
 
@@ -989,6 +1040,84 @@ async function clearErrors(){
     });
   }catch(e){ /* ignore; reload reflects truth */ }
   if(current === "health") loadHealth();
+}
+
+// ---- research ----------------------------------------------------------- //
+async function loadResearch(){
+  const main = document.getElementById("main");
+  if(current !== "research") return;
+  let d;
+  try{ d = await getJSON("/api/research"); }
+  catch(e){ main.innerHTML=""; main.appendChild(el("div",{class:"err"},"Failed to load: "+e)); return; }
+  if(current !== "research") return;
+  main.innerHTML = "";
+  const s = d.summary || {};
+
+  const top = el("div", {class:"card"});
+  top.appendChild(el("h2", null, "Research — desks propose, code judges"));
+  top.appendChild(el("div", {class:"muted", style:"font-size:13px;margin-bottom:10px"},
+    "Hypotheses are pre-registered with their pass/fail bar fixed, then tested on "
+    + "non-overlapping out-of-sample periods. The significance bar is corrected for every "
+    + "test all desks have ever run. Silence is the expected output."));
+  const stats = el("div", {style:"display:flex;gap:26px;flex-wrap:wrap;font-size:13px"});
+  const stat = (label, val, color) => {
+    const b = el("div");
+    b.appendChild(el("div", {class:"muted", style:"font-size:11px"}, label));
+    b.appendChild(el("div", {style:"font-size:20px;font-weight:600"
+      + (color?(";color:"+color):"")}, String(val)));
+    stats.appendChild(b);
+  };
+  stat("Tested", s.tested ?? 0);
+  stat("Survived", s.accepted ?? 0, (s.accepted>0)?"var(--green)":null);
+  stat("Rejected", s.rejected ?? 0);
+  stat("Pending", s.registered_pending ?? 0);
+  stat("Next bar (α)", d.next_required_alpha!=null ? d.next_required_alpha.toExponential(2) : "—",
+       d.feasible === false ? "var(--red)" : null);
+  top.appendChild(stats);
+  if(d.feasible === false){
+    top.appendChild(el("div",{class:"err",style:"margin-top:10px;font-size:12px"},
+      "The corrected bar has fallen below the bootstrap's resolution — this family can no "
+      + "longer accept anything on arithmetic alone. Raise base_alpha or retire the family."));
+  }
+  main.appendChild(top);
+
+  const c = el("div", {class:"card"});
+  c.appendChild(el("h2", null, "Hypothesis log"));
+  const rows = d.hypotheses || [];
+  if(!rows.length){
+    c.appendChild(el("div",{class:"muted",style:"font-size:13px"},
+      "Nothing proposed yet. Reviewers pre-register hypotheses at the close."));
+  } else {
+    const wrap = el("div", {style:"overflow-x:auto"});
+    const tb = el("table", {style:"width:100%;border-collapse:collapse;font-size:12px"});
+    const hd = el("tr");
+    ["#","Desk","Hypothesis","Status","Periods","Trades","Net P&L","p","α","Why"].forEach(h=>{
+      hd.appendChild(el("th",{style:"text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap"},h));
+    });
+    tb.appendChild(hd);
+    rows.forEach(r=>{
+      const tr = el("tr");
+      const cell = (v, style) => tr.appendChild(el("td",
+        {style:"padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top"+(style||"")}, v));
+      cell(String(r.id));
+      cell(r.team||"—");
+      cell(r.name||"—");
+      const col = r.status==="accepted" ? "var(--green)" : (r.status==="rejected" ? "var(--gray)" : "var(--amber)");
+      cell(r.status, ";color:"+col+";font-weight:600;white-space:nowrap");
+      cell(r.periods||"—", ";white-space:nowrap");
+      cell(r.n_trades!=null?String(r.n_trades):"—");
+      cell(r.net_pnl!=null?(r.net_pnl>=0?"+":"")+r.net_pnl.toFixed(2):"—",
+           r.net_pnl!=null?(";color:"+(r.net_pnl>=0?"var(--green)":"var(--red)")):"");
+      cell(r.p_value!=null?r.p_value.toFixed(4):"—");
+      cell(r.required_alpha!=null?r.required_alpha.toExponential(1):"—");
+      cell(r.why||(r.status==="accepted"?"cleared every criterion":"—"),
+           ";max-width:420px;color:var(--muted)");
+      tb.appendChild(tr);
+    });
+    wrap.appendChild(tb);
+    c.appendChild(wrap);
+  }
+  main.appendChild(c);
 }
 
 // ---- health ------------------------------------------------------------- //
