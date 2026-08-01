@@ -41,6 +41,7 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
             trail_pct=inp.get("trail_pct"),
             auto_scale_r=inp.get("auto_scale_r"),
             auto_scale_frac=inp.get("auto_scale_frac"),
+            adx_decay_exit=inp.get("adx_decay_exit"),
         )
         db.log_agent("trader", "place_trade", str({k: inp.get(k) for k in ("symbol", "side", "qty", "horizon")}))
         return res
@@ -466,6 +467,7 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                     "trail_pct": {"type": "number", "description": "Optional trailing stop as a percent of price (alternative to trail_atr_mult). E.g. 1.5 = trail 1.5%."},
                     "auto_scale_r": {"type": "number", "description": "Server-enforced scale-out trigger, in R multiples (R = entry→stop). DEFAULT 1.0: at +1R the system auto-banks part of the position and moves the stop to breakeven. Set with auto_scale_frac."},
                     "auto_scale_frac": {"type": "number", "description": "Fraction to auto-bank at +auto_scale_r (DEFAULT 0.5 = half). Set to 0 to DISABLE server-enforced scale-out for this trade and manage exits yourself."},
+                    "adx_decay_exit": {"type": "object", "description": "Server-enforced regime-deterioration exit — the SAME contract as backtest_strategy/backtest_custom_strategy, so a config you validated in a backtest behaves identically live. E.g. {\"adx_drop_from_peak\": 5.0, \"negative_slope_bars\": 3}: force-close this position once its ADX has fallen >= 5.0 from its post-entry peak, OR its ADX slope has been negative for >= 3 consecutive cycles. Checked every cycle AND on the ~2-min stop poll. Use it on trend-continuation entries (MACD/EMA-rollover) where the loss mode is the trend dying under you rather than a hard stop-out."},
                 },
                 "required": ["symbol", "side", "qty", "stop", "target", "rationale"],
             },

@@ -53,6 +53,22 @@ def _today_et() -> str:
 def _is_market_holiday(d) -> bool:
     return d.isoformat() in _MARKET_HOLIDAYS
 
+
+def _adx_info(df) -> dict:
+    """{"adx14", "adx_slope"} from a 5m frame — the inputs an ADX-decay exit needs.
+
+    Slope is measured over the same ~3-bar span the snapshot uses, so a live
+    decay exit and the snapshot's ``adx_rising`` agree on direction.
+    """
+    from daytrader.core import indicators as _ind
+    try:
+        s = _ind.adx(df, 14)
+        cur = float(s.iloc[-1])
+        prev = float(s.iloc[-4]) if len(s) >= 4 else cur
+        return {"adx14": cur, "adx_slope": round(cur - prev, 2)}
+    except Exception:  # noqa: BLE001
+        return {}
+
 START_CASH = float(os.environ.get("START_EQUITY", "25000"))
 INTERVAL_SEC = int(os.environ.get("AGENT_INTERVAL_SECONDS", "900"))
 DAILY_LOSS_LIMIT_PCT = float(os.environ.get("DAILY_LOSS_LIMIT_PCT", "3.0"))
@@ -343,18 +359,20 @@ class Competition:
             t.db.kv_set("planned_date", d)
 
     @staticmethod
-    def _held_symbol_data(team, base_quotes: dict, base_atr: dict):
-        """Extend the cycle's quote + ATR maps with entries for any HELD symbol
-        that fell off today's scanned watchlist, so trailing stops keep
-        ratcheting on swing/long holds instead of silently freezing."""
+    def _held_symbol_data(team, base_quotes: dict, base_atr: dict, base_adx: dict | None = None):
+        """Extend the cycle's quote / ATR / ADX maps with entries for any HELD
+        symbol that fell off today's scanned watchlist, so trailing stops keep
+        ratcheting — and ADX-decay exits keep evaluating — on swing/long holds
+        instead of silently freezing."""
         q, a = dict(base_quotes), dict(base_atr)
+        adx = dict(base_adx or {})
         try:
             held = [p.get("symbol") for p in team.broker.positions()]
         except Exception:  # noqa: BLE001
             held = []
-        missing = [s for s in held if s and (s not in q or s not in a)]
+        missing = [s for s in held if s and (s not in q or s not in a or s not in adx)]
         if not missing:
-            return q, a
+            return q, a, adx
         from daytrader.data import loader as _loader
         from daytrader.core import indicators as _ind
         for sym in missing:
@@ -364,13 +382,16 @@ class Competition:
                     px = _quotes.get_quote(sym)
                     if px is not None:
                         q[sym] = px
-                if sym not in a:
+                if sym not in a or sym not in adx:
                     df = _loader.load(sym, interval="5m", max_age_hours=0.1)
                     if df is not None and len(df) >= 15:
-                        a[sym] = float(_ind.atr(df, 14).iloc[-1])
+                        if sym not in a:
+                            a[sym] = float(_ind.atr(df, 14).iloc[-1])
+                        if sym not in adx:
+                            adx[sym] = _adx_info(df)
             except Exception:  # noqa: BLE001
                 continue
-        return q, a
+        return q, a, adx
 
     def trade_all(self):
         market = market_only()
@@ -380,17 +401,20 @@ class Competition:
         cycle_quotes = dict(market.get("quotes") or {})
         base_atr = {sym: m.get("atr14") for sym, m in (market.get("market") or {}).items()
                     if m.get("atr14") is not None}
+        base_adx = {sym: {"adx14": m.get("adx14"), "adx_slope": m.get("adx_slope")}
+                    for sym, m in (market.get("market") or {}).items()
+                    if m.get("adx14") is not None}
         spy_dir = (market.get("market_summary") or {}).get("spy_direction")
         for t in self.teams:
             self._risk_check(t)  # may halt + flatten this team's DAY trades
             # Per-team maps that also cover held-outside-scan symbols.
-            q, a = self._held_symbol_data(t, cycle_quotes, base_atr)
+            q, a, x = self._held_symbol_data(t, cycle_quotes, base_atr, base_adx)
             t.broker.set_cycle_quotes(q)
             t.broker.set_cycle_context(spy_direction=spy_dir)
             try:
                 # Enforce server-side brackets EVERY cycle, even for halted teams
                 # — their surviving swing/long holds still need their stops run.
-                t.broker.manage_positions(q, a)
+                t.broker.manage_positions(q, a, x)
                 if not t.halted:
                     res = t.desk.trade_cycle(with_account(market, t.broker))
                     self._record_usage(t, "trader", res)
@@ -574,9 +598,13 @@ class Competition:
             if not t.halted:
                 self._fire_staged_for_team(t)
         held: set = set()
+        decay_syms: set = set()
         for t in self.teams:
             try:
-                held |= {p["symbol"] for p in t.broker.positions()}
+                for p in t.broker.positions():
+                    held.add(p["symbol"])
+                    if p.get("adx_decay_exit"):
+                        decay_syms.add(p["symbol"])
             except Exception:  # noqa: BLE001
                 pass
         if not held:
@@ -585,10 +613,22 @@ class Competition:
         qmap = _quotes.get_quotes(list(held))
         if not qmap:
             return
+        # ADX is only needed for positions that actually opted into a decay
+        # exit, so the common case stays a quotes-only poll.
+        amap: dict = {}
+        if decay_syms:
+            from daytrader.data import loader as _loader
+            for sym in decay_syms:
+                try:
+                    df = _loader.load(sym, interval="5m", max_age_hours=0.1)
+                    if df is not None and len(df) >= 15:
+                        amap[sym] = _adx_info(df)
+                except Exception:  # noqa: BLE001
+                    continue
         for t in self.teams:
             try:
                 t.broker.set_cycle_quotes(qmap)
-                t.broker.manage_positions(qmap, {})
+                t.broker.manage_positions(qmap, {}, amap)
             except Exception:  # noqa: BLE001
                 pass
             finally:
@@ -615,13 +655,16 @@ class Competition:
         cycle_quotes = dict(market.get("quotes") or {})
         base_atr = {sym: m.get("atr14") for sym, m in (market.get("market") or {}).items()
                     if m.get("atr14") is not None}
+        base_adx = {sym: {"adx14": m.get("adx14"), "adx_slope": m.get("adx_slope")}
+                    for sym, m in (market.get("market") or {}).items()
+                    if m.get("adx14") is not None}
         spy_dir = (market.get("market_summary") or {}).get("spy_direction")
         for t in self.teams:
-            q, a = self._held_symbol_data(t, cycle_quotes, base_atr)
+            q, a, x = self._held_symbol_data(t, cycle_quotes, base_atr, base_adx)
             t.broker.set_cycle_quotes(q)
             t.broker.set_cycle_context(spy_direction=spy_dir)
             try:
-                t.broker.manage_positions(q, a)
+                t.broker.manage_positions(q, a, x)
             finally:
                 t.broker.set_cycle_quotes(None)
             t.broker.db.record_equity(t.broker.cash(), t.broker.equity(),

@@ -49,6 +49,42 @@ RISK_OVERRUN_MULT = float(os.environ.get("RISK_OVERRUN_MULT", "1.25"))
 STOP_POLL_SEC = int(os.environ.get("STOP_POLL_SECONDS", "120"))
 
 
+def _load_json(raw):
+    """Decode a JSON column, tolerating NULL / already-decoded / malformed values."""
+    if raw is None or isinstance(raw, dict):
+        return raw or None
+    try:
+        import json
+        v = json.loads(raw)
+        return v if isinstance(v, dict) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _clean_adx_decay(cfg) -> Optional[dict]:
+    """Normalize an ``adx_decay_exit`` config, or None if it asks for nothing.
+
+    Mirrors the backtest engine's contract so a config validated in
+    ``backtest_strategy`` behaves identically live.
+    """
+    if not isinstance(cfg, dict):
+        return None
+    out: dict = {}
+    drop = cfg.get("adx_drop_from_peak")
+    bars = cfg.get("negative_slope_bars")
+    try:
+        if drop is not None and float(drop) > 0:
+            out["adx_drop_from_peak"] = float(drop)
+    except (TypeError, ValueError):
+        pass
+    try:
+        if bars is not None and int(bars) > 0:
+            out["negative_slope_bars"] = int(bars)
+    except (TypeError, ValueError):
+        pass
+    return out or None
+
+
 class PaperBroker:
     def __init__(
         self,
@@ -92,6 +128,9 @@ class PaperBroker:
                 "auto_scale_r": (row["auto_scale_r"] if "auto_scale_r" in row.keys() else None),
                 "auto_scale_frac": (row["auto_scale_frac"] if "auto_scale_frac" in row.keys() else None),
                 "scaled": bool(row["scaled"]) if "scaled" in row.keys() and row["scaled"] else False,
+                "adx_decay_exit": _load_json(row["adx_decay_exit"]) if "adx_decay_exit" in row.keys() else None,
+                "adx_peak": (row["adx_peak"] if "adx_peak" in row.keys() else None),
+                "adx_neg_bars": int(row["adx_neg_bars"] or 0) if "adx_neg_bars" in row.keys() else 0,
             }
 
         last = self.db.last_equity()
@@ -192,6 +231,10 @@ class PaperBroker:
             "auto_scale_r": pos.get("auto_scale_r"),
             "auto_scale_frac": pos.get("auto_scale_frac"),
             "scaled": 1 if pos.get("scaled") else 0,
+            "adx_decay_exit": (__import__("json").dumps(pos["adx_decay_exit"])
+                               if pos.get("adx_decay_exit") else None),
+            "adx_peak": pos.get("adx_peak"),
+            "adx_neg_bars": int(pos.get("adx_neg_bars") or 0),
         })
 
     def _audit(self, pos: dict, qty_closed: float, pnl: float):
@@ -219,6 +262,7 @@ class PaperBroker:
         trail_pct: Optional[float] = None,
         auto_scale_r: Optional[float] = None,
         auto_scale_frac: Optional[float] = None,
+        adx_decay_exit: Optional[dict] = None,
     ) -> dict:
         """Market entry at the latest live price plus slippage.
 
@@ -233,6 +277,13 @@ class PaperBroker:
         when the mark reaches +auto_scale_r R (R = entry→initial-stop), the system
         banks auto_scale_frac of the position and moves the stop to breakeven.
         Defaults come from AUTO_SCALE_DEFAULT_*; set frac to 0 to disable.
+
+        ``adx_decay_exit`` enables the same intra-trade regime-deterioration exit
+        the backtest engine implements, e.g.
+        ``{"adx_drop_from_peak": 5.0, "negative_slope_bars": 3}``:
+        :meth:`manage_positions` force-closes the position once its ADX has
+        fallen that far from its post-entry peak, or its ADX slope has been
+        negative for that many consecutive cycles.
         """
         side = Side(side)
         qty = float(qty)
@@ -243,6 +294,7 @@ class PaperBroker:
         trail_pct = float(trail_pct) if trail_pct else None
         auto_scale_r = float(auto_scale_r) if auto_scale_r is not None else AUTO_SCALE_DEFAULT_R
         auto_scale_frac = float(auto_scale_frac) if auto_scale_frac is not None else AUTO_SCALE_DEFAULT_FRAC
+        adx_decay_exit = _clean_adx_decay(adx_decay_exit)
         if qty <= 0:
             return self._fail(symbol, side, qty, "qty must be positive")
         if symbol in self._positions:
@@ -307,12 +359,10 @@ class PaperBroker:
             self._cash += notional - commission
 
         entry_ts = _now_iso()
-        with_trend = None
-        if self._cycle_spy_direction in ("up", "down"):
-            with_trend = ("with_trend" if
-                          ((side == Side.LONG and self._cycle_spy_direction == "up")
-                           or (side == Side.SHORT and self._cycle_spy_direction == "down"))
-                          else "counter_trend")
+        # Judged on EFFECTIVE market direction, so a long in an inverse ETF
+        # (SQQQ/SOXS/…) on a down tape is correctly tagged with_trend.
+        from daytrader.live.analytics import with_trend_label
+        with_trend = with_trend_label(symbol, side, self._cycle_spy_direction)
         planned_risk = abs(fill - stop) * qty if stop is not None else None
         self._positions[symbol] = {
             "symbol": symbol,
@@ -333,6 +383,9 @@ class PaperBroker:
             "auto_scale_r": auto_scale_r,
             "auto_scale_frac": auto_scale_frac,
             "scaled": False,
+            "adx_decay_exit": adx_decay_exit,
+            "adx_peak": None,      # highest ADX seen since entry
+            "adx_neg_bars": 0,     # consecutive cycles with a negative ADX slope
             # carried for realized-pnl accounting at close:
             "commission_paid": commission,
             "slippage_paid": slip,
@@ -518,14 +571,19 @@ class PaperBroker:
         return results
 
     def manage_positions(self, quote_map: Optional[dict] = None,
-                         atr_map: Optional[dict] = None) -> list[dict]:
+                         atr_map: Optional[dict] = None,
+                         adx_map: Optional[dict] = None) -> list[dict]:
         """Server-side bracket management, run once per trade cycle.
 
         For each open position: (1) ratchet a trailing stop in the favorable
         direction (by ``trail_atr_mult`` * ATR, or ``trail_pct`` of price), then
-        (2) auto-close if the current mark has hit the stop or the target. This
-        lets winners run on a trailing stop and protects the open gain without
-        the agent having to babysit every cycle.
+        (2) auto-close if the current mark has hit the stop or the target, and
+        (3) force-close on ADX decay when the trade opted into ``adx_decay_exit``.
+        This lets winners run on a trailing stop and protects the open gain
+        without the agent having to babysit every cycle.
+
+        ``adx_map`` is {symbol: {"adx14": float, "adx_slope": float}} for this
+        cycle — only needed for positions carrying an ``adx_decay_exit``.
 
         Granularity is the trade cycle (not intrabar), so fills are at the
         current mark when a level is breached — honest about between-cycle gap
@@ -533,6 +591,7 @@ class PaperBroker:
         """
         quote_map = {str(k).upper(): v for k, v in (quote_map or {}).items() if v is not None}
         atr_map = {str(k).upper(): v for k, v in (atr_map or {}).items() if v is not None}
+        adx_map = {str(k).upper(): v for k, v in (adx_map or {}).items() if v is not None}
         events: list[dict] = []
         for sym in list(self._positions):
             pos = self._positions.get(sym)
@@ -608,7 +667,53 @@ class PaperBroker:
             if hit:
                 res = self.close(sym, reason=f"auto_{hit}")
                 events.append({"symbol": sym, "action": hit, "pnl": res.get("pnl")})
+                continue
+
+            # 3) ADX-decay exit — the regime deteriorated under the trade. Same
+            #    contract as the backtest engine's adx_decay_exit, so a config
+            #    validated in a backtest behaves identically live.
+            decay = self._check_adx_decay(sym, pos, adx_map.get(sym))
+            if decay:
+                res = self.close(sym, reason="auto_adx_decay")
+                events.append({"symbol": sym, "action": "adx_decay",
+                               "reason": decay, "pnl": res.get("pnl")})
         return events
+
+    def _check_adx_decay(self, sym: str, pos: dict, info) -> Optional[str]:
+        """Update this position's ADX peak / negative-slope streak and report why
+        an ``adx_decay_exit`` fired (or None). Tracking state is persisted so a
+        restart mid-trade doesn't reset the peak and silently disarm the exit."""
+        cfg = pos.get("adx_decay_exit")
+        if not cfg or not isinstance(info, dict):
+            return None
+        adx = info.get("adx14")
+        slope = info.get("adx_slope")
+        if adx is None:
+            return None
+        try:
+            adx = float(adx)
+        except (TypeError, ValueError):
+            return None
+
+        peak = pos.get("adx_peak")
+        peak = adx if peak is None else max(float(peak), adx)
+        pos["adx_peak"] = peak
+        try:
+            neg = (int(pos.get("adx_neg_bars") or 0) + 1) if (
+                slope is not None and float(slope) < 0) else 0
+        except (TypeError, ValueError):
+            neg = 0
+        pos["adx_neg_bars"] = neg
+        self._persist_position(pos)
+
+        drop_cfg = cfg.get("adx_drop_from_peak")
+        if drop_cfg is not None and (peak - adx) >= float(drop_cfg):
+            return (f"ADX {adx:.1f} fell {peak - adx:.1f} from post-entry peak "
+                    f"{peak:.1f} (limit {float(drop_cfg):.1f})")
+        bars_cfg = cfg.get("negative_slope_bars")
+        if bars_cfg is not None and neg >= int(bars_cfg):
+            return f"ADX slope negative {neg} consecutive cycles (limit {int(bars_cfg)})"
+        return None
 
     # ------------------------------------------------------------------ #
     # state / reporting                                                   #
@@ -644,6 +749,9 @@ class PaperBroker:
                 "scaled": bool(pos.get("scaled")),
                 "auto_scale_r": pos.get("auto_scale_r"),
                 "auto_scale_frac": pos.get("auto_scale_frac"),
+                "adx_decay_exit": pos.get("adx_decay_exit"),
+                "adx_peak": pos.get("adx_peak"),
+                "adx_neg_bars": pos.get("adx_neg_bars") or 0,
                 "rationale": pos.get("rationale", ""),
             })
         return out

@@ -103,6 +103,60 @@ def canonical_strategy(label) -> str:
     return "other"
 
 
+# INVERSE ETFs — a LONG in one of these is mechanically a SHORT on the
+# underlying index/sector, so "with trend" has to be judged on the EFFECTIVE
+# market direction the trade expresses, not the raw order side. Leveraged-but-
+# not-inverse names (TQQQ, SOXL, SPXL, UPRO, TNA) are deliberately absent: they
+# track their underlying, so they keep the +1 multiplier.
+_INVERSE_ETFS = {
+    # broad index
+    "SH", "SDS", "SPXU", "SPXS", "PSQ", "QID", "SQQQ", "DOG", "DXD", "SDOW",
+    "RWM", "TWM", "TZA", "SRTY", "MYY", "MZZ",
+    # sector / thematic
+    "SOXS", "TECS", "FAZ", "SKF", "ERY", "DRV", "SRS", "LABD", "DUG", "SSG",
+    "YANG", "FXP", "EDZ", "EUM", "DRIP", "SCO", "KOLD", "ZSL", "DUST", "JDST",
+    # long-volatility (rallies when the tape falls)
+    "UVXY", "VIXY", "VXX", "VIXM", "SVIX",
+}
+
+
+def direction_multiplier(symbol) -> int:
+    """+1 for a normal instrument, -1 for an inverse ETF (long = short the tape)."""
+    return -1 if (symbol or "").strip().upper() in _INVERSE_ETFS else 1
+
+
+def effective_direction(symbol, side) -> str | None:
+    """The market direction a trade actually expresses.
+
+    A SQQQ *long* is a bet the tape goes DOWN, so it returns "down". Returns
+    None when the side can't be read.
+    """
+    s = (getattr(side, "value", None) or str(side or "")).strip().lower()
+    if s.startswith("l") or s == "buy":
+        sign = 1
+    elif s.startswith("s") or s == "sell":
+        sign = -1
+    else:
+        return None
+    sign *= direction_multiplier(symbol)
+    return "up" if sign > 0 else "down"
+
+
+def with_trend_label(symbol, side, spy_direction) -> str | None:
+    """with_trend / counter_trend for a trade, judged on EFFECTIVE direction.
+
+    This is what makes a SQQQ long into a *with-trend* trade on a down day
+    instead of being mis-bucketed as counter-trend. Returns None when SPY's
+    direction is unknown (flat/missing), matching the previous behavior.
+    """
+    if spy_direction not in ("up", "down"):
+        return None
+    eff = effective_direction(symbol, side)
+    if eff is None:
+        return None
+    return "with_trend" if eff == spy_direction else "counter_trend"
+
+
 def with_trend_tag(label) -> str:
     """Infer whether a label describes a with-trend or counter-trend setup."""
     s = (label or "").lower()

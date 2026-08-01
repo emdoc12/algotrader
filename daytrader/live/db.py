@@ -185,9 +185,46 @@ class LiveDB:
             self._ensure_column("trades", "planned_risk", "REAL")
             self._ensure_column("trades", "risk_overrun", "INTEGER DEFAULT 0")
             self._ensure_column("staged_orders", "conditions", "TEXT")
+            self._ensure_column("open_positions", "adx_decay_exit", "TEXT")
+            self._ensure_column("open_positions", "adx_peak", "REAL")
+            self._ensure_column("open_positions", "adx_neg_bars", "INTEGER DEFAULT 0")
             self.conn.commit()
         except Exception:  # noqa: BLE001 - never block startup on a migration
             pass
+        self._retag_inverse_etf_with_trend()
+
+    def _retag_inverse_etf_with_trend(self) -> None:
+        """One-time backfill for inverse-ETF with_trend tags.
+
+        Trades in inverse ETFs (SQQQ, SOXS, SPXU, …) were tagged from the RAW
+        order side, which is exactly inverted for those tickers — a SQQQ long is
+        a with-trend trade on a down tape. Flip the stored tag once. The flag is
+        written in the SAME transaction as the update so a crash can never leave
+        the rows flipped-but-unflagged (which would double-flip on restart).
+        """
+        try:
+            if self.kv_get("inverse_wt_retag_v1"):
+                return
+            from daytrader.live.analytics import _INVERSE_ETFS
+            syms = tuple(sorted(_INVERSE_ETFS))
+            marks = ",".join("?" * len(syms))
+            flip = ("CASE with_trend WHEN 'with_trend' THEN 'counter_trend' "
+                    "ELSE 'with_trend' END")
+            for table in ("trades", "open_positions"):
+                self.conn.execute(
+                    f"UPDATE {table} SET with_trend = {flip} "
+                    f"WHERE with_trend IN ('with_trend','counter_trend') "
+                    f"AND UPPER(symbol) IN ({marks})", syms)
+            self.conn.execute(
+                "INSERT INTO runner_state (k, v) VALUES (?, ?) "
+                "ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                ("inverse_wt_retag_v1", "done"))
+            self.conn.commit()
+        except Exception:  # noqa: BLE001 - never block startup on a migration
+            try:
+                self.conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
 
     def recent_journal_by_topics(self, topics: tuple, limit: int = 15) -> list[dict]:
         """Newest journal entries whose topic is in ``topics`` — used to carry
@@ -259,6 +296,7 @@ class LiveDB:
             "symbol", "side", "qty", "entry_price", "entry_ts", "strategy",
             "stop", "target", "rationale", "horizon", "trail_atr_mult", "trail_pct",
             "with_trend", "init_stop", "planned_risk", "auto_scale_r", "auto_scale_frac", "scaled",
+            "adx_decay_exit", "adx_peak", "adx_neg_bars",
         )
         params = [pos_dict.get(c) for c in cols]
         self.conn.execute(

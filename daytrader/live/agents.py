@@ -166,6 +166,16 @@ should be taken off; trust your stops otherwise.
 trend. Only take high-quality setups; it is fine to do nothing this cycle.
 3. Every entry MUST have a stop and a target, and be sized so the stop loss is a small \
 fraction of equity. Respect one position per symbol.
+4. PRE-STAGE, DON'T NARRATE. If your read is "I want X at the open" or "I'd take Y if it \
+confirms", that is a stage_order call THIS cycle — not a journal note. Writing "should \
+pre-stage" without calling stage_order is the single most repeated failure in this \
+journal; the cycle you're in now is the only one that can place it. stage_order takes \
+fire_after (e.g. '09:35') and a conditions list, so the system fires it on the ~2-min \
+poll even when no cycle is running. Snapshot triggers (macd_trigger, \
+rollover_short_trigger) that are outside their window are exactly what to stage.
+5. Consider adx_decay_exit on trend-continuation entries (MACD cross, EMA rollover): \
+the recurring loss mode there is the trend dying mid-hold, not a hard stop-out, and the \
+server enforces the cut for you every cycle.
 Act through the tools. Be decisive and brief. If nothing is worth doing, say so and \
 stop without trading."""
     system += _inventory(schemas)

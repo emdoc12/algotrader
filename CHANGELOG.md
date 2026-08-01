@@ -9,6 +9,63 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.23.0] — 2026-07-24
+
+### Added — dev requests
+- **`rollover_short_trigger` snapshot block** (analogous to `macd_trigger`),
+  mechanizing the saved `trend_day_ema9_rollover_short` co-primary setup. Each
+  cycle it flags names meeting ALL of: EMA-down (`ema9<ema21`), ADX>=25 AND
+  rising, MACD hist re-expanding down (`hist < hist_prev < 0`), RSI>35,
+  `vs_vwap_pct` in [-1.5, 0], and SPY aligned down with rising ADX — plus an
+  `in_window` flag for 10:00–14:00 ET. Returns `count` and per-name `symbol`,
+  `adx14`, `adx_slope`, `macd_hist`, `macd_hist_prev`, `rsi14`, `vs_vwap_pct`,
+  `dist_from_ema9_atr`, sorted weakest-RS first. Also reports `spy_aligned` and
+  `near_miss_count` so a blocked cycle says *why* (the SPY gate) instead of just
+  printing zero. No more hand-checking hist vs hist_prev on every EMA-down name
+  and arriving after the 14:00 gate.
+- **`adx_decay_exit` is now a live `place_trade` parameter**, using the exact
+  contract already in `backtest_strategy` / `backtest_custom_strategy` (e.g.
+  `{"adx_drop_from_peak": 5.0, "negative_slope_bars": 3}`), so a config
+  validated in a backtest behaves identically live. The server force-closes the
+  position (`exit_reason: auto_adx_decay`) once its ADX falls that far from its
+  post-entry peak or its slope has been negative that many consecutive cycles.
+  Enforced on every trade cycle **and** on the ~2-min stop poll; the poll only
+  pays for ADX bars when a held position actually opted in. Peak / negative-bar
+  state is persisted, so a restart mid-trade can't silently disarm the exit.
+
+### Fixed — dev requests
+- **SPY VWAP null in the 09:32 snapshot.** Root cause: near the open the
+  session's only bar is the still-forming 09:30 bar, whose volume the feed has
+  not published yet — cumulative session volume is 0, so a volume-*weighted*
+  average is genuinely undefined. (The v6.22.1 zero-fill fixed a null volume
+  *mid*-session, where earlier bars still supplied weight; it could not fix a
+  session with no volume at all yet.) Added a right-edge fallback: the
+  unweighted mean of today's typical prices, which with a single bar *is* the
+  VWAP and over a few bars is a close proxy. Always flagged — `vwap_status`
+  reports `fallback_typical_mean_<n>bar` and `data_quality` carries a matching
+  entry — and it yields to the true session VWAP the moment real volume prints.
+- **`with_trend` was inverted for inverse ETFs.** A SQQQ/SOXS/SPXU *long* is
+  mechanically aligned with a *down* tape, but the tag was computed from the raw
+  order side, so the desk's most with-trend trade of the session landed in the
+  counter_trend bucket — reversing the very lesson the breakdown exists to
+  teach. `with_trend` is now computed on the trade's EFFECTIVE market direction
+  (`side_sign × inverse_multiplier`) vs SPY at entry, applied at trade-recording
+  time and inherited by `get_performance_breakdown`. Ships with an inverse-ETF
+  map (broad index, sector, and long-vol; leveraged-but-not-inverse names like
+  TQQQ/SOXL/SPXL correctly keep +1) and a **one-time historical re-tag** of
+  affected trades and open positions, flag-guarded in the same transaction so a
+  crash or restart can never double-flip it back.
+
+### Changed
+- **Trader prompt now treats pre-staging as an action, not a note.** `stage_order`
+  and the full trading toolset were verified already available to the trader role
+  (26 tools; `stage_order`, `place_trade`, `take_partial`, `move_stop_to_breakeven`,
+  `modify_stops` all present in both schemas and handlers) — so the 15-session gap
+  was behavioral, not a missing tool. The role prompt now states that "I want X at
+  the open" *is* a `stage_order` call this cycle, names the journal pattern as the
+  most-repeated failure, and points at out-of-window trigger blocks as the things
+  to stage.
+
 ## [6.22.2] — 2026-07-24
 
 ### Changed

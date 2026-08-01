@@ -48,18 +48,31 @@ def _latest_indicators(df: pd.DataFrame, live_price: float | None = None) -> dic
     _mline, _msig, _mhist = ind.macd(close)
     macd_hist = float(_mhist.iloc[-1]) if pd.notna(_mhist.iloc[-1]) else None
     macd_hist_prev = float(_mhist.iloc[-2]) if len(_mhist) >= 2 and pd.notna(_mhist.iloc[-2]) else None
+    today_mask = df.index.normalize() == df.index[-1].normalize()
+    today_df = df[today_mask]
     vwap_raw = ind.vwap_session(df).iloc[-1]
     vwap_ok = pd.notna(vwap_raw) and float(vwap_raw) > 0
     vwap = float(vwap_raw) if vwap_ok else None
-    # Distinguish the two unavailable cases so the desk knows whether to wait or
-    # skip: a session with no traded volume at all (genuine data gap) vs. VWAP
-    # simply not yet meaningful. After the zero-fill fix in vwap_session, a
-    # forming last bar no longer nulls VWAP, so this only trips on a real gap.
-    vwap_status = "ok" if vwap_ok else (
-        "no_volume" if float(df["volume"].fillna(0.0).tail(80).sum()) <= 0 else "undefined")
+    vwap_status = "ok" if vwap_ok else "undefined"
+    if not vwap_ok:
+        # Right-edge fallback. Near the open the session's only bar is the
+        # still-forming 09:30 bar, whose volume the feed has not published yet —
+        # cumulative session volume is 0, so a volume-WEIGHTED average is
+        # undefined and SPY/ETF VWAP came back null in the 09:32 snapshot. Fall
+        # back to the unweighted mean of today's typical prices: with a single
+        # bar that IS the VWAP (weighting is irrelevant with one observation),
+        # and over a handful of bars it is a close proxy. Always flagged, so the
+        # desk knows it is gating off an approximation.
+        tp = ((today_df["high"] + today_df["low"] + today_df["close"]) / 3.0).dropna()
+        if len(tp) and float(tp.mean()) > 0:
+            vwap = round(float(tp.mean()), 4)
+            vwap_ok = True
+            vwap_status = f"fallback_typical_mean_{len(tp)}bar"
+        else:
+            vwap_status = "no_intraday_bars"
     bar_close = float(close.iloc[-1])
     price = float(live_price) if live_price is not None else bar_close
-    day_open = float(df["open"][df.index.normalize() == df.index[-1].normalize()].iloc[0])
+    day_open = float(today_df["open"].iloc[0])
     # Data-quality guard: flag a stale/mismatched quote and unavailable VWAP so
     # the desk doesn't size/stop off bad marks. Tradeable mark = price (live
     # quote); indicators (EMA/ATR/RSI/VWAP) are derived from bar_close.
@@ -69,6 +82,8 @@ def _latest_indicators(df: pd.DataFrame, live_price: float | None = None) -> dic
         dq.append(f"quote_vs_bar_{dev * 100:.1f}pct")
     if not vwap_ok:
         dq.append(f"vwap_unavailable_{vwap_status}")
+    elif vwap_status != "ok":
+        dq.append(f"vwap_{vwap_status}")  # approximated — see vwap_status
     return {
         "price": round(price, 2),
         "bar_close": round(bar_close, 2),
@@ -396,6 +411,84 @@ def _macd_trigger(per_symbol: dict, spy_direction: str | None, now_t) -> dict:
     return {"in_window": bool(in_window), "count": len(hits), "note": note, "triggers": hits}
 
 
+def _rollover_short_trigger(per_symbol: dict, summary: dict, now_t) -> dict:
+    """The desk's second validated co-primary setup, mechanized: the saved
+    'trend_day_ema9_rollover_short' (backtested PF 2.15 / 60% win / +12.3 alpha,
+    in-window 10:00-14:00).
+
+    Flags names where the down-trend is RE-EXPANDING rather than merely present:
+    EMA stack down, ADX >= 25 and rising, MACD histogram making a new low below
+    zero (hist < hist_prev < 0), RSI > 35 (skip names already flushed into an
+    oversold hole), price just under VWAP (-1.5% .. 0%), and SPY itself trending
+    down with rising ADX. Mirrors ``macd_trigger`` so the desk can fire the
+    instant it prints instead of hand-checking hist vs hist_prev on every
+    EMA-down name and arriving after the 14:00 gate.
+    """
+    from datetime import time as _dtime
+    in_window = _dtime(10, 0) <= now_t <= _dtime(14, 0) if now_t is not None else True
+    spy_dir = (summary or {}).get("spy_direction")
+    spy_rising = bool((summary or {}).get("spy_adx_rising"))
+    spy_aligned = (spy_dir == "down") and spy_rising
+
+    hits, near_miss = [], 0
+    for sym, v in per_symbol.items():
+        if not v:
+            continue
+        h, hp = v.get("macd_hist"), v.get("macd_hist_prev")
+        adx, slope = v.get("adx14"), v.get("adx_slope")
+        rsi, vs_vwap = v.get("rsi14"), v.get("vs_vwap_pct")
+        price, ema9, atr = v.get("price"), v.get("ema9"), v.get("atr14")
+        if h is None or hp is None or adx is None or rsi is None or vs_vwap is None:
+            continue
+        if price is None or ema9 is None or not atr:
+            continue
+        checks = (
+            v.get("ema_trend") == "down",          # EMA9 < EMA21
+            adx >= 25 and (slope or 0) > 0,        # trending AND strengthening
+            h < hp < 0,                            # hist re-expanding DOWN
+            rsi > 35,                              # not already flushed
+            -1.5 <= vs_vwap <= 0,                  # just under VWAP
+        )
+        if not all(checks):
+            if sum(checks) == len(checks) - 1:
+                near_miss += 1
+            continue
+        # Name-level conditions all pass; SPY alignment is the shared gate.
+        if not spy_aligned:
+            near_miss += 1
+            continue
+        hits.append({
+            "symbol": sym,
+            "adx14": adx,
+            "adx_slope": slope,
+            "macd_hist": h,
+            "macd_hist_prev": hp,
+            "rsi14": rsi,
+            "vs_vwap_pct": vs_vwap,
+            "dist_from_ema9_atr": round(abs(price - ema9) / atr, 2),
+            "rs_rank": v.get("rs_rank"),
+        })
+    # Weakest relative strength first — the best short candidates.
+    hits.sort(key=lambda r: -(r.get("rs_rank") or 0))
+
+    note = ("trend_day_ema9_rollover_short candidates: EMA-down, ADX>=25 rising, "
+            "MACD hist re-expanding down (hist<hist_prev<0), RSI>35, price 0 to "
+            "-1.5% vs VWAP, SPY down with rising ADX.")
+    if not spy_aligned:
+        note += (f" BLOCKED: SPY gate not met (direction={spy_dir!r}, "
+                 f"adx_rising={spy_rising}) — no short qualifies this cycle.")
+    if not in_window:
+        note += " NOTE: outside the 10:00-14:00 edge window — watch-only."
+    return {
+        "in_window": bool(in_window),
+        "spy_aligned": bool(spy_aligned),
+        "count": len(hits),
+        "near_miss_count": near_miss,
+        "note": note,
+        "triggers": hits,
+    }
+
+
 def _ema_scan(per_symbol: dict) -> dict:
     """Pre-stage EMA-pullback structure for the 9:30-10:00 window so the desk has
     entry zones ready at the bell instead of doing manual analysis after ADX has
@@ -484,6 +577,7 @@ def market_only(symbols: list[str] | None = None, interval: str = "5m") -> dict:
         "market": per_symbol,
         "market_summary": summary,
         "macd_trigger": _macd_trigger(per_symbol, summary.get("spy_direction"), now_et_t),
+        "rollover_short_trigger": _rollover_short_trigger(per_symbol, summary, now_et_t),
         "ema_scan": _ema_scan(per_symbol),
         "fresh_signals": fresh,
         "quotes": quote_map,
