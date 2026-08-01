@@ -9,6 +9,45 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.26.0] — 2026-08-01
+
+### Added — real futures support (contract-spec layer)
+Futures are now tradeable properly rather than blocked. New
+`daytrader/core/contracts.py` holds specs for 17 liquid contracts (ES/MES,
+NQ/MNQ, RTY/M2K, YM/MYM, CL/MCL, NG, GC/MGC, SI/SIL, ZB, ZN): multiplier, tick
+size, tick value, initial/maintenance margin and per-contract commission. Every
+margin is an exchange minimum that moves in practice, so all are env-overridable
+(`ES_INITIAL_MARGIN=18000`).
+
+Threaded through both accounting paths — live broker **and** backtest engine,
+since the engine feeds the research loop which now feeds live deployment:
+
+- **Notional, P&L, MFE/MAE and slippage** are `price x qty x multiplier`. A
+  10-point MES move is $50, not $10.
+- **Margin, not cash.** A futures position pledges margin rather than spending
+  notional: cash moves only by commission, `buying_power = cash - margin_held`
+  gates new entries, and margin is released on close. `margin_held` is derived
+  from the open book, so a restart cannot desynchronize it.
+- **Equity contribution is unrealized P&L**, not market value — adding notional
+  would double-count the whole contract value into equity.
+- **Risk rails now see true dollars.** The 2% per-trade cap and the 2x gross
+  exposure limit both apply the multiplier. One full-size ES on a $25k account
+  ($376k notional, 15x equity) is now correctly refused; it previously passed
+  because the guard saw $7.5k.
+- **Commission is per contract** (~$1.25/side) instead of per share.
+- Equities and ETFs are untouched: multiplier 1.0 is the existing share model,
+  verified by regression (cash, unrealized P&L and the causality suite unchanged).
+
+Desk-facing: new `get_contract_specs` tool (multiplier, tick value, margin, and
+how many contracts current equity can margin), micro futures added to the scanned
+universe so desks can see indicators on what they may trade (`FUTURES_SYMBOLS`,
+default `MES=F,MNQ=F`, set empty to disable), and Trader-prompt guidance that
+futures size in contracts with risk `(entry-stop) x contracts x multiplier`.
+
+Unlisted futures are still refused — an unknown multiplier is the same
+silent-wrong-numbers trap wearing a different ticker. Indices, FX pairs and
+crypto remain blocked for their own reasons.
+
 ## [6.25.0] — 2026-08-01
 
 ### Added — research reaches the book

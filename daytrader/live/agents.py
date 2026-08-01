@@ -172,7 +172,11 @@ should be taken off; trust your stops otherwise.
 2. Then consider NEW entries from the fresh signals that fit the plan and the SPY \
 trend. Only take high-quality setups; it is fine to do nothing this cycle.
 3. Every entry MUST have a stop and a target, and be sized so the stop loss is a small \
-fraction of equity. Respect one position per symbol.
+fraction of equity. Respect one position per symbol. FUTURES (symbols ending '=F') are \
+sized in CONTRACTS and risk is (entry-stop) x contracts x multiplier — a 10-point stop \
+on MES risks $50, the same stop on full-size ES risks $500. Call get_contract_specs \
+BEFORE sizing one. Margin is pledged rather than spent, so watch buying_power, not cash; \
+only the micros (MES/MNQ/MGC/M2K/MYM/MCL) size sensibly against this account.
 4. PRE-STAGE, DON'T NARRATE. If your read is "I want X at the open" or "I'd take Y if it \
 confirms", that is a stage_order call THIS cycle — not a journal note. Writing "should \
 pre-stage" without calling stage_order is the single most repeated failure in this \

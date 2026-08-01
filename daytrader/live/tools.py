@@ -27,24 +27,25 @@ def _team_from_db(db) -> str:
 def unsupported_instrument(symbol) -> str | None:
     """Why this symbol cannot be traded here, or None if it's fine.
 
-    The broker prices every position as ``price * qty`` — a share model. For
-    instruments where that identity is false the system would NOT error: quotes
-    and bars flow fine from the feed, orders fill, and every resulting dollar
-    figure is silently wrong. Futures are the sharp case: one ES contract is
-    $50 x index (~$376k), not ~$7.5k, so a single contract is ~15x a $25k
-    account while the exposure guard sees 0.3x and waves it through, and P&L is
-    understated 50x. Blocking is the honest behavior until a contract-spec
-    layer (multiplier, tick value, margin) exists.
+    Outside the futures table the broker prices a position as ``price * qty`` —
+    the share model. Where that identity is false the system would NOT error:
+    quotes and bars flow fine, orders fill, and every resulting dollar figure is
+    silently wrong. Futures used to be exactly that trap; they now carry real
+    contract specs (``core.contracts``), so a listed contract is tradeable and
+    an UNLISTED one is refused — an unknown multiplier is the same silent-wrong
+    -numbers problem wearing a different ticker.
     """
     s = str(symbol or "").strip().upper()
     if not s:
         return "symbol is required"
     if s.endswith("=F"):
-        return (f"{s} is a FUTURES contract. Futures are not tradeable here: the broker "
-                "has no contract multiplier or margin model, so notional, P&L, and every "
-                "risk limit would be wrong by the multiplier (50x for ES, 20x for NQ, "
-                "1000x for CL). Trade the ETF proxy instead — SPY for /ES, QQQ for /NQ, "
-                "USO for /CL, GLD for /GC.")
+        from daytrader.core.contracts import spec_for, supported_symbols
+        if spec_for(s) is None:
+            return (f"{s} is a futures contract with no spec in the contract table, so its "
+                    "multiplier, tick value and margin are unknown — trading it would put "
+                    "wrong numbers in the book. Supported: "
+                    f"{', '.join(supported_symbols())}.")
+        return None
     if s.endswith("=X"):
         return (f"{s} is an FX pair — quote-only here, with no lot/pip model. "
                 "Use a currency ETF (UUP, FXE, FXY) if you want the exposure.")
@@ -532,6 +533,33 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
              "validation": r["evidence"], "side": r["config"].get("side")}
             for r in rows]}
 
+    def get_contract_specs(inp: dict) -> dict:
+        """Futures contract specs — size positions in DOLLARS, not points."""
+        from daytrader.core.contracts import describe, supported_symbols
+        syms = (inp or {}).get("symbols") or supported_symbols()
+        if isinstance(syms, str):
+            syms = [syms]
+        out = [d for d in (describe(s) for s in syms) if d]
+        eq = 0.0
+        try:
+            eq = float(broker.equity())
+        except Exception:  # noqa: BLE001
+            pass
+        for d in out:
+            # What one contract actually costs you at the current risk cap.
+            d["notional_note"] = (
+                f"1 contract = price x {d['multiplier']:g} dollars of exposure; "
+                f"each tick is ${d['tick_value']:g}")
+            if eq > 0:
+                d["max_contracts_by_margin"] = int(eq // d["initial_margin"]) if d["initial_margin"] else 0
+        return {"ok": True, "equity": round(eq, 2), "contracts": out,
+                "note": ("Position size is in CONTRACTS. Risk = (entry - stop) x contracts x "
+                         "multiplier, so a 10-point stop on MES risks $50, not $10. Margin is "
+                         "pledged (reducing buying_power) but not spent, and a futures "
+                         "position contributes only its unrealized P&L to equity. "
+                         "Micros (MES/MNQ/MGC/M2K/MYM/MCL) are the only contracts that size "
+                         "sensibly against a $25k account.")}
+
     def list_custom_strategies(_inp: dict) -> dict:
         import json as _json
         rows = db.list_custom_strategies()
@@ -614,6 +642,7 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
         "backtest_strategy": backtest_strategy,
         "backtest_custom_strategy": backtest_custom_strategy,
         "save_custom_strategy": save_custom_strategy,
+        "get_contract_specs": get_contract_specs,
         "propose_hypothesis": propose_hypothesis,
         "research_log": research_log,
         "deploy_strategy": deploy_strategy,
@@ -917,6 +946,20 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
             "input_schema": {
                 "type": "object",
                 "properties": {"limit": {"type": "integer", "description": "How many recent entries (default 25)."}},
+            },
+        },
+        {
+            "name": "get_contract_specs",
+            "description": (
+                "Futures contract specs: multiplier, tick size, tick value, initial/maintenance "
+                "margin, and how many contracts your equity can margin. READ THIS BEFORE SIZING "
+                "ANY FUTURES TRADE — position size is in contracts and risk is "
+                "(entry-stop) x contracts x multiplier, so a 10-point stop on MES risks $50 "
+                "while the same stop on full-size ES risks $500."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {"symbols": {"type": "array", "items": {"type": "string"}, "description": "Specific contracts; omit for all supported."}},
             },
         },
         {

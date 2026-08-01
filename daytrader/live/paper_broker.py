@@ -147,7 +147,10 @@ class PaperBroker:
             # open positions we just loaded (long cost reduces cash, short
             # proceeds add cash) -- mirroring engine cash accounting.
             self._cash = self.starting_equity
-            for pos in self._positions.values():
+            for sym, pos in self._positions.items():
+                mult = self._mult(sym)
+                if mult != 1.0:
+                    continue          # futures: margin pledged, cash untouched
                 notional = pos["entry_price"] * pos["qty"]
                 if pos["side"] == Side.LONG:
                     self._cash -= notional
@@ -201,10 +204,33 @@ class PaperBroker:
         # exiting a long is a sell (worse = lower); exiting a short is a buy.
         return price * (1 - adj) if side == Side.LONG else price * (1 + adj)
 
-    def _commission(self, qty: float) -> float:
-        return max(
-            self.cost.commission_min, qty * self.cost.commission_per_share
-        )
+    def _commission(self, qty: float, symbol: str | None = None) -> float:
+        """Per-side commission. Futures bill per CONTRACT, equities per share."""
+        if symbol is not None:
+            from daytrader.core.contracts import commission as _fut_comm
+            c = _fut_comm(symbol, qty)
+            if c is not None:
+                return c
+        return max(self.cost.commission_min, qty * self.cost.commission_per_share)
+
+    @staticmethod
+    def _mult(symbol) -> float:
+        """Dollars per 1.00 of price — 1.0 for equities (the share model)."""
+        from daytrader.core.contracts import multiplier
+        return multiplier(symbol)
+
+    def margin_held(self) -> float:
+        """Buying power tied up by open futures positions.
+
+        Derived from the live position book rather than tracked incrementally,
+        so a restart cannot desynchronize it.
+        """
+        from daytrader.core.contracts import initial_margin
+        return sum(initial_margin(s, p["qty"]) for s, p in self._positions.items())
+
+    def buying_power(self) -> float:
+        """Cash not already pledged as futures margin."""
+        return self._cash - self.margin_held()
 
     # ------------------------------------------------------------------ #
     # orders                                                              #
@@ -312,9 +338,10 @@ class PaperBroker:
             return self._fail(symbol, side, qty, f"price unavailable: {e}")
 
         fill = self._entry_fill(side, raw)
-        notional = fill * qty
-        commission = self._commission(qty)
-        slip = abs(fill - raw) * qty
+        mult = self._mult(symbol)
+        notional = fill * qty * mult
+        commission = self._commission(qty, symbol)
+        slip = abs(fill - raw) * qty * mult
 
         # ---- risk rails (reject oversized / unsafe orders) ------------------
         if REQUIRE_STOP and stop is None:
@@ -336,7 +363,7 @@ class PaperBroker:
                                   f"short target {target:.2f} must be BELOW entry {fill:.2f}")
         eq = self.equity()
         if stop is not None and eq > 0:
-            risk_amt = abs(fill - stop) * qty
+            risk_amt = abs(fill - stop) * qty * mult
             cap = MAX_TRADE_RISK_PCT / 100.0 * eq
             if risk_amt > cap:
                 return self._fail(
@@ -344,7 +371,7 @@ class PaperBroker:
                     f"trade risk ${risk_amt:,.0f} exceeds the {MAX_TRADE_RISK_PCT:.1f}% cap "
                     f"(${cap:,.0f}); reduce qty or tighten the stop")
         if eq > 0:
-            gross = sum(abs(p["qty"]) * self._mark(s, p["entry_price"])
+            gross = sum(abs(p["qty"]) * self._mark(s, p["entry_price"]) * self._mult(s)
                         for s, p in self._positions.items())
             if (gross + notional) > MAX_GROSS_EXPOSURE * eq:
                 return self._fail(
@@ -352,14 +379,29 @@ class PaperBroker:
                     f"gross exposure ${gross + notional:,.0f} would exceed "
                     f"{MAX_GROSS_EXPOSURE:.1f}x equity (${MAX_GROSS_EXPOSURE * eq:,.0f}); reduce size")
 
-        if side == Side.LONG and (notional + commission) > self._cash:
-            return self._fail(
-                symbol, side, qty,
-                f"insufficient cash: need {notional + commission:.2f}, have {self._cash:.2f}",
-            )
-
-        # cash accounting: long buys reduce cash; short sells add proceeds.
-        if side == Side.LONG:
+        # ---- funding: margin for futures, cash for equities -----------------
+        from daytrader.core.contracts import initial_margin, spec_for
+        spec = spec_for(symbol)
+        margin_req = initial_margin(symbol, qty)
+        if spec is not None:
+            # A futures position is not bought — margin is PLEDGED against it.
+            # Cash moves only by commission; the notional never leaves the
+            # account, which is exactly why the share model got this so wrong.
+            avail = self.buying_power()
+            if (margin_req + commission) > avail:
+                return self._fail(
+                    symbol, side, qty,
+                    f"insufficient buying power for {qty:g} {spec.name}: needs "
+                    f"${margin_req + commission:,.0f} margin, ${avail:,.0f} available "
+                    f"(${self._cash:,.0f} cash less ${self.margin_held():,.0f} already "
+                    f"pledged). Notional would be ${notional:,.0f}.")
+            self._cash -= commission
+        elif side == Side.LONG:
+            if (notional + commission) > self._cash:
+                return self._fail(
+                    symbol, side, qty,
+                    f"insufficient cash: need {notional + commission:.2f}, have {self._cash:.2f}",
+                )
             self._cash -= notional + commission
         else:
             self._cash += notional - commission
@@ -423,17 +465,20 @@ class PaperBroker:
         side = pos["side"]
         qty = pos["qty"]
         exit_px = self._exit_fill(side, raw)
-        commission = self._commission(qty)
-        slip = abs(exit_px - raw) * qty
+        mult = self._mult(symbol)
+        commission = self._commission(qty, symbol)
+        slip = abs(exit_px - raw) * qty * mult
+        direction = 1.0 if side == Side.LONG else -1.0
+        gross = direction * (exit_px - pos["entry_price"]) * qty * mult
 
-        # cash accounting: selling a long adds proceeds; covering a short pays.
-        if side == Side.LONG:
+        if mult != 1.0:
+            # Futures settle in cash: the margin is released (it was pledged,
+            # never spent) and only the realized P&L moves the balance.
+            self._cash += gross - commission
+        elif side == Side.LONG:
             self._cash += exit_px * qty - commission
         else:
             self._cash -= exit_px * qty + commission
-
-        direction = 1.0 if side == Side.LONG else -1.0
-        gross = direction * (exit_px - pos["entry_price"]) * qty
         total_commission = pos.get("commission_paid", 0.0) + commission
         total_slip = pos.get("slippage_paid", 0.0) + slip
         pnl = gross - total_commission
@@ -500,14 +545,17 @@ class PaperBroker:
         qty_total = pos["qty"]
         qty_close = qty_total * fraction
         exit_px = self._exit_fill(side, raw)
-        commission = self._commission(qty_close)
-        slip = abs(exit_px - raw) * qty_close
-        if side == Side.LONG:
+        mult = self._mult(symbol)
+        commission = self._commission(qty_close, symbol)
+        slip = abs(exit_px - raw) * qty_close * mult
+        direction = 1.0 if side == Side.LONG else -1.0
+        gross = direction * (exit_px - pos["entry_price"]) * qty_close * mult
+        if mult != 1.0:
+            self._cash += gross - commission      # futures: cash-settled
+        elif side == Side.LONG:
             self._cash += exit_px * qty_close - commission
         else:
             self._cash -= exit_px * qty_close + commission
-        direction = 1.0 if side == Side.LONG else -1.0
-        gross = direction * (exit_px - pos["entry_price"]) * qty_close
         # Prorate the entry commission/slippage carried on the position.
         share = qty_close / qty_total
         entry_comm = pos.get("commission_paid", 0.0) * share
@@ -736,7 +784,7 @@ class PaperBroker:
         for sym, pos in self._positions.items():
             mark = self._mark(sym, pos["entry_price"])
             direction = 1.0 if pos["side"] == Side.LONG else -1.0
-            unrealized = direction * (mark - pos["entry_price"]) * pos["qty"]
+            unrealized = direction * (mark - pos["entry_price"]) * pos["qty"] * self._mult(sym)
             out.append({
                 "symbol": sym,
                 "side": pos["side"].value,
@@ -770,9 +818,15 @@ class PaperBroker:
         eq = self._cash
         for sym, pos in self._positions.items():
             mark = self._mark(sym, pos["entry_price"])
-            # _position_value expects an object with .side/.qty; emulate via a
-            # tiny shim mirroring engine accounting for long/short.
-            if pos["side"] == Side.LONG:
+            mult = self._mult(sym)
+            if mult != 1.0:
+                # Futures: cash was never debited by the notional (margin is
+                # pledged, not spent), so the position contributes its
+                # unrealized P&L. Adding market value here would double-count
+                # the whole contract value into equity.
+                direction = 1.0 if pos["side"] == Side.LONG else -1.0
+                eq += direction * (mark - pos["entry_price"]) * pos["qty"] * mult
+            elif pos["side"] == Side.LONG:
                 eq += pos["qty"] * mark
             else:
                 eq += -pos["qty"] * mark
@@ -790,13 +844,22 @@ class PaperBroker:
     def snapshot(self) -> dict:
         eq = self.equity()
         dd = self.drawdown_pct()
-        return {
+        held = self.margin_held()
+        out = {
             "cash": self._cash,
             "equity": eq,
             "drawdown_pct": dd,
             "positions": self.positions(),
             "peak_equity": self.peak_equity,
         }
+        if held > 0:
+            out["margin_held"] = round(held, 2)
+            out["buying_power"] = round(self._cash - held, 2)
+            out["margin_note"] = (
+                "Futures margin is PLEDGED, not spent: cash still shows the full balance "
+                "but only buying_power can fund new positions. A futures position's "
+                "equity contribution is its unrealized P&L, not its notional.")
+        return out
 
     def performance(self) -> dict:
         """Aggregate stats from recorded round-trip trades."""

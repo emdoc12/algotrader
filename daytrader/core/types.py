@@ -86,6 +86,10 @@ class Trade:
     exit_reason: str = ""
     mae: float = 0.0   # max adverse excursion ($), most negative open P&L
     mfe: float = 0.0   # max favorable excursion ($), most positive open P&L
+    # Dollars per 1.00 of price. 1.0 is the share model (equities/ETFs); a
+    # futures contract sets its contract multiplier (50.0 for ES, 1000.0 for CL)
+    # so P&L is measured in dollars rather than index points.
+    multiplier: float = 1.0
 
     @property
     def is_open(self) -> bool:
@@ -96,7 +100,7 @@ class Trade:
         if self.exit_price is None:
             return 0.0
         direction = 1.0 if self.side == Side.LONG else -1.0
-        return direction * (self.exit_price - self.entry_price) * self.qty
+        return direction * (self.exit_price - self.entry_price) * self.qty * self.multiplier
 
     @property
     def net_pnl(self) -> float:
@@ -133,7 +137,8 @@ class Position:
     slippage_paid: float = 0.0
     mae: float = 0.0
     mfe: float = 0.0
+    multiplier: float = 1.0   # see Trade.multiplier
 
     def unrealized(self, price: float) -> float:
         direction = 1.0 if self.side == Side.LONG else -1.0
-        return direction * (price - self.entry_price) * self.qty
+        return direction * (price - self.entry_price) * self.qty * self.multiplier

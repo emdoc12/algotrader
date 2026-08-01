@@ -24,6 +24,8 @@ from typing import Callable, Optional
 import numpy as np
 import pandas as pd
 
+from daytrader.core.contracts import initial_margin as _init_margin
+from daytrader.core.contracts import multiplier as _multiplier
 from daytrader.core.types import Fill, Position, Side, Signal, SignalType, Trade
 
 
@@ -145,7 +147,12 @@ class BacktestEngine:
         # exiting a long is a sell (price down), exiting a short is a buy (price up)
         return price * (1 - adj) if side == Side.LONG else price * (1 + adj)
 
-    def _commission(self, qty: float) -> float:
+    def _commission(self, qty: float, symbol: str | None = None) -> float:
+        if symbol is not None:
+            from daytrader.core.contracts import commission as _fut_comm
+            c = _fut_comm(symbol, qty)
+            if c is not None:
+                return c
         return max(self.cfg.cost.commission_min, qty * self.cfg.cost.commission_per_share)
 
     # ---- portfolio bookkeeping ---------------------------------------
@@ -313,26 +320,41 @@ class BacktestEngine:
             return
 
         fill_px = self._apply_entry_cost(sig.side, open_px)
-        notional = fill_px * qty
-        # cap leverage: don't spend more than available buying power (long only uses cash)
-        if sig.side == Side.LONG and notional > self.cash:
-            qty = float(np.floor(self.cash / fill_px))
-            if qty <= 0:
-                return
-            notional = fill_px * qty
-        commission = self._commission(qty)
-        slip = abs(fill_px - open_px) * qty
-
-        # cash accounting: long buys reduce cash; short sells add cash (proceeds)
-        if sig.side == Side.LONG:
-            self.cash -= notional + commission
+        mult = _multiplier(sig.symbol)
+        notional = fill_px * qty * mult
+        if mult != 1.0:
+            # Futures: sized by MARGIN, not cash outlay. Trim to what the
+            # account can actually pledge, then leave cash alone (margin is
+            # held against the position, not spent on it).
+            per = _init_margin(sig.symbol, 1)
+            if per > 0 and _init_margin(sig.symbol, qty) > self.cash:
+                qty = float(np.floor(self.cash / per))
+                if qty <= 0:
+                    return
+                notional = fill_px * qty * mult
+            commission = self._commission(qty, sig.symbol)
+            slip = abs(fill_px - open_px) * qty * mult
+            self.cash -= commission
         else:
-            self.cash += notional - commission
+            # cap leverage: don't spend more than available buying power (long only uses cash)
+            if sig.side == Side.LONG and notional > self.cash:
+                qty = float(np.floor(self.cash / fill_px))
+                if qty <= 0:
+                    return
+                notional = fill_px * qty
+            commission = self._commission(qty, sig.symbol)
+            slip = abs(fill_px - open_px) * qty
+            # cash accounting: long buys reduce cash; short sells add cash (proceeds)
+            if sig.side == Side.LONG:
+                self.cash -= notional + commission
+            else:
+                self.cash += notional - commission
 
         self.positions[sig.symbol] = Position(
             symbol=sig.symbol, side=sig.side, qty=qty, entry_price=fill_px,
             entry_ts=ts, strategy=sig.strategy, stop=sig.stop, target=sig.target,
             init_stop=sig.stop, commission_paid=commission, slippage_paid=slip,
+            multiplier=_multiplier(sig.symbol),
         )
         self.fills.append(Fill(ts, sig.symbol, sig.side, qty, fill_px, commission, slip,
                                sig.strategy, sig.reason))
@@ -342,12 +364,13 @@ class BacktestEngine:
         if pos is None:
             return
         # update MAE/MFE on open P&L using the bar extremes
+        _m = pos.multiplier
         if pos.side == Side.LONG:
-            pos.mfe = max(pos.mfe, (h - pos.entry_price) * pos.qty)
-            pos.mae = min(pos.mae, (l - pos.entry_price) * pos.qty)
+            pos.mfe = max(pos.mfe, (h - pos.entry_price) * pos.qty * _m)
+            pos.mae = min(pos.mae, (l - pos.entry_price) * pos.qty * _m)
         else:
-            pos.mfe = max(pos.mfe, (pos.entry_price - l) * pos.qty)
-            pos.mae = min(pos.mae, (pos.entry_price - h) * pos.qty)
+            pos.mfe = max(pos.mfe, (pos.entry_price - l) * pos.qty * _m)
+            pos.mae = min(pos.mae, (pos.entry_price - h) * pos.qty * _m)
 
         # Dynamic stop adjustments BEFORE testing for a stop hit this bar.
         self._adjust_stop(pos, h, l, c, atr_now)
@@ -410,10 +433,15 @@ class BacktestEngine:
             return
         # Market exits (stops/EOD) pay slippage; limit targets fill at the limit.
         exit_px = self._apply_exit_cost(pos.side, raw_price) if market else raw_price
-        commission = self._commission(pos.qty)
-        slip = abs(exit_px - raw_price) * pos.qty
+        commission = self._commission(pos.qty, sym)
+        slip = abs(exit_px - raw_price) * pos.qty * pos.multiplier
 
-        if pos.side == Side.LONG:
+        if pos.multiplier != 1.0:
+            # Futures settle in cash: margin was pledged, never spent, so only
+            # the realized P&L moves the balance.
+            direction = 1.0 if pos.side == Side.LONG else -1.0
+            self.cash += direction * (exit_px - pos.entry_price) * pos.qty * pos.multiplier - commission
+        elif pos.side == Side.LONG:
             self.cash += exit_px * pos.qty - commission
         else:
             self.cash -= exit_px * pos.qty + commission  # buy to cover
@@ -425,6 +453,7 @@ class BacktestEngine:
             commission=pos.commission_paid + commission,
             slippage_cost=pos.slippage_paid + slip,
             exit_reason=reason, mae=pos.mae, mfe=pos.mfe,
+            multiplier=pos.multiplier,
         )
         self.trades.append(trade)
         self.fills.append(Fill(ts, sym, pos.side, pos.qty, exit_px, commission, slip,
@@ -444,6 +473,10 @@ def _position_value(pos: Position, mark: float) -> float:
     of buying the shares back is -qty*mark. Net effect on equity is therefore
     qty*(entry - mark), exactly the short's unrealized P&L.
     """
+    if pos.multiplier != 1.0:
+        # Futures: cash never paid the notional (margin is pledged), so the
+        # position's contribution to equity is its unrealized P&L.
+        return pos.unrealized(mark)
     if pos.side == Side.LONG:
         return pos.qty * mark
     return -pos.qty * mark

@@ -538,9 +538,19 @@ def _default_symbols(top_n: int | None = None) -> list[str]:
             top_n = 18
     try:
         from daytrader.data.universe import watchlist
-        return watchlist(top_n=top_n)
+        syms = watchlist(top_n=top_n)
     except Exception:  # noqa: BLE001 - universe module optional / scan hiccup
-        return loader.DEFAULT_UNIVERSE
+        syms = list(loader.DEFAULT_UNIVERSE)
+    # Micro futures, so the desks can actually SEE the contracts they're allowed
+    # to trade (indicators, VWAP, regime) instead of trading them blind. Off the
+    # scanner's radar by construction — it ranks equities. Set FUTURES_SYMBOLS=""
+    # to disable, or to a comma-list to choose your own.
+    raw = os.environ.get("FUTURES_SYMBOLS", "MES=F,MNQ=F")
+    fut = [s.strip().upper() for s in raw.split(",") if s.strip()]
+    if fut:
+        from daytrader.core.contracts import spec_for
+        syms = syms + [s for s in fut if s not in syms and spec_for(s) is not None]
+    return syms
 
 
 def market_only(symbols: list[str] | None = None, interval: str = "5m") -> dict:
