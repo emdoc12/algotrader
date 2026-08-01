@@ -297,6 +297,12 @@ class PaperBroker:
         adx_decay_exit = _clean_adx_decay(adx_decay_exit)
         if qty <= 0:
             return self._fail(symbol, side, qty, "qty must be positive")
+        # Defense in depth: staged orders and deployed strategies reach open()
+        # without passing through the tool layer's check.
+        from daytrader.live.tools import unsupported_instrument
+        bad = unsupported_instrument(symbol)
+        if bad:
+            return self._fail(symbol, side, qty, bad)
         if symbol in self._positions:
             return self._fail(symbol, side, qty, "position already open")
 

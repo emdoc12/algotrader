@@ -24,6 +24,40 @@ def _team_from_db(db) -> str:
     return "unknown"
 
 
+def unsupported_instrument(symbol) -> str | None:
+    """Why this symbol cannot be traded here, or None if it's fine.
+
+    The broker prices every position as ``price * qty`` — a share model. For
+    instruments where that identity is false the system would NOT error: quotes
+    and bars flow fine from the feed, orders fill, and every resulting dollar
+    figure is silently wrong. Futures are the sharp case: one ES contract is
+    $50 x index (~$376k), not ~$7.5k, so a single contract is ~15x a $25k
+    account while the exposure guard sees 0.3x and waves it through, and P&L is
+    understated 50x. Blocking is the honest behavior until a contract-spec
+    layer (multiplier, tick value, margin) exists.
+    """
+    s = str(symbol or "").strip().upper()
+    if not s:
+        return "symbol is required"
+    if s.endswith("=F"):
+        return (f"{s} is a FUTURES contract. Futures are not tradeable here: the broker "
+                "has no contract multiplier or margin model, so notional, P&L, and every "
+                "risk limit would be wrong by the multiplier (50x for ES, 20x for NQ, "
+                "1000x for CL). Trade the ETF proxy instead — SPY for /ES, QQQ for /NQ, "
+                "USO for /CL, GLD for /GC.")
+    if s.endswith("=X"):
+        return (f"{s} is an FX pair — quote-only here, with no lot/pip model. "
+                "Use a currency ETF (UUP, FXE, FXY) if you want the exposure.")
+    if s.startswith("^"):
+        return (f"{s} is an INDEX, not a tradeable instrument. Use its ETF: "
+                "^GSPC -> SPY, ^NDX -> QQQ, ^RUT -> IWM, ^VIX -> VXX/UVXY.")
+    if "-USD" in s or "-USDT" in s:
+        return (f"{s} is a crypto pair. It trades 24/7, so the EOD flatten and the "
+                "session-based risk model do not apply. Use a listed proxy "
+                "(IBIT, BITO, COIN, MSTR).")
+    return None
+
+
 def build_tools(broker, db) -> tuple[list[dict], dict]:
     """Return (tool_schemas, handlers) bound to a broker + db."""
 
@@ -45,6 +79,9 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
             return {"ok": False, "error": "qty must be a number"}
         if qty <= 0:
             return {"ok": False, "error": "qty must be positive"}
+        bad = unsupported_instrument(inp.get("symbol"))
+        if bad:
+            return {"ok": False, "error": bad}
         res = broker.open(
             symbol=inp["symbol"].upper(), side=side, qty=qty,
             stop=inp.get("stop"), target=inp.get("target"),
@@ -102,6 +139,9 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
             assert qty > 0
         except (KeyError, TypeError, ValueError, AssertionError):
             return {"ok": False, "error": "qty must be a positive number"}
+        bad = unsupported_instrument(inp.get("symbol"))
+        if bad:
+            return {"ok": False, "error": bad}
         # Optional general feature conditions (same grammar as backtest_custom_strategy),
         # validated now and re-checked at fire time.
         conditions = inp.get("conditions")
@@ -453,6 +493,45 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
             if rdb is not None:
                 rdb.close()
 
+    def deploy_strategy(inp: dict) -> dict:
+        """Promote one of YOUR accepted hypotheses to live signal generation."""
+        from daytrader.research.deploy import deploy
+        hid = (inp or {}).get("hypothesis_id")
+        if hid is None:
+            return {"ok": False, "error": "hypothesis_id is required"}
+        try:
+            res = deploy(db, int(hid), team_name)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "hypothesis_id must be an integer"}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": repr(e)}
+        if res.get("ok"):
+            db.log_agent("research", "deploy_strategy", f"#{hid} {res.get('name')}")
+        return res
+
+    def undeploy_strategy(inp: dict) -> dict:
+        """Stop a deployed strategy from generating live signals."""
+        from daytrader.research.deploy import undeploy
+        hid = (inp or {}).get("hypothesis_id")
+        if hid is None:
+            return {"ok": False, "error": "hypothesis_id is required"}
+        try:
+            res = undeploy(db, int(hid))
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": repr(e)}
+        if res.get("ok"):
+            db.log_agent("research", "undeploy_strategy", f"#{hid}")
+        return res
+
+    def list_deployed_strategies(_inp: dict) -> dict:
+        from daytrader.research.deploy import active
+        rows = active(db)
+        return {"ok": True, "count": len(rows), "deployed": [
+            {"hypothesis_id": r["hypothesis_id"], "name": r["name"],
+             "universe": r["universe"], "deployed_ts": r["deployed_ts"],
+             "validation": r["evidence"], "side": r["config"].get("side")}
+            for r in rows]}
+
     def list_custom_strategies(_inp: dict) -> dict:
         import json as _json
         rows = db.list_custom_strategies()
@@ -537,6 +616,9 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
         "save_custom_strategy": save_custom_strategy,
         "propose_hypothesis": propose_hypothesis,
         "research_log": research_log,
+        "deploy_strategy": deploy_strategy,
+        "undeploy_strategy": undeploy_strategy,
+        "list_deployed_strategies": list_deployed_strategies,
         "list_custom_strategies": list_custom_strategies,
         "journal_write": journal_write,
         "request_dev_help": request_dev_help,
@@ -836,6 +918,36 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                 "type": "object",
                 "properties": {"limit": {"type": "integer", "description": "How many recent entries (default 25)."}},
             },
+        },
+        {
+            "name": "deploy_strategy",
+            "description": (
+                "Put one of YOUR accepted hypotheses into live service. From then on its "
+                "signals appear in every snapshot under 'deployed_signals', already specified "
+                "with symbol, side, stop and target, evaluated by the same code that validated "
+                "it. This is how research becomes trades. Only an ACCEPTED hypothesis of your "
+                "own desk can be deployed — rejected and pending ideas cannot, and neither can "
+                "another desk's."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {"hypothesis_id": {"type": "integer", "description": "id from research_log (must be status 'accepted' and yours)."}},
+                "required": ["hypothesis_id"],
+            },
+        },
+        {
+            "name": "undeploy_strategy",
+            "description": "Retire a deployed strategy so it stops generating live signals. Use when its live behavior clearly diverges from its validated record — say why in the journal.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"hypothesis_id": {"type": "integer"}},
+                "required": ["hypothesis_id"],
+            },
+        },
+        {
+            "name": "list_deployed_strategies",
+            "description": "Your currently-deployed strategies with their out-of-sample validation records.",
+            "input_schema": {"type": "object", "properties": {}},
         },
         {
             "name": "list_custom_strategies",

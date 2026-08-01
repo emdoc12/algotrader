@@ -609,6 +609,28 @@ def with_account(market_snap: dict, broker) -> dict:
     except Exception as e:  # noqa: BLE001
         out["account_error"] = str(e)
 
+    # Signals from THIS desk's deployed (out-of-sample-validated) strategies.
+    # Per-team, so it belongs here rather than in the shared market snapshot.
+    try:
+        from daytrader.research.deploy import live_signals
+        interval = market_snap.get("interval", "5m")
+        syms = list(market_snap.get("universe") or [])
+        data = loader.load_many(syms, interval=interval, max_age_hours=0.1) if syms else {}
+        sigs = live_signals(broker.db, data)
+        if sigs:
+            out["deployed_signals"] = {
+                "count": len(sigs),
+                "signals": sigs,
+                "note": ("Fired by YOUR deployed strategies — rules that already cleared "
+                         "hard out-of-sample validation and the corrected significance "
+                         "bar. Each carries its validation record. Execute them unless "
+                         "you have a concrete, stateable reason not to; overriding a "
+                         "validated rule on a hunch is the discretionary call the "
+                         "research loop exists to remove."),
+            }
+    except Exception:  # noqa: BLE001 - deployment must never break a trade cycle
+        pass
+
     # Held positions outside the day's scan need live indicators too, or the
     # trader is flying blind on what it already owns.
     try:

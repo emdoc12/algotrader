@@ -156,7 +156,14 @@ def _trader(broker, db, provider=None) -> Agent:
 
 YOUR ROLE: Trader. This is an intraday decision cycle. Using the live snapshot, the \
 day's plan in the journal, the fresh signals, your current positions, and performance:
-0. FIRST check 'recent_exits' and 'session_realized_pnl' in the snapshot — the system \
+0a. If 'deployed_signals' is present, take those FIRST. They come from your desk's own \
+rules that already survived hard out-of-sample testing and a significance bar corrected \
+across every hypothesis all seven desks have tested — they are the highest-evidence \
+signals you will ever get, and each arrives with its stop and target already set. Trade \
+them at proper size unless you can state a concrete reason not to (risk cap, existing \
+position in the name, data-quality flag). "I don't like the look of it" is not a reason; \
+that hunch is precisely what the validation replaced.
+0. Also check 'recent_exits' and 'session_realized_pnl' in the snapshot — the system \
 may have auto-closed a position on its stop or target since your last cycle. Do NOT \
 assume a now-flat book means a winner was banked; a position may have been STOPPED OUT \
 for a loss. Update your read of the day's real P&L from these fields before deciding.
@@ -188,6 +195,7 @@ def _reviewer(broker, db, provider=None) -> Agent:
                "get_recent_trades", "backtest_strategy", "backtest_custom_strategy",
                "save_custom_strategy", "list_custom_strategies",
                "propose_hypothesis", "research_log",
+               "deploy_strategy", "undeploy_strategy", "list_deployed_strategies",
                "journal_write", "request_dev_help", "resolve_dev_request"}
     tools = [t for t in schemas if t["name"] in allowed]
     system = _MISSION + """
@@ -211,7 +219,11 @@ reason you believe it. You will never see its result in the same call; it is jud
 later against out-of-sample data on a bar that tightens with every hypothesis all \
 seven desks have ever tested. Rejection is the normal outcome and is not a failure: \
 proposing more ideas does NOT raise your odds, it raises the bar for everyone, so \
-propose only what you would defend. Do not trade."""
+propose only what you would defend. If one of your hypotheses has been ACCEPTED, deploy \
+it with deploy_strategy — an accepted rule that sits in the log earns nothing; deployed, \
+it feeds the Trader mechanical signals every cycle. Review your deployed strategies too \
+(list_deployed_strategies): if one's live behavior clearly diverges from its validated \
+record, undeploy it and journal why. Do not trade."""
     system += _inventory(tools)
     return Agent("reviewer", system, tools, handlers, provider=provider, max_tokens=4000, max_iterations=6)
 
