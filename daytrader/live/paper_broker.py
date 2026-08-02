@@ -31,12 +31,31 @@ from daytrader.core.types import Side
 from daytrader.data import quotes
 from daytrader.live.db import LiveDB, _now_iso
 
+def _envf(key: str, default: float) -> float:
+    """Read a numeric rail at CALL time, so the dashboard's Settings tab takes
+    effect on the next cycle instead of requiring a container restart."""
+    try:
+        v = os.environ.get(key)
+        return float(v) if v not in (None, "") else float(default)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _envb(key: str, default: bool = True) -> bool:
+    v = os.environ.get(key)
+    if v in (None, ""):
+        return default
+    return v not in ("0", "false", "False")
+
+
 # Risk rails that protect the paper account from oversized LLM orders. These are
 # hard broker-level caps (the mission guides desks to size far tighter); an order
 # breaching them is rejected with an actionable message the agent can act on.
-MAX_TRADE_RISK_PCT = float(os.environ.get("MAX_TRADE_RISK_PCT", "2.0"))   # entry→stop loss ≤ this % of equity
-MAX_GROSS_EXPOSURE = float(os.environ.get("MAX_GROSS_EXPOSURE", "2.0"))   # Σ|position notional| ≤ this × equity
-REQUIRE_STOP = os.environ.get("REQUIRE_STOP", "1") not in ("0", "false", "False", "")
+# Kept as module constants for backwards compatibility; the live code paths read
+# the _env* accessors so Settings-tab changes apply without a restart.
+MAX_TRADE_RISK_PCT = _envf("MAX_TRADE_RISK_PCT", 2.0)   # entry→stop loss ≤ this % of equity
+MAX_GROSS_EXPOSURE = _envf("MAX_GROSS_EXPOSURE", 2.0)   # Σ|position notional| ≤ this × equity
+REQUIRE_STOP = _envb("REQUIRE_STOP", True)
 
 # Server-enforced scale-out: by default, bank AUTO_SCALE_DEFAULT_FRAC of a
 # position at +AUTO_SCALE_DEFAULT_R and move the stop to breakeven. Set the frac
@@ -318,8 +337,8 @@ class PaperBroker:
             horizon = "day"
         trail_atr_mult = float(trail_atr_mult) if trail_atr_mult else None
         trail_pct = float(trail_pct) if trail_pct else None
-        auto_scale_r = float(auto_scale_r) if auto_scale_r is not None else AUTO_SCALE_DEFAULT_R
-        auto_scale_frac = float(auto_scale_frac) if auto_scale_frac is not None else AUTO_SCALE_DEFAULT_FRAC
+        auto_scale_r = float(auto_scale_r) if auto_scale_r is not None else _envf("AUTO_SCALE_DEFAULT_R", 1.0)
+        auto_scale_frac = float(auto_scale_frac) if auto_scale_frac is not None else _envf("AUTO_SCALE_DEFAULT_FRAC", 0.5)
         adx_decay_exit = _clean_adx_decay(adx_decay_exit)
         if qty <= 0:
             return self._fail(symbol, side, qty, "qty must be positive")
@@ -346,7 +365,7 @@ class PaperBroker:
         slip = abs(fill - raw) * qty * mult
 
         # ---- risk rails (reject oversized / unsafe orders) ------------------
-        if REQUIRE_STOP and stop is None:
+        if _envb("REQUIRE_STOP", True) and stop is None:
             return self._fail(symbol, side, qty,
                               "a protective stop is required on every entry")
         if stop is not None:
@@ -365,19 +384,20 @@ class PaperBroker:
                                   f"short target {target:.2f} must be BELOW entry {fill:.2f}")
         eq = self.equity()
         if stop is not None and eq > 0:
+            risk_pct = _envf("MAX_TRADE_RISK_PCT", 2.0)
             risk_amt = abs(fill - stop) * qty * mult
-            cap = MAX_TRADE_RISK_PCT / 100.0 * eq
+            cap = risk_pct / 100.0 * eq
             if risk_amt > cap:
                 return self._fail(
                     symbol, side, qty,
-                    f"trade risk ${risk_amt:,.0f} exceeds the {MAX_TRADE_RISK_PCT:.1f}% cap "
+                    f"trade risk ${risk_amt:,.0f} exceeds the {risk_pct:.1f}% cap "
                     f"(${cap:,.0f}); reduce qty or tighten the stop")
         if eq > 0:
             from daytrader.live.tastytrade_margin import equity_buying_power_multiple
             mirroring = equity_buying_power_multiple() > 1.0
             # The gross line must not silently undercut a mirrored buying-power
             # multiple — a 4x day-trading line means nothing behind a 2x cap.
-            gross_cap = max(MAX_GROSS_EXPOSURE, equity_buying_power_multiple())
+            gross_cap = max(_envf("MAX_GROSS_EXPOSURE", 2.0), equity_buying_power_multiple())
             # Under mirrored broker terms futures are governed by MARGIN, not
             # notional — that is how tastytrade actually works, and a notional
             # cap mis-governs them badly (one MES is $37.6k of notional against

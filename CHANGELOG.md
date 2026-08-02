@@ -9,6 +9,25 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.27.1] — 2026-08-01
+
+### Fixed
+- **The new trading settings had no UI.** `USE_TASTYTRADE_MARGIN` (6.27.0) and
+  `FUTURES_SYMBOLS` (6.26.0) shipped as environment variables only, which on a
+  container means editing the Unraid template and restarting — not the Settings
+  tab where every other knob lives. Both are now dashboard-editable, together
+  with the risk rails they interact with: `MAX_TRADE_RISK_PCT`,
+  `MAX_GROSS_EXPOSURE`, `REQUIRE_STOP`, `AUTO_SCALE_DEFAULT_R`,
+  `AUTO_SCALE_DEFAULT_FRAC`. New "Trading rails & futures" card; the margin
+  mirror sits in the existing tastytrade card next to the credentials it uses.
+- **Those rails now apply without a restart.** They were bound as module
+  constants at import, so a Settings change would have written to
+  `settings.json` and `os.environ` and then been ignored until the container
+  cycled — the UI would have looked like it worked while nothing changed. The
+  live code paths read them at call time instead. Verified by tightening
+  `MAX_TRADE_RISK_PCT` from 2.0 to 1.0 against an already-imported broker and
+  watching the same order flip from accepted to rejected.
+
 ## [6.27.0] — 2026-08-01
 
 ### Added — mirror the owner's real tastytrade margin terms (opt-in, read-only)

@@ -1356,7 +1356,38 @@ function renderSettings(main, status){
     "Live stock + option quotes and Greeks for the teams. READ-ONLY — the desks never place trades on your tastytrade account; all orders are simulated in the paper books. Uses OAuth (works with 2FA accounts; no rolling code needed). On tastytrade.com: My Profile → API → OAuth Applications → Manage → Create Grant — copy the client secret and the generated refresh token here."));
   ttCard.appendChild(settingsSecretField(status, "TASTYTRADE_CLIENT_SECRET", "TASTYTRADE_CLIENT_SECRET"));
   ttCard.appendChild(settingsSecretField(status, "TASTYTRADE_REFRESH_TOKEN", "TASTYTRADE_REFRESH_TOKEN"));
+  ttCard.appendChild(settingsTextField(status, "USE_TASTYTRADE_MARGIN", "USE_TASTYTRADE_MARGIN — mirror your real margin terms",
+    {options:["", "1"], def:"", hint:
+      "Blank = paper terms (equities cash-funded, futures at exchange-minimum margin). "
+      + "1 = mirror YOUR tastytrade account: Reg-T equity buying power (up to 4x intraday, applied as a "
+      + "RATIO of each paper account's own equity, never your dollar balance) and futures governed by "
+      + "margin instead of notional — which lifts a $25k desk from 1 MES contract to about 5. "
+      + "Still read-only; it only READS balances/margin requirements. Changes the competition's terms "
+      + "for every desk, so flip it deliberately."}));
   main.appendChild(ttCard);
+
+  // Trading rails
+  const riskCard = el("div", {class:"card"});
+  riskCard.appendChild(el("h2", null, "Trading rails & futures"));
+  riskCard.appendChild(el("div", {class:"muted", style:"font-size:12px;margin-bottom:12px"},
+    "Hard broker-level limits on every desk. Orders that breach them are rejected with an actionable "
+    + "message. Blank uses the default shown. Takes effect on the next cycle — no restart needed."));
+  riskCard.appendChild(settingsTextField(status, "MAX_TRADE_RISK_PCT", "MAX_TRADE_RISK_PCT",
+    {def:"2.0", hint:"Max entry→stop loss as % of equity, per trade. For futures this is measured in real dollars: (entry-stop) x contracts x multiplier."}));
+  riskCard.appendChild(settingsTextField(status, "MAX_GROSS_EXPOSURE", "MAX_GROSS_EXPOSURE",
+    {def:"2.0", hint:"Σ|position notional| ≤ this x equity. Raised automatically to match your buying-power multiple when USE_TASTYTRADE_MARGIN is on."}));
+  riskCard.appendChild(settingsTextField(status, "REQUIRE_STOP", "REQUIRE_STOP",
+    {options:["1","0"], def:"1", hint:"1 = every entry must carry a protective stop. Turning this off is not recommended."}));
+  riskCard.appendChild(settingsTextField(status, "AUTO_SCALE_DEFAULT_R", "AUTO_SCALE_DEFAULT_R",
+    {def:"1.0", hint:"Server-enforced scale-out trigger in R multiples (R = entry→stop)."}));
+  riskCard.appendChild(settingsTextField(status, "AUTO_SCALE_DEFAULT_FRAC", "AUTO_SCALE_DEFAULT_FRAC",
+    {def:"0.5", hint:"Fraction auto-banked at +R, then stop to breakeven. 0 disables server-enforced scaling."}));
+  riskCard.appendChild(settingsTextField(status, "FUTURES_SYMBOLS", "FUTURES_SYMBOLS",
+    {def:"MES=F,MNQ=F", hint:
+      "Futures added to the scanned universe so desks get indicators on what they may trade. "
+      + "Only micros size sensibly against these accounts. Set to a single space to disable futures scanning. "
+      + "Supported: MES/MNQ/M2K/MYM/MCL/MGC/SIL (micros) and ES/NQ/RTY/YM/CL/NG/GC/SI/ZB/ZN."}));
+  main.appendChild(riskCard);
 
   // Research data providers (optional — the desks call these on demand)
   const dataCard = el("div", {class:"card"});

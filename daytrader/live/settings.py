@@ -35,6 +35,11 @@ PLAIN_KEYS = [
     "OPENAI_BASE_URL", "XAI_BASE_URL", "QWEN_BASE_URL",
     "DEEPSEEK_BASE_URL", "GLM_BASE_URL", "KIMI_BASE_URL",
     "GITHUB_REPO", "ALPACA_PAPER", "ALPACA_DATA_PLAN",
+    # Trading / risk rails and futures config (dashboard-editable so they don't
+    # require an env edit + container restart).
+    "USE_TASTYTRADE_MARGIN", "FUTURES_SYMBOLS",
+    "MAX_TRADE_RISK_PCT", "MAX_GROSS_EXPOSURE", "REQUIRE_STOP",
+    "AUTO_SCALE_DEFAULT_R", "AUTO_SCALE_DEFAULT_FRAC",
 ]
 MANAGED_KEYS = SECRET_KEYS + PLAIN_KEYS
 
