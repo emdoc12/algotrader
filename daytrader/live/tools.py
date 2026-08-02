@@ -552,7 +552,9 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                 f"each tick is ${d['tick_value']:g}")
             if eq > 0:
                 d["max_contracts_by_margin"] = int(eq // d["initial_margin"]) if d["initial_margin"] else 0
+        from daytrader.live.tastytrade_margin import describe as _mdesc
         return {"ok": True, "equity": round(eq, 2), "contracts": out,
+                "margin_terms": _mdesc(),
                 "note": ("Position size is in CONTRACTS. Risk = (entry - stop) x contracts x "
                          "multiplier, so a 10-point stop on MES risks $50, not $10. Margin is "
                          "pledged (reducing buying_power) but not spent, and a futures "

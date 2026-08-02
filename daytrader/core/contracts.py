@@ -96,16 +96,47 @@ def spec_for(symbol) -> ContractSpec | None:
     return _SPECS.get(str(symbol or "").strip().upper())
 
 
+def _broker_override(symbol) -> dict:
+    """Contract reference data from the owner's broker, when mirroring is on."""
+    try:
+        from daytrader.live.tastytrade_margin import profile
+        root = str(symbol or "").strip().upper().replace("=F", "")
+        return (profile().get("contracts") or {}).get(root) or {}
+    except Exception:  # noqa: BLE001 - never let an optional feed break pricing
+        return {}
+
+
 def multiplier(symbol) -> float:
-    """Dollars per 1.00 of price. 1.0 for equities/ETFs — the share model."""
+    """Dollars per 1.00 of price. 1.0 for equities/ETFs — the share model.
+
+    Prefers the broker's own ``notional_multiplier`` when tastytrade mirroring
+    is enabled, since that is authoritative for what the account would actually
+    be filled at; falls back to the static table.
+    """
     s = spec_for(symbol)
-    return s.multiplier if s else 1.0
+    if s is None:
+        return 1.0
+    m = _broker_override(symbol).get("multiplier")
+    try:
+        return float(m) if m else s.multiplier
+    except (TypeError, ValueError):
+        return s.multiplier
 
 
 def initial_margin(symbol, qty: float = 1.0) -> float:
-    """Buying power consumed by ``qty`` contracts. 0.0 for non-futures."""
+    """Buying power consumed by ``qty`` contracts. 0.0 for non-futures.
+
+    Scaled by the owner's futures intraday relief when mirroring is enabled.
+    """
     s = spec_for(symbol)
-    return (s.initial_margin * abs(float(qty))) if s else 0.0
+    if s is None:
+        return 0.0
+    base = s.initial_margin * abs(float(qty))
+    try:
+        from daytrader.live.tastytrade_margin import futures_margin_scale
+        return base * futures_margin_scale()
+    except Exception:  # noqa: BLE001
+        return base
 
 
 def maintenance_margin(symbol, qty: float = 1.0) -> float:

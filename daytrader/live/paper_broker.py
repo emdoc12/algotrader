@@ -337,6 +337,8 @@ class PaperBroker:
         except Exception as e:  # noqa: BLE001
             return self._fail(symbol, side, qty, f"price unavailable: {e}")
 
+        from daytrader.core.contracts import initial_margin, spec_for
+        spec = spec_for(symbol)          # None for equities/ETFs (share model)
         fill = self._entry_fill(side, raw)
         mult = self._mult(symbol)
         notional = fill * qty * mult
@@ -371,17 +373,28 @@ class PaperBroker:
                     f"trade risk ${risk_amt:,.0f} exceeds the {MAX_TRADE_RISK_PCT:.1f}% cap "
                     f"(${cap:,.0f}); reduce qty or tighten the stop")
         if eq > 0:
+            from daytrader.live.tastytrade_margin import equity_buying_power_multiple
+            mirroring = equity_buying_power_multiple() > 1.0
+            # The gross line must not silently undercut a mirrored buying-power
+            # multiple — a 4x day-trading line means nothing behind a 2x cap.
+            gross_cap = max(MAX_GROSS_EXPOSURE, equity_buying_power_multiple())
+            # Under mirrored broker terms futures are governed by MARGIN, not
+            # notional — that is how tastytrade actually works, and a notional
+            # cap mis-governs them badly (one MES is $37.6k of notional against
+            # ~$100 of stop risk). Off by default, so the standing competition
+            # keeps its original notional rail.
             gross = sum(abs(p["qty"]) * self._mark(s, p["entry_price"]) * self._mult(s)
-                        for s, p in self._positions.items())
-            if (gross + notional) > MAX_GROSS_EXPOSURE * eq:
+                        for s, p in self._positions.items()
+                        if not (mirroring and spec_for(s) is not None))
+            counts_toward_gross = not (mirroring and spec is not None)
+            projected = gross + (notional if counts_toward_gross else 0.0)
+            if projected > gross_cap * eq:
                 return self._fail(
                     symbol, side, qty,
-                    f"gross exposure ${gross + notional:,.0f} would exceed "
-                    f"{MAX_GROSS_EXPOSURE:.1f}x equity (${MAX_GROSS_EXPOSURE * eq:,.0f}); reduce size")
+                    f"gross exposure ${projected:,.0f} would exceed "
+                    f"{gross_cap:.1f}x equity (${gross_cap * eq:,.0f}); reduce size")
 
         # ---- funding: margin for futures, cash for equities -----------------
-        from daytrader.core.contracts import initial_margin, spec_for
-        spec = spec_for(symbol)
         margin_req = initial_margin(symbol, qty)
         if spec is not None:
             # A futures position is not bought — margin is PLEDGED against it.
@@ -397,7 +410,28 @@ class PaperBroker:
                     f"pledged). Notional would be ${notional:,.0f}.")
             self._cash -= commission
         elif side == Side.LONG:
-            if (notional + commission) > self._cash:
+            # Equity buying power. 1.0x is the cash model (the long-standing
+            # default); mirroring the owner's Reg-T account raises it to ~2x, or
+            # ~4x on day-trading buying power.
+            from daytrader.live.tastytrade_margin import equity_buying_power_multiple
+            bp_mult = equity_buying_power_multiple()
+            if bp_mult > 1.0:
+                # A margin buy is a LOAN, not free funding: cash still pays the
+                # full notional and may go negative (a debit balance), exactly
+                # as it does at a real broker. Only the LIMIT changes — from
+                # "cash on hand" to "a multiple of equity". Keeping the cash
+                # mechanics symmetric is what stops the close from crediting
+                # proceeds that were never paid, i.e. minting money.
+                held = sum(p["qty"] * self._mark(s, p["entry_price"])
+                           for s, p in self._positions.items()
+                           if p["side"] == Side.LONG and self._mult(s) == 1.0)
+                limit = bp_mult * eq
+                if (held + notional + commission) > limit:
+                    return self._fail(
+                        symbol, side, qty,
+                        f"exceeds equity buying power: ${held + notional:,.0f} of long "
+                        f"exposure vs a ${limit:,.0f} line ({bp_mult:.1f}x equity)")
+            elif (notional + commission) > self._cash:
                 return self._fail(
                     symbol, side, qty,
                     f"insufficient cash: need {notional + commission:.2f}, have {self._cash:.2f}",
@@ -852,6 +886,13 @@ class PaperBroker:
             "positions": self.positions(),
             "peak_equity": self.peak_equity,
         }
+        try:
+            from daytrader.live.tastytrade_margin import describe as _mdesc
+            terms = _mdesc()
+            if terms.get("source") == "tastytrade":
+                out["margin_terms"] = terms
+        except Exception:  # noqa: BLE001
+            pass
         if held > 0:
             out["margin_held"] = round(held, 2)
             out["buying_power"] = round(self._cash - held, 2)

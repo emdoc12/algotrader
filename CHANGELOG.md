@@ -9,6 +9,52 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.27.0] — 2026-08-01
+
+### Added — mirror the owner's real tastytrade margin terms (opt-in, read-only)
+New `daytrader/live/tastytrade_margin.py` pulls the account's actual broker
+terms and applies them to the paper accounts. **Off by default**
+(`USE_TASTYTRADE_MARGIN=1` to enable) so the running competition's terms never
+change silently.
+
+What it reads (verified against tastytrade SDK 13.2 in this container):
+- `Account.get_balances()` → `equity_buying_power`, `day_trading_buying_power`,
+  `futures_intraday_margin_requirement` / `..._overnight_...`, `margin_equity`
+- `Account.get_margin_requirements()` → `margin_calculation_type` (Reg-T vs
+  portfolio margin)
+- `Future.get()` → authoritative `notional_multiplier` and `tick_size`, which
+  override the static exchange table when available
+
+**Leverage is mirrored as a RATIO, never a dollar amount.** The owner's real
+account and a $25k paper account differ in size, so copying absolute buying
+power would be meaningless — copying "your broker gives you 4x intraday" is the
+part that transfers. Clamped to a maximum of 4x (Reg-T day-trading).
+
+Accounting consequences, all verified:
+- **Equity longs may be financed on margin.** A margin buy is a LOAN: cash still
+  pays the full notional and may go negative (a debit balance), exactly as at a
+  real broker. Only the LIMIT changes, from "cash on hand" to "a multiple of
+  equity". Keeping the cash mechanics symmetric is what stops the close from
+  crediting proceeds that were never paid — a round trip is provably flat.
+- **The gross line no longer undercuts the mirrored multiple.** A 4x
+  day-trading line means nothing behind a hardcoded 2x cap, so the effective
+  gross cap is `max(MAX_GROSS_EXPOSURE, buying_power_multiple)`.
+- **Futures are governed by MARGIN, not notional, when mirroring is on** —
+  which is how tastytrade actually works. A notional cap mis-governs them badly:
+  one MES is $37.6k of notional against ~$100 of stop risk. On a $25k account
+  this moves capacity from 1 MES to 5, with the **2% per-trade risk cap** then
+  binding at exactly $500 — the rail that should bind.
+
+Desks see the terms in force via `get_contract_specs().margin_terms` and, when
+mirroring is on, `account.margin_terms` in the snapshot.
+
+**Read-only, verified at AST level** rather than by string match: the module
+imports only `tastytrade.account.Account` and `tastytrade.instruments.Future`,
+and calls only `get`, `get_balances`, `get_margin_requirements`. No `order`
+module import; no `place_order`/`cancel`; `get_order_buying_power_effect` is
+deliberately avoided because it requires constructing an `Order`. Any failure
+degrades to the static exchange-minimum table.
+
 ## [6.26.0] — 2026-08-01
 
 ### Added — real futures support (contract-spec layer)
