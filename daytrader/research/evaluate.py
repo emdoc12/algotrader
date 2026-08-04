@@ -66,7 +66,7 @@ def _bootstrap_p(pnls, n_boot: int = 5000, seed: int = 11) -> float:
 
 
 def _run_slice(rule: dict, data: dict, spy_close, start_day, end_day,
-               starting_equity: float) -> dict:
+               starting_equity: float, execution: dict | None = None) -> dict:
     """Backtest one period with warmup, counting only trades entered in-window."""
     from daytrader.backtest.engine import BacktestEngine, CostModel, EngineConfig
     from daytrader.core.types import SignalType
@@ -100,8 +100,17 @@ def _run_slice(rule: dict, data: dict, spy_close, start_day, end_day,
     signals = [s for s in signals
                if not (getattr(s, "type", None) == SignalType.ENTRY
                        and s.ts.normalize() < start_day)]
-    engine = BacktestEngine(EngineConfig(starting_equity=float(starting_equity),
-                                         cost=CostModel()))
+    ex = execution or {}
+    swing = str(ex.get("horizon", "intraday")) == "swing"
+    engine = BacktestEngine(EngineConfig(
+        starting_equity=float(starting_equity), cost=CostModel(),
+        # Swing carries across sessions; overnight gaps price honestly because a
+        # gapped open fills the stop at the open, not the stop level.
+        eod_flat=not swing,
+        max_hold_days=float(ex.get("max_hold_days", 0) or 0),
+        trail_atr_mult=float(ex.get("trail_atr_mult", 0) or 0),
+        trail_pct=float(ex.get("trail_pct", 0) or 0),
+        breakeven_at_r=float(ex.get("breakeven_at_r", 0) or 0)))
     trades, _equity = engine.run(sliced, signals)
     closed = [t for t in trades
               if not t.is_open and t.entry_ts is not None
@@ -150,7 +159,8 @@ def evaluate(canon: dict, criteria: dict, starting_equity: float = 25_000.0) -> 
     spy_close = data["SPY"]["close"] if "SPY" in data else None
     per_period, pooled = [], []
     for i, (a, b) in enumerate(windows, 1):
-        r = _run_slice(rule, data, spy_close, a, b, starting_equity)
+        r = _run_slice(rule, data, spy_close, a, b, starting_equity,
+                       execution=canon.get("execution"))
         pooled.extend(r["trades"])
         per_period.append({
             "period": i,
@@ -178,6 +188,7 @@ def evaluate(canon: dict, criteria: dict, starting_equity: float = 25_000.0) -> 
     return {
         "ok": True,
         "interval": interval,
+        "execution": canon.get("execution") or {},
         "universe": traded,
         "periods": per_period,
         "n_periods": len(per_period),

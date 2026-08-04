@@ -9,6 +9,60 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.28.0] — 2026-08-03
+
+### Added — dev request #12: swing horizons are testable (was a hard blocker)
+The engine force-flattened at every session close regardless of interval, so a
+"swing" config was silently re-tested as another intraday one — a 365-day 1h
+trend-continuation run exited every trade on `eod_flat` at ~205min. With six
+intraday configs measured negative, this made the desk's only remaining
+hypothesis untestable.
+
+- **`horizon: "swing"`** on `backtest_custom_strategy`, `backtest_strategy` and
+  `propose_hypothesis` disables the EOD flat: positions carry across sessions
+  until stop / target / `max_hold_days`. Overnight gap risk was already priced
+  honestly (`CostModel.gap_through_stop` fills a gapped open at the OPEN, not at
+  the stop level) — it simply never got exercised because nothing survived the
+  close. Verified on real data: the same rule goes **PF 0.88 → 1.32**, avg hold
+  **3.7h → 75.9h**, exits **100% `eod_flat` → `stop`/`max_hold`**.
+- **`max_hold_days`** time stop. Required for a swing hypothesis: without it a
+  rule that never hits stop or target degenerates into buy-and-hold and measures
+  the market rather than the rule.
+- **Trailing stops in the backtest** — `trail_atr_mult` (already implemented in
+  the engine but never exposed) plus a new `trail_pct`, matching what
+  `place_trade` offers live. A runner-based edge is no longer capped by a fixed
+  rr target. `breakeven_at_r` exposed alongside them.
+- **`1d` interval** (3650d history) for multi-week position tests.
+- Two engine fixes that swing mode depends on: the last-bar ENTRY block now
+  applies **only** in intraday mode (it existed precisely because overnight
+  holds were forbidden, and would otherwise silently drop swing entries), and
+  the time stop runs before the EOD check.
+- Execution is part of a hypothesis's **identity hash**, so the swing variant of
+  a rejected intraday rule is a genuinely new hypothesis rather than a blocked
+  re-proposal.
+
+### Added — dev request: rollover_short_trigger sector/RS alignment
+The SPY gate required down-direction AND rising ADX simultaneously, which almost
+never coincides in the 10:00-14:00 window — the block reported `near_miss_count:
+5` while the real structure was a sector selloff under a flat index.
+
+- A candidate now qualifies via **either** the existing SPY gate **or** a sector
+  path: its `sector_cluster` averaging ADX>=22 and rising with >=60% of members
+  EMA-down, **and** the name itself lagging (`rs_vs_spy_pct < 0`) on a
+  non-improving `rs_slope_20m`. Each candidate reports which path qualified it
+  (`alignment: "spy"|"sector"`) plus the cluster evidence.
+- Per-candidate fields the desk was hand-deriving every cycle are now exposed:
+  `ema_stack_down` (full ema9<ema21<ema50), `ema9/21/50`, `vs_vwap_pct`, `rsi14`,
+  `dist_from_ema9_atr`, `macd_hist` vs `macd_hist_prev` plus a
+  `macd_hist_expanding_down` flag, `adx_rising_nbars`, `rs_vs_spy_pct`,
+  `rs_slope_20m`.
+- New per-symbol snapshot fields backing them: `ema50`, `ema_stack_down`,
+  `ema_stack_up`, `adx_rising_nbars`, `adx_decaying_nbars` — the last two using
+  the same definition the custom DSL exposes, so a snapshot read and a backtest
+  condition agree.
+- Guards verified: an improving RS slope, positive RS vs SPY, or a decaying
+  sector ADX all fail to qualify; the SPY-only path still works unchanged.
+
 ## [6.27.1] — 2026-08-01
 
 ### Fixed

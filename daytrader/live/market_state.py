@@ -39,12 +39,20 @@ def _latest_indicators(df: pd.DataFrame, live_price: float | None = None) -> dic
     close = df["close"]
     ema9 = ind.ema(close, 9).iloc[-1]
     ema21 = ind.ema(close, 21).iloc[-1]
+    ema50 = ind.ema(close, 50).iloc[-1] if len(close) >= 50 else float("nan")
     rsi = ind.rsi(close, 14).iloc[-1]
     atr = ind.atr(df, 14).iloc[-1]
     adx_series = ind.adx(df, 14)
     adx = adx_series.iloc[-1]
     adx_prev = adx_series.iloc[-4] if len(adx_series) >= 4 else adx
     adx_slope = float(adx) - float(adx_prev) if pd.notna(adx) and pd.notna(adx_prev) else 0.0
+    # Consecutive bars of rising/decaying ADX — the same definition the custom
+    # DSL exposes, so a snapshot read and a backtest condition agree.
+    _adx_d = adx_series.diff()
+    _rising = _adx_d > 0
+    _falling = _adx_d < 0
+    adx_rising_nbars = int(_rising.astype(int).groupby((~_rising).cumsum()).cumsum().iloc[-1])
+    adx_decaying_nbars = int(_falling.astype(int).groupby((~_falling).cumsum()).cumsum().iloc[-1])
     _mline, _msig, _mhist = ind.macd(close)
     macd_hist = float(_mhist.iloc[-1]) if pd.notna(_mhist.iloc[-1]) else None
     macd_hist_prev = float(_mhist.iloc[-2]) if len(_mhist) >= 2 and pd.notna(_mhist.iloc[-2]) else None
@@ -90,13 +98,18 @@ def _latest_indicators(df: pd.DataFrame, live_price: float | None = None) -> dic
         "day_change_pct": round((price / day_open - 1) * 100, 2) if day_open else 0.0,
         "ema9": round(float(ema9), 2),
         "ema21": round(float(ema21), 2),
+        "ema50": round(float(ema50), 2) if pd.notna(ema50) else None,
         "ema_trend": "up" if ema9 > ema21 else "down",
+        "ema_stack_down": bool(pd.notna(ema50) and ema9 < ema21 < ema50),
+        "ema_stack_up": bool(pd.notna(ema50) and ema9 > ema21 > ema50),
         "rsi14": round(float(rsi), 1),
         "atr14": round(float(atr), 2),
         "atr_pct": round(float(atr) / price * 100, 2) if price else 0.0,
         "adx14": round(float(adx), 1),
         "adx_slope": round(adx_slope, 1),
         "adx_rising": adx_slope > 0,
+        "adx_rising_nbars": adx_rising_nbars,
+        "adx_decaying_nbars": adx_decaying_nbars,
         "macd_hist": round(macd_hist, 4) if macd_hist is not None else None,
         "macd_hist_prev": round(macd_hist_prev, 4) if macd_hist_prev is not None else None,
         "vwap": round(vwap, 2) if vwap_ok else None,
@@ -411,6 +424,43 @@ def _macd_trigger(per_symbol: dict, spy_direction: str | None, now_t) -> dict:
     return {"in_window": bool(in_window), "count": len(hits), "note": note, "triggers": hits}
 
 
+def _sector_downtrends(per_symbol: dict) -> dict:
+    """Sectors in a genuine downtrend, as an alternative to the SPY gate.
+
+    A sector qualifies when its average ADX >= 22 AND rising, and at least 60%
+    of its members are EMA-down. Returns {sector: evidence} plus a reverse map
+    so a candidate can name the cluster that qualified it.
+    """
+    out = {}
+    for sector, members in _SECTORS.items():
+        rows = [(s, v) for s, v in per_symbol.items() if s in members and v]
+        if len(rows) < 3:                      # too few names to call a cluster
+            continue
+        adxs = [v.get("adx14") for _, v in rows if v.get("adx14") is not None]
+        slopes = [v.get("adx_slope") for _, v in rows if v.get("adx_slope") is not None]
+        if not adxs or not slopes:
+            continue
+        avg_adx = sum(adxs) / len(adxs)
+        avg_slope = sum(slopes) / len(slopes)
+        n_down = sum(1 for _, v in rows if v.get("ema_trend") == "down")
+        frac_down = n_down / len(rows)
+        if avg_adx >= 22 and avg_slope > 0 and frac_down >= 0.60:
+            out[sector] = {
+                "sector": sector, "n": len(rows),
+                "avg_adx": round(avg_adx, 1), "avg_adx_slope": round(avg_slope, 2),
+                "pct_ema_down": round(100 * frac_down, 0),
+                "members": sorted(s for s, _ in rows),
+            }
+    return out
+
+
+def _sector_of(symbol: str) -> str | None:
+    for sector, members in _SECTORS.items():
+        if symbol in members:
+            return sector
+    return None
+
+
 def _rollover_short_trigger(per_symbol: dict, summary: dict, now_t) -> dict:
     """The desk's second validated co-primary setup, mechanized: the saved
     'trend_day_ema9_rollover_short' (backtested PF 2.15 / 60% win / +12.3 alpha,
@@ -429,6 +479,14 @@ def _rollover_short_trigger(per_symbol: dict, summary: dict, now_t) -> dict:
     spy_dir = (summary or {}).get("spy_direction")
     spy_rising = bool((summary or {}).get("spy_adx_rising"))
     spy_aligned = (spy_dir == "down") and spy_rising
+
+    # ALTERNATIVE alignment: a SECTOR downtrend. Requiring SPY to be both
+    # down-directional AND adx_rising almost never coincides inside the
+    # 10:00-14:00 window, which was blocking the setup on days when the actual
+    # tradeable structure was a sector selloff under a flat index. A symbol
+    # qualifies via its sector when the cluster is genuinely trending down and
+    # the name is itself a laggard that is not recovering.
+    sector_down = _sector_downtrends(per_symbol)
 
     hits, near_miss = [], 0
     for sym, v in per_symbol.items():
@@ -453,19 +511,42 @@ def _rollover_short_trigger(per_symbol: dict, summary: dict, now_t) -> dict:
             if sum(checks) == len(checks) - 1:
                 near_miss += 1
             continue
-        # Name-level conditions all pass; SPY alignment is the shared gate.
-        if not spy_aligned:
+
+        # Name-level conditions pass. Alignment can come from EITHER the index
+        # or the symbol's own sector.
+        sector = _sector_of(sym)
+        clus = sector_down.get(sector) if sector else None
+        rs = v.get("rs_vs_spy_pct")
+        rs_slope = v.get("rs_slope_20m")
+        # A laggard that is not recovering: negative RS vs SPY, slope not improving.
+        rs_ok = (rs is not None and rs < 0
+                 and (rs_slope is None or rs_slope <= 0))
+        sector_aligned = bool(clus) and rs_ok
+        if not (spy_aligned or sector_aligned):
             near_miss += 1
             continue
+
+        ema21, ema50 = v.get("ema21"), v.get("ema50")
         hits.append({
             "symbol": sym,
+            "alignment": "spy" if spy_aligned else "sector",
+            "sector": sector,
+            "sector_evidence": clus if (sector_aligned and not spy_aligned) else None,
             "adx14": adx,
             "adx_slope": slope,
+            "adx_rising_nbars": v.get("adx_rising_nbars"),
+            # Full EMA stack, not just ema9<ema21 — the desk hand-checks this.
+            "ema_stack_down": bool(ema21 is not None and ema50 is not None
+                                   and ema9 < ema21 < ema50),
+            "ema9": ema9, "ema21": ema21, "ema50": ema50,
             "macd_hist": h,
             "macd_hist_prev": hp,
+            "macd_hist_expanding_down": bool(h < hp < 0),
             "rsi14": rsi,
             "vs_vwap_pct": vs_vwap,
             "dist_from_ema9_atr": round(abs(price - ema9) / atr, 2),
+            "rs_vs_spy_pct": rs,
+            "rs_slope_20m": rs_slope,
             "rs_rank": v.get("rs_rank"),
         })
     # Weakest relative strength first — the best short candidates.
@@ -473,15 +554,23 @@ def _rollover_short_trigger(per_symbol: dict, summary: dict, now_t) -> dict:
 
     note = ("trend_day_ema9_rollover_short candidates: EMA-down, ADX>=25 rising, "
             "MACD hist re-expanding down (hist<hist_prev<0), RSI>35, price 0 to "
-            "-1.5% vs VWAP, SPY down with rising ADX.")
-    if not spy_aligned:
-        note += (f" BLOCKED: SPY gate not met (direction={spy_dir!r}, "
-                 f"adx_rising={spy_rising}) — no short qualifies this cycle.")
+            "-1.5% vs VWAP. Alignment via EITHER (a) SPY down with rising ADX, or "
+            "(b) the symbol's SECTOR trending down (avg ADX>=22 rising, >=60% of "
+            "members EMA-down) while the name lags SPY on a non-improving RS slope. "
+            "Each candidate reports which path qualified it.")
+    if not spy_aligned and not sector_down:
+        note += (f" BLOCKED: neither gate met — SPY (direction={spy_dir!r}, "
+                 f"adx_rising={spy_rising}) and no sector is in a qualifying downtrend.")
+    elif not spy_aligned:
+        note += (f" SPY gate not met (direction={spy_dir!r}, adx_rising={spy_rising}); "
+                 f"qualifying via sector: {sorted(sector_down)}.")
     if not in_window:
         note += " NOTE: outside the 10:00-14:00 edge window — watch-only."
     return {
         "in_window": bool(in_window),
         "spy_aligned": bool(spy_aligned),
+        "sector_aligned_sectors": sorted(sector_down),
+        "sector_downtrends": list(sector_down.values()),
         "count": len(hits),
         "near_miss_count": near_miss,
         "note": note,

@@ -56,7 +56,8 @@ _PROFILES = {
     "all": list(_STRATEGIES.keys()),
 }
 
-_MAX_LOOKBACK = {"1m": 7, "2m": 55, "5m": 55, "15m": 55, "30m": 55, "1h": 700}
+_MAX_LOOKBACK = {"1m": 7, "2m": 55, "5m": 55, "15m": 55, "30m": 55, "1h": 700,
+                 "1d": 3650}
 
 
 def available_strategies() -> list[str]:
@@ -134,6 +135,11 @@ def run_backtest(
     custom: Optional[object] = None,
     min_trend_duration_bars: int = 1,
     adx_decay_exit: Optional[dict] = None,
+    horizon: str = "intraday",
+    max_hold_days: float = 0.0,
+    trail_atr_mult: float = 0.0,
+    trail_pct: float = 0.0,
+    breakeven_at_r: float = 0.0,
 ) -> dict:
     """Backtest built-in strategies (by name/profile) OR a custom rule config.
 
@@ -161,6 +167,9 @@ def run_backtest(
                     "available": available_strategies() + list(_PROFILES.keys())}
 
     interval = "1h" if interval in ("60m", "1h") else interval
+    horizon = str(horizon or "intraday").strip().lower()
+    if horizon not in ("intraday", "swing"):
+        return {"error": f"horizon must be 'intraday' or 'swing' (got {horizon!r})"}
     cap = _MAX_LOOKBACK.get(interval, 55)
     lookback_days = max(1, min(int(lookback_days), cap))
 
@@ -253,8 +262,17 @@ def run_backtest(
         signals = kept
 
     cost = CostModel.pessimistic() if pessimistic_costs else CostModel()
+    # SWING: carry positions across sessions until stop/target/max_hold. Overnight
+    # gaps are priced honestly — a gapped open fills the stop at the OPEN, not at
+    # the stop level (CostModel.gap_through_stop).
+    swing = horizon == "swing"
     cfg = EngineConfig(starting_equity=float(starting_equity), cost=cost,
-                       adx_decay_exit=adx_decay_exit if isinstance(adx_decay_exit, dict) else None)
+                       adx_decay_exit=adx_decay_exit if isinstance(adx_decay_exit, dict) else None,
+                       eod_flat=not swing,
+                       max_hold_days=float(max_hold_days or 0.0),
+                       trail_atr_mult=float(trail_atr_mult or 0.0),
+                       trail_pct=float(trail_pct or 0.0),
+                       breakeven_at_r=float(breakeven_at_r or 0.0))
     try:
         engine = BacktestEngine(cfg)
         trades, equity = engine.run(data, signals)

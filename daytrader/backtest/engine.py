@@ -8,7 +8,7 @@ Design goals (the things that make a backtest trustworthy):
     configurable. Stops are market orders and suffer gap-through-stop fills.
   * Honest intrabar logic. If a bar's range touches both stop and target, we
     assume the stop filled first (the conservative assumption).
-  * True day trading. Positions are force-flattened at the session close; an
+  * Day trading by default. Positions are force-flattened at the session close; an
     optional daily loss limit halts trading for the rest of the day.
   * Portfolio aware. One shared equity account across SPY + Mag7 so drawdown
     and position sizing reflect the whole book, not one symbol in isolation.
@@ -67,6 +67,12 @@ class EngineConfig:
     allow_short: bool = True
     breakeven_at_r: float = 0.0           # move stop to entry after +N*R (0=off)
     trail_atr_mult: float = 0.0           # trail stop at close -/+ mult*ATR (0=off)
+    trail_pct: float = 0.0                # trail stop at close -/+ pct% of price (0=off)
+    # Swing support. With eod_flat=False a position carries across sessions until
+    # its stop/target/max_hold fires; overnight gaps are priced honestly because
+    # a gapped open fills the stop at the open (CostModel.gap_through_stop), not
+    # at the stop level. max_hold_days=0 means "no time stop".
+    max_hold_days: float = 0.0
     # Intra-trade ADX-decay early exit. When set to e.g.
     # {"adx_drop_from_peak": 2.0, "negative_slope_bars": 3}, a held position is
     # force-closed if that symbol's ADX drops >= adx_drop_from_peak from its
@@ -262,17 +268,28 @@ class BacktestEngine:
                 self._halted_day = True
                 self._flatten_all(ts, marks, reason="daily_loss_limit")
 
+            # 2b) Time stop — a swing hold that never resolves is dead capital,
+            #     and without it a "swing" test silently becomes buy-and-hold.
+            if (self.cfg.max_hold_days > 0 and sym in self.positions
+                    and self.positions[sym].entry_ts is not None):
+                held_days = (ts - self.positions[sym].entry_ts).total_seconds() / 86400.0
+                if held_days >= self.cfg.max_hold_days:
+                    self._close_position(ts, sym, c, reason="max_hold")
+
             # 3) End-of-day flat.
             if self.cfg.eod_flat and last_bar_of_day[(ts, sym)] and sym in self.positions:
                 self._close_position(ts, sym, c, reason="eod_flat")
 
-            # 4) Process scheduled orders for this (ts, sym). Skip ENTRY fills on
-            # the last bar of a day — there is no later bar to manage or exit
-            # them, so they would be held overnight, which this day-trading
-            # engine must never allow (that would let a strategy harvest gaps
-            # that live paper trading, flat at the close, can never realize).
+            # 4) Process scheduled orders for this (ts, sym). In INTRADAY mode
+            # (eod_flat) skip ENTRY fills on the last bar of a day: there is no
+            # later bar to manage or exit them, so they would be held overnight,
+            # letting a strategy harvest gaps that a flat-at-the-close live book
+            # can never realize. In SWING mode carrying overnight is the point,
+            # so the entry stands and the gap is priced honestly on the next
+            # session's open.
             for sig in scheduled.get((ts, sym), []):
-                if last_bar_of_day[(ts, sym)] and sig.type == SignalType.ENTRY:
+                if (self.cfg.eod_flat and last_bar_of_day[(ts, sym)]
+                        and sig.type == SignalType.ENTRY):
                     continue
                 self._handle_signal(ts, sig, o, atr_map, marks)
 
@@ -419,12 +436,17 @@ class BacktestEngine:
                     pos.stop = min(pos.stop, new_stop) if pos.stop is not None else new_stop
                     pos.breakeven_done = True
 
+        trail_dist = 0.0
         if trail > 0 and not np.isnan(atr_now) and atr_now > 0:
+            trail_dist = trail * atr_now
+        elif self.cfg.trail_pct > 0:
+            trail_dist = c * self.cfg.trail_pct / 100.0
+        if trail_dist > 0:
             if pos.side == Side.LONG:
-                trail_stop = c - trail * atr_now
+                trail_stop = c - trail_dist
                 pos.stop = max(pos.stop, trail_stop) if pos.stop is not None else trail_stop
             else:
-                trail_stop = c + trail * atr_now
+                trail_stop = c + trail_dist
                 pos.stop = min(pos.stop, trail_stop) if pos.stop is not None else trail_stop
 
     def _close_position(self, ts, sym, raw_price: float, reason: str, market: bool = True):

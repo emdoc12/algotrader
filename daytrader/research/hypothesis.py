@@ -78,11 +78,51 @@ def canonical_spec(spec: dict) -> dict:
         raise HypothesisError(
             f"interval must be one of {sorted(INTERVAL_HISTORY_DAYS)} (got {interval!r})")
 
+    execution = canonical_execution(spec)
     return {
         "rule": rule,             # runnable: fed straight to CustomRuleStrategy
         "identity": norm_rule,    # normalized: hashed for dedup / failure log
         "universe": symbols,
         "interval": interval,
+        "execution": execution,
+    }
+
+
+def canonical_execution(spec: dict) -> dict:
+    """How the rule is HELD and EXITED — part of the hypothesis, not a detail.
+
+    The same entry rule tested intraday and as a swing is two different claims
+    about the market, so execution is hashed into the identity: a swing variant
+    of a rejected intraday rule is a genuinely new hypothesis, not a re-proposal.
+    """
+    horizon = str(spec.get("horizon") or "intraday").strip().lower()
+    if horizon not in ("intraday", "swing"):
+        raise HypothesisError("horizon must be 'intraday' or 'swing'")
+
+    def _num(key, lo=0.0, hi=1e6):
+        v = spec.get(key)
+        if v in (None, ""):
+            return 0.0
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            raise HypothesisError(f"{key} must be a number") from None
+        if not lo <= v <= hi:
+            raise HypothesisError(f"{key} must be between {lo} and {hi}")
+        return v
+
+    max_hold_days = _num("max_hold_days", 0.0, 365.0)
+    if horizon == "swing" and max_hold_days <= 0:
+        raise HypothesisError(
+            "a swing hypothesis needs max_hold_days > 0 — without a time stop a rule "
+            "that never hits stop or target degenerates into buy-and-hold, which "
+            "measures the market, not the rule")
+    return {
+        "horizon": horizon,
+        "max_hold_days": max_hold_days,
+        "trail_atr_mult": _num("trail_atr_mult", 0.0, 20.0),
+        "trail_pct": _num("trail_pct", 0.0, 50.0),
+        "breakeven_at_r": _num("breakeven_at_r", 0.0, 20.0),
     }
 
 
@@ -99,6 +139,9 @@ def spec_hash(canon: dict) -> str:
         "rule": {k: v for k, v in ident.items() if k != "name"},
         "universe": canon["universe"],
         "interval": canon["interval"],
+        # Execution is part of the claim: the same entry rule held intraday vs
+        # as a swing are different hypotheses and must hash differently.
+        "execution": canon.get("execution") or {},
     }
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
