@@ -94,8 +94,29 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
             auto_scale_r=inp.get("auto_scale_r"),
             auto_scale_frac=inp.get("auto_scale_frac"),
             adx_decay_exit=inp.get("adx_decay_exit"),
+            max_adds=inp.get("max_adds"),
         )
         db.log_agent("trader", "place_trade", str({k: inp.get(k) for k in ("symbol", "side", "qty", "horizon")}))
+        return res
+
+    def add_to_position(inp: dict) -> dict:
+        """Scale into an existing position, blending to one averaged position."""
+        inp = inp or {}
+        bad = unsupported_instrument(inp.get("symbol"))
+        if bad:
+            return {"ok": False, "error": bad}
+        try:
+            qty = float(inp["qty"])
+        except (KeyError, TypeError, ValueError):
+            return {"ok": False, "error_code": "bad_qty", "error": "qty must be a number"}
+        res = broker.add_to_position(
+            symbol=str(inp["symbol"]).upper(), qty=qty,
+            stop=inp.get("stop"), target=inp.get("target"),
+            auto_scale_r=inp.get("auto_scale_r"),
+            auto_scale_frac=inp.get("auto_scale_frac"),
+            rationale=inp.get("rationale", ""))
+        db.log_agent("trader", "add_to_position",
+                     str({k: inp.get(k) for k in ("symbol", "qty", "stop")}))
         return res
 
     def close_position(inp: dict) -> dict:
@@ -642,6 +663,7 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
 
     handlers = {
         "place_trade": place_trade,
+        "add_to_position": add_to_position,
         "close_position": close_position,
         "flatten_all": flatten_all,
         "take_partial": take_partial,
@@ -690,9 +712,39 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                     "trail_pct": {"type": "number", "description": "Optional trailing stop as a percent of price (alternative to trail_atr_mult). E.g. 1.5 = trail 1.5%."},
                     "auto_scale_r": {"type": "number", "description": "Server-enforced scale-out trigger, in R multiples (R = entry→stop). DEFAULT 1.0: at +1R the system auto-banks part of the position and moves the stop to breakeven. Set with auto_scale_frac."},
                     "auto_scale_frac": {"type": "number", "description": "Fraction to auto-bank at +auto_scale_r (DEFAULT 0.5 = half). Set to 0 to DISABLE server-enforced scale-out for this trade and manage exits yourself."},
+                    "max_adds": {"type": "integer", "description": "How many later tranches this position may accept via add_to_position. Encodes a plan like 'core + up to 2 adds' and the engine enforces it. Omit for unlimited."},
                     "adx_decay_exit": {"type": "object", "description": "Server-enforced regime-deterioration exit — the SAME contract as backtest_strategy/backtest_custom_strategy, so a config you validated in a backtest behaves identically live. E.g. {\"adx_drop_from_peak\": 5.0, \"negative_slope_bars\": 3}: force-close this position once its ADX has fallen >= 5.0 from its post-entry peak, OR its ADX slope has been negative for >= 3 consecutive cycles. Checked every cycle AND on the ~2-min stop poll. Use it on trend-continuation entries (MACD/EMA-rollover) where the loss mode is the trend dying under you rather than a hard stop-out."},
                 },
                 "required": ["symbol", "side", "qty", "stop", "target", "rationale"],
+            },
+        },
+        {
+            "name": "add_to_position",
+            "description": (
+                "SCALE IN to a position you already hold — the way to build in tranches "
+                "(initiate on confirmation, add on the first pullback that holds structure) "
+                "instead of guessing full size on the first bar of confidence. It blends into "
+                "ONE position: volume-weighted average entry, summed quantity, one stop/target. "
+                "Closing and re-entering larger is NOT equivalent — that surrenders the runner, "
+                "pays two extra sets of spread and slippage, and resets the trailing ratchet. "
+                "Returns blended_entry, total_qty and total_planned_risk (plus its % of equity) "
+                "so you can verify position-level risk after the add. Risk is re-checked against "
+                "the BLENDED entry, and R for auto-scale/breakeven is re-measured from it. "
+                "SAME-DIRECTION only: an opposite-side order is a reduce or flip — use "
+                "take_partial or close_position."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string"},
+                    "qty": {"type": "number", "description": "Size of THIS tranche (added to the existing position)."},
+                    "stop": {"type": "number", "description": "New stop for the whole blended position. Omit to keep the current one — but note adding moves your average, so re-check that the old stop still sits the right side of the new entry."},
+                    "target": {"type": "number", "description": "New target for the blended position. Omit to keep."},
+                    "auto_scale_frac": {"type": "number", "description": "Pass 0 to keep a core hold unmanaged by server-side scaling. Omit to inherit the parent position's setting."},
+                    "auto_scale_r": {"type": "number", "description": "Override the scale-out R multiple, measured from the blended entry."},
+                    "rationale": {"type": "string"},
+                },
+                "required": ["symbol", "qty"],
             },
         },
         {

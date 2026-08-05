@@ -9,6 +9,60 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.29.0] — 2026-08-05
+
+### Added — dev request: scale into an existing position
+"One position per symbol" made every pullback-add plan silently un-executable —
+the 08-04 plan ("hold 6.0 sh SPY core, add +2.0 on a pullback to <=758.5, same
+734.50 stop") could only be done by closing and re-entering, which surrenders
+the runner, pays two extra sets of spread and slippage, and resets the trailing
+ratchet.
+
+- **`add_to_position(symbol, qty, stop=, target=, auto_scale_frac=, auto_scale_r=)`**
+  blends into ONE position: volume-weighted average entry, summed quantity, a
+  single stop/target. Verified on the desk's own numbers —
+  `(755.42x6 + 758.50x2)/8 = 756.19`.
+- **Position-level risk, returned for verification.** The response carries
+  `blended_entry`, `total_qty`, `total_planned_risk` and
+  `risk_pct_of_equity`, and the risk cap is re-checked against the BLENDED entry
+  rather than the tranche — that is what is actually at risk. A stop left on the
+  wrong side of the new average is rejected explicitly, since adding moves the
+  average toward price.
+- **Auto-scale is re-measured from the blended entry** (`init_stop` follows the
+  stop in force after the add), so every R-based mechanism reflects the position
+  that exists. Pass `auto_scale_frac=0` to keep a core hold unmanaged; a position
+  that had already scaled is re-armed at the new level rather than silently
+  losing its protection.
+- **`max_adds`** on `place_trade` encodes a plan like "core + up to 2 tranches"
+  and the engine enforces it (`max_adds_reached`). Survives restarts alongside
+  `adds_used`.
+- **`place_trade` on a held symbol now returns `duplicate_symbol_position`** and
+  names the tool that can do the job — same-direction points at
+  `add_to_position`, opposite-direction at `take_partial`/`close_position`,
+  because a reduce or flip must stay explicit rather than become an implicit
+  side effect of an add.
+
+### Fixed — dev request: options flow returned an opaque 403
+A bare `HTTP 403` could not tell the desk whether the key was missing, the plan
+lacked the endpoint, or it was rate-limited — so it could not choose between
+waiting, switching source, or trading without the confluence.
+
+- Provider errors are now **self-diagnosing**: `missing_credentials` (403 with
+  no key set — names the env var and the Settings tab), `auth_or_plan` (403 *with*
+  a key — invalid/expired or the plan lacks the endpoint, and explicitly flagged
+  as NOT transient so retrying is not attempted), `rate_limited`, `not_found`,
+  `provider_down`, `network_error`. Each carries `provider`, `http_status` and an
+  actionable `hint`.
+- **Availability is surfaced BEFORE it is needed**: `data_providers` in the
+  market snapshot and on the Health tab lists configured providers plus any that
+  failed on their last call, with guidance not to gate an entry on confluence
+  that cannot be fetched — trade the setup on its own merits and say so, or stand
+  aside.
+
+Note: the underlying 403 is a credential/plan matter on the provider side and
+cannot be resolved from here — this makes it diagnosable and visible rather than
+a silent dead end.
+
 ## [6.28.0] — 2026-08-03
 
 ### Added — dev request #12: swing horizons are testable (was a hard blocker)

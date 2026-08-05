@@ -51,6 +51,15 @@ def check_providers() -> list[dict]:
     return rows
 
 
+def _provider_health() -> dict:
+    """Configured data providers + any that failed on their last call."""
+    try:
+        from daytrader.data.feeds.base import provider_health
+        return provider_health()
+    except Exception as e:  # noqa: BLE001
+        return {"configured": [], "degraded": {}, "error": repr(e)[:120]}
+
+
 def health_snapshot() -> dict:
     """Cheap, DB-only health view (no live API calls) for the Health tab to
     poll: market/data status, per-team status, recent errors, dev requests."""
@@ -113,6 +122,7 @@ def health_snapshot() -> dict:
         "now_et": now.isoformat(),
         "market_open": market_open,
         "data_feed": {"yahoo": True, "tastytrade_configured": tastytrade_data.is_configured()},
+        "data_providers": _provider_health(),
         "teams": teams,
         "recent_errors": recent_errors[:50],
         "open_dev_requests": dev,

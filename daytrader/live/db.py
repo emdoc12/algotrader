@@ -188,6 +188,8 @@ class LiveDB:
             self._ensure_column("open_positions", "adx_decay_exit", "TEXT")
             self._ensure_column("open_positions", "adx_peak", "REAL")
             self._ensure_column("open_positions", "adx_neg_bars", "INTEGER DEFAULT 0")
+            self._ensure_column("open_positions", "max_adds", "INTEGER")
+            self._ensure_column("open_positions", "adds_used", "INTEGER DEFAULT 0")
             self.conn.commit()
         except Exception:  # noqa: BLE001 - never block startup on a migration
             pass
@@ -296,7 +298,7 @@ class LiveDB:
             "symbol", "side", "qty", "entry_price", "entry_ts", "strategy",
             "stop", "target", "rationale", "horizon", "trail_atr_mult", "trail_pct",
             "with_trend", "init_stop", "planned_risk", "auto_scale_r", "auto_scale_frac", "scaled",
-            "adx_decay_exit", "adx_peak", "adx_neg_bars",
+            "adx_decay_exit", "adx_peak", "adx_neg_bars", "max_adds", "adds_used",
         )
         params = [pos_dict.get(c) for c in cols]
         self.conn.execute(

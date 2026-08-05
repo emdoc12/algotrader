@@ -150,6 +150,8 @@ class PaperBroker:
                 "adx_decay_exit": _load_json(row["adx_decay_exit"]) if "adx_decay_exit" in row.keys() else None,
                 "adx_peak": (row["adx_peak"] if "adx_peak" in row.keys() else None),
                 "adx_neg_bars": int(row["adx_neg_bars"] or 0) if "adx_neg_bars" in row.keys() else 0,
+                "max_adds": (row["max_adds"] if "max_adds" in row.keys() else None),
+                "adds_used": int(row["adds_used"] or 0) if "adds_used" in row.keys() else 0,
             }
 
         last = self.db.last_equity()
@@ -280,6 +282,8 @@ class PaperBroker:
                                if pos.get("adx_decay_exit") else None),
             "adx_peak": pos.get("adx_peak"),
             "adx_neg_bars": int(pos.get("adx_neg_bars") or 0),
+            "max_adds": pos.get("max_adds"),
+            "adds_used": int(pos.get("adds_used") or 0),
         })
 
     def _audit(self, pos: dict, qty_closed: float, pnl: float):
@@ -308,6 +312,7 @@ class PaperBroker:
         auto_scale_r: Optional[float] = None,
         auto_scale_frac: Optional[float] = None,
         adx_decay_exit: Optional[dict] = None,
+        max_adds: Optional[int] = None,
     ) -> dict:
         """Market entry at the latest live price plus slippage.
 
@@ -349,7 +354,18 @@ class PaperBroker:
         if bad:
             return self._fail(symbol, side, qty, bad)
         if symbol in self._positions:
-            return self._fail(symbol, side, qty, "position already open")
+            held = self._positions[symbol]
+            same = held["side"] == side
+            return self._fail(symbol, side, qty, (
+                f"duplicate_symbol_position: {symbol} already has an open "
+                f"{held['side'].value} position ({held['qty']:g} @ "
+                f"{held['entry_price']:.2f}). "
+                + ("Use add_to_position to scale in — it blends into one position "
+                   "with a volume-weighted entry, so you keep the runner and the "
+                   "trailing ratchet."
+                   if same else
+                   "This order is the OPPOSITE side, which is a reduce or a flip — "
+                   "use take_partial or close_position explicitly.")))
 
         try:
             raw = self.latest_price(symbol)
@@ -488,6 +504,8 @@ class PaperBroker:
             "adx_decay_exit": adx_decay_exit,
             "adx_peak": None,      # highest ADX seen since entry
             "adx_neg_bars": 0,     # consecutive cycles with a negative ADX slope
+            "max_adds": int(max_adds) if max_adds is not None else None,
+            "adds_used": 0,
             # carried for realized-pnl accounting at close:
             "commission_paid": commission,
             "slippage_paid": slip,
@@ -635,6 +653,164 @@ class PaperBroker:
         return {"ok": True, "symbol": symbol, "closed_qty": round(qty_close, 6),
                 "remaining_qty": round(pos["qty"], 6), "exit_price": exit_px,
                 "pnl": round(pnl, 2), "trade_id": trade_id}
+
+    def add_to_position(self, symbol: str, qty: float, stop: Optional[float] = None,
+                        target: Optional[float] = None,
+                        auto_scale_r: Optional[float] = None,
+                        auto_scale_frac: Optional[float] = None,
+                        rationale: str = "") -> dict:
+        """Scale INTO an existing position, blending into one averaged position.
+
+        Building in tranches is the whole point: initiate on confirmation, add on
+        the first pullback that holds structure. Closing and re-entering at a
+        larger size is not a substitute — it surrenders the runner, pays two
+        extra sets of spread and slippage, and resets the trailing ratchet.
+
+        The blend is a volume-weighted average entry with summed quantity, so the
+        position stays a single row with a single stop/target. Risk is re-checked
+        at the POSITION level against the blended entry, because that — not the
+        tranche — is what is actually at risk.
+
+        Adds are SAME-DIRECTION only. An opposite-direction order against an open
+        position is a reduce or a flip, which must stay explicit (take_partial /
+        close_position), never an implicit side effect of an add.
+        """
+        symbol = str(symbol).upper()
+        pos = self._positions.get(symbol)
+        if pos is None:
+            return {"ok": False, "symbol": symbol, "error_code": "no_open_position",
+                    "reason": (f"no open {symbol} position to add to — use place_trade "
+                               "to initiate one")}
+        try:
+            qty = float(qty)
+        except (TypeError, ValueError):
+            return {"ok": False, "symbol": symbol, "error_code": "bad_qty",
+                    "reason": "qty must be a number"}
+        if qty <= 0:
+            return {"ok": False, "symbol": symbol, "error_code": "bad_qty",
+                    "reason": "qty must be positive; to reduce use take_partial"}
+
+        side = pos["side"]
+        max_adds = pos.get("max_adds")
+        adds_used = int(pos.get("adds_used") or 0)
+        if max_adds is not None and adds_used >= int(max_adds):
+            return {"ok": False, "symbol": symbol, "error_code": "max_adds_reached",
+                    "reason": (f"{symbol} has used all {int(max_adds)} planned adds "
+                               f"(max_adds set at initiation); close or re-plan")}
+
+        try:
+            raw = self.latest_price(symbol)
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "symbol": symbol, "error_code": "price_unavailable",
+                    "reason": f"price unavailable: {e}"}
+
+        from daytrader.core.contracts import initial_margin, spec_for
+        spec = spec_for(symbol)
+        mult = self._mult(symbol)
+        fill = self._entry_fill(side, raw)
+        add_notional = fill * qty * mult
+        commission = self._commission(qty, symbol)
+        slip = abs(fill - raw) * qty * mult
+
+        old_qty = float(pos["qty"])
+        new_qty = old_qty + qty
+        blended = (float(pos["entry_price"]) * old_qty + fill * qty) / new_qty
+        eff_stop = float(stop) if stop is not None else pos.get("stop")
+
+        # ---- risk rails, evaluated on the BLENDED position ------------------
+        if eff_stop is not None:
+            if side == Side.LONG and eff_stop >= blended:
+                return {"ok": False, "symbol": symbol, "error_code": "bad_stop",
+                        "reason": (f"long stop {eff_stop:.2f} must be BELOW the blended "
+                                   f"entry {blended:.2f} (adding raised your average)")}
+            if side == Side.SHORT and eff_stop <= blended:
+                return {"ok": False, "symbol": symbol, "error_code": "bad_stop",
+                        "reason": (f"short stop {eff_stop:.2f} must be ABOVE the blended "
+                                   f"entry {blended:.2f} (adding lowered your average)")}
+        eq = self.equity()
+        total_risk = (abs(blended - eff_stop) * new_qty * mult) if eff_stop is not None else None
+        if eff_stop is not None and eq > 0:
+            cap = _envf("MAX_TRADE_RISK_PCT", 2.0) / 100.0 * eq
+            if total_risk > cap:
+                return {"ok": False, "symbol": symbol, "error_code": "risk_cap",
+                        "reason": (f"blended position risk ${total_risk:,.0f} "
+                                   f"({new_qty:g} @ {blended:.2f} → stop {eff_stop:.2f}) "
+                                   f"exceeds the {_envf('MAX_TRADE_RISK_PCT', 2.0):.1f}% cap "
+                                   f"(${cap:,.0f}); add less or tighten the stop"),
+                        "blended_entry": round(blended, 4), "total_qty": new_qty,
+                        "total_planned_risk": round(total_risk, 2)}
+
+        # ---- funding ---------------------------------------------------------
+        if spec is not None:
+            need = initial_margin(symbol, qty) + commission
+            avail = self.buying_power()
+            if need > avail:
+                return {"ok": False, "symbol": symbol, "error_code": "insufficient_margin",
+                        "reason": (f"add needs ${need:,.0f} margin, ${avail:,.0f} available")}
+            self._cash -= commission
+        elif side == Side.LONG:
+            from daytrader.live.tastytrade_margin import equity_buying_power_multiple
+            bp_mult = equity_buying_power_multiple()
+            if bp_mult <= 1.0 and (add_notional + commission) > self._cash:
+                return {"ok": False, "symbol": symbol, "error_code": "insufficient_cash",
+                        "reason": (f"add needs ${add_notional + commission:,.2f}, "
+                                   f"${self._cash:,.2f} cash available")}
+            self._cash -= add_notional + commission
+        else:
+            self._cash += add_notional - commission
+
+        # ---- blend -----------------------------------------------------------
+        pos["qty"] = new_qty
+        pos["entry_price"] = round(blended, 6)
+        if stop is not None:
+            pos["stop"] = float(stop)
+        if target is not None:
+            pos["target"] = float(target)
+        # R is measured from the BLENDED entry to the stop in force after the add,
+        # so every R-based mechanism (auto-scale, breakeven) reflects the position
+        # that actually exists rather than the first tranche.
+        pos["init_stop"] = pos.get("stop")
+        pos["planned_risk"] = round(total_risk, 2) if total_risk is not None else None
+        pos["adds_used"] = adds_used + 1
+        pos["commission_paid"] = float(pos.get("commission_paid", 0.0)) + commission
+        pos["slippage_paid"] = float(pos.get("slippage_paid", 0.0)) + slip
+        if auto_scale_r is not None:
+            pos["auto_scale_r"] = float(auto_scale_r)
+        if auto_scale_frac is not None:
+            pos["auto_scale_frac"] = float(auto_scale_frac)
+        # Re-arm the scale-out against the new blended level. A position that
+        # already scaled once is materially different after an add, and leaving
+        # it disarmed would silently drop the protection. Pass auto_scale_frac=0
+        # to keep a core hold unmanaged.
+        rearmed = bool(pos.get("scaled")) and float(pos.get("auto_scale_frac") or 0) > 0
+        if rearmed:
+            pos["scaled"] = False
+        self._persist_position(pos)
+        self._persist_equity()
+        self.db.log_agent(pos.get("strategy") or "agent", "add_to_position",
+                          f"{symbol} +{qty:g} @ {fill:.4f} -> {new_qty:g} @ {blended:.4f}")
+
+        out = {
+            "ok": True, "symbol": symbol, "side": side.value,
+            "added_qty": qty, "add_fill_price": round(fill, 4),
+            "total_qty": new_qty,
+            "blended_entry": round(blended, 4),
+            "stop": pos.get("stop"), "target": pos.get("target"),
+            "total_planned_risk": round(total_risk, 2) if total_risk is not None else None,
+            "risk_pct_of_equity": round(100.0 * total_risk / eq, 3) if (total_risk and eq > 0) else None,
+            "adds_used": pos["adds_used"], "max_adds": max_adds,
+            "commission": round(commission, 4),
+            "auto_scale_r": pos.get("auto_scale_r"),
+            "auto_scale_frac": pos.get("auto_scale_frac"),
+            "note": (f"Blended into ONE position: {new_qty:g} @ {blended:.4f}. R is now "
+                     f"measured from the blended entry."
+                     + (" Scale-out re-armed at the new level." if rearmed else "")
+                     + (" auto_scale_frac=0 → no server-side scaling on this hold."
+                        if float(pos.get("auto_scale_frac") or 0) == 0 else "")),
+        }
+        if rationale:
+            out["rationale"] = rationale
+        return out
 
     def modify_position(self, symbol: str, stop: Optional[float] = None,
                         target: Optional[float] = None) -> dict:
@@ -860,6 +1036,8 @@ class PaperBroker:
                 "adx_decay_exit": pos.get("adx_decay_exit"),
                 "adx_peak": pos.get("adx_peak"),
                 "adx_neg_bars": pos.get("adx_neg_bars") or 0,
+                "max_adds": pos.get("max_adds"),
+                "adds_used": int(pos.get("adds_used") or 0),
                 "rationale": pos.get("rationale", ""),
             })
         return out

@@ -122,9 +122,105 @@ def http_json(
             body = e.read().decode("utf-8", "ignore")[:300]
         except Exception:  # noqa: BLE001
             body = ""
-        return {"error": f"HTTP {e.code}", "detail": body}
+        out = diagnose_http(e.code, url, body)
+        record_provider_error(url, out)
+        return out
     except Exception as e:  # noqa: BLE001 - network/json/timeout
-        return {"error": repr(e)[:200]}
+        out = {"ok": False, "error_code": "network_error",
+               "error": repr(e)[:200],
+               "hint": "Transient network/timeout or a malformed response. Retry once; "
+                       "if it persists the provider is likely down."}
+        record_provider_error(url, out)
+        return out
+
+
+# --------------------------------------------------------------------------- #
+# provider health: make an unavailable feed VISIBLE instead of silent          #
+# --------------------------------------------------------------------------- #
+# A bare "HTTP 403" tells a desk nothing about whether the key is missing, the
+# plan lacks the endpoint, or it is simply rate-limited — so it cannot decide
+# between waiting, switching source, or trading without the confluence. These
+# map each status onto the one action that actually resolves it.
+_KEY_ENV_BY_HOST = {
+    "unusualwhales.com": ("UNUSUAL_WHALES_API_KEY", "Unusual Whales"),
+    "bullflow.io": ("BULLFLOW_API_KEY", "BullFlow"),
+    "polygon.io": ("POLYGON_API_KEY", "Polygon"),
+    "quiverquant.com": ("QUIVER_API_KEY", "Quiver"),
+    "finviz.com": ("FINVIZ_AUTH_TOKEN", "Finviz Elite"),
+}
+
+# provider -> {code, error, ts} for the most recent failure.
+_PROVIDER_HEALTH: dict[str, dict] = {}
+
+
+def _provider_for(url: str) -> tuple[str, str | None]:
+    host = ""
+    try:
+        host = (urllib.parse.urlparse(url).hostname or "").lower()
+    except Exception:  # noqa: BLE001
+        pass
+    for suffix, (env_key, label) in _KEY_ENV_BY_HOST.items():
+        if host == suffix or host.endswith("." + suffix):
+            return label, env_key
+    return host or "unknown", None
+
+
+def diagnose_http(code: int, url: str, body: str = "") -> dict:
+    """Turn a status code into an actionable error the desk can act on."""
+    label, env_key = _provider_for(url)
+    has_key = bool(os.environ.get(env_key)) if env_key else None
+    base = {"ok": False, "provider": label, "http_status": code,
+            "detail": (body or "")[:300]}
+    if code in (401, 403):
+        if env_key and not has_key:
+            return {**base, "error_code": "missing_credentials",
+                    "error": f"{label} rejected the request ({code}) and no API key is set.",
+                    "hint": f"Add {env_key} in the dashboard Settings tab."}
+        return {**base, "error_code": "auth_or_plan",
+                "error": (f"{label} returned {code} WITH a key present — the key is "
+                          "invalid/expired, or your plan does not include this endpoint."),
+                "hint": (f"Check the {label} subscription covers this endpoint, then "
+                         f"re-issue {env_key} in Settings. This is NOT a transient error; "
+                         "retrying will not help.")}
+    if code == 429:
+        return {**base, "error_code": "rate_limited",
+                "error": f"{label} rate limit hit ({code}).",
+                "hint": "Back off and retry later; results are cached for 30s per URL."}
+    if code == 404:
+        return {**base, "error_code": "not_found",
+                "error": f"{label} has no such endpoint or symbol ({code}).",
+                "hint": "Check the ticker; the provider may not cover it."}
+    if 500 <= code < 600:
+        return {**base, "error_code": "provider_down",
+                "error": f"{label} server error ({code}).",
+                "hint": "Provider-side; retry later."}
+    return {**base, "error_code": f"http_{code}", "error": f"{label} returned HTTP {code}."}
+
+
+def record_provider_error(url: str, err: dict) -> None:
+    label, _ = _provider_for(url)
+    _PROVIDER_HEALTH[label] = {
+        "error_code": err.get("error_code"), "error": err.get("error"),
+        "hint": err.get("hint"), "http_status": err.get("http_status"),
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime()),
+    }
+
+
+def provider_health() -> dict:
+    """Configured providers plus the most recent failure for each, if any.
+
+    Surfaced in the snapshot so a desk knows a confluence source is unavailable
+    BEFORE it builds a plan around it, rather than discovering it mid-cycle.
+    """
+    out = {"configured": configured_providers(), "degraded": {}}
+    for label, info in _PROVIDER_HEALTH.items():
+        out["degraded"][label] = info
+    if out["degraded"]:
+        out["note"] = ("These data sources failed on their last call. An "
+                       "'auth_or_plan' or 'missing_credentials' code will NOT fix itself "
+                       "— do not gate an entry on confluence you cannot fetch; either "
+                       "trade the setup on its own merits and say so, or stand aside.")
+    return out
 
 
 def http_text(url: str, params: dict | None = None, headers: dict | None = None,

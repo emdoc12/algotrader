@@ -681,6 +681,16 @@ def market_only(symbols: list[str] | None = None, interval: str = "5m") -> dict:
         "fresh_signals": fresh,
         "quotes": quote_map,
     }
+    # Data-source health: a desk must know a confluence source is unavailable
+    # BEFORE it builds a plan around it, not after the call fails mid-cycle.
+    try:
+        from daytrader.data.feeds.base import provider_health
+        ph = provider_health()
+        if ph.get("configured") or ph.get("degraded"):
+            out["data_providers"] = ph
+    except Exception:  # noqa: BLE001
+        pass
+
     # Optional enrichment: if the owner has configured tastytrade, overlay live
     # READ-ONLY quotes + option chains/Greeks. Degrades to Yahoo-only otherwise.
     try:
