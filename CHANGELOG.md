@@ -9,6 +9,27 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.29.1] — 2026-08-05
+
+### Fixed — the options-flow 403 was ours, not the provider's
+The 403 was **not** a credential or plan problem. `http_json`/`http_text` sent no
+User-Agent, so requests went out as `Python-urllib/3.x` — a signature Cloudflare
+bans outright (**error 1010, `browser_signature_banned`**). The block happened at
+the CDN, before the request ever reached the API, and presented as a plain 403
+that looked exactly like an auth failure.
+
+- Both helpers now send a real User-Agent (the same one `data/loader.py` has
+  always used, which is why bar data was never affected). Verified against the
+  live endpoint: default UA → `403 Cloudflare 1010`; with a UA → `401
+  authentication_required` from the actual Unusual Whales API, i.e. the request
+  now arrives and the only thing missing is the key.
+- **Two providers were affected, not one**: Unusual Whales and Quiver were both
+  fully unreachable. Polygon and BullFlow were unaffected (their CDNs allow the
+  default UA), which is why the failure looked provider-specific.
+- A CDN block is now classified as **`blocked_by_cdn`** and states plainly that
+  it is not an auth or plan problem, so this cannot be misdiagnosed as a bad key
+  again — which is exactly what v6.29.0's `auth_or_plan` diagnosis did.
+
 ## [6.29.0] — 2026-08-05
 
 ### Added — dev request: scale into an existing position

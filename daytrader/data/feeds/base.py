@@ -85,6 +85,21 @@ class _SafeRedirect(urllib.request.HTTPRedirectHandler):
 
 _SAFE_OPENER = urllib.request.build_opener(_SafeRedirect)
 
+# Providers front their APIs with Cloudflare, which bans the stdlib's default
+# "Python-urllib/3.x" User-Agent outright (error 1010, browser_signature_banned).
+# That surfaces as a 403 BEFORE the request ever reaches the API, so it looks
+# exactly like an auth or plan failure and sends you off checking a key that was
+# never wrong. Sending a real UA — the same one the bar loader has always used —
+# gets the request to the API, where a genuine 401/403 means what it says.
+_UA = "Mozilla/5.0 (compatible; daytrader/1.0)"
+
+
+def _with_ua(headers: dict | None) -> dict:
+    h = dict(headers or {})
+    if not any(k.lower() == "user-agent" for k in h):
+        h["User-Agent"] = _UA
+    return h
+
 
 def http_json(
     url: str,
@@ -109,7 +124,7 @@ def http_json(
         hit = _CACHE.get(url)
         if hit and now - hit[0] < cache_ttl:
             return hit[1]
-        req = urllib.request.Request(url, headers=headers or {})
+        req = urllib.request.Request(url, headers=_with_ua(headers))
         # NB: the urllib.request MODULE exposes urlopen(), not open(); only an
         # OpenerDirector (the SSRF-guarded opener) has .open().
         opener = _SAFE_OPENER.open if enforce_public else urllib.request.urlopen
@@ -171,6 +186,15 @@ def diagnose_http(code: int, url: str, body: str = "") -> dict:
     has_key = bool(os.environ.get(env_key)) if env_key else None
     base = {"ok": False, "provider": label, "http_status": code,
             "detail": (body or "")[:300]}
+    blob = (body or "").lower()
+    if "cloudflare" in blob or "error_code\":1010" in blob or "browser_signature_banned" in blob:
+        return {**base, "error_code": "blocked_by_cdn",
+                "error": (f"{label}'s CDN blocked the request before it reached the API "
+                          f"({code}) — this is NOT an auth or plan problem."),
+                "hint": ("The provider's CDN rejected the client signature (Cloudflare "
+                         "1010). The API key is irrelevant here. Usually a User-Agent "
+                         "issue — daytrader sends a real one; if this appears, the "
+                         "provider has tightened bot rules.")}
     if code in (401, 403):
         if env_key and not has_key:
             return {**base, "error_code": "missing_credentials",
@@ -232,7 +256,7 @@ def http_text(url: str, params: dict | None = None, headers: dict | None = None,
             url = url + ("&" if "?" in url else "?") + urllib.parse.urlencode(params)
         if enforce_public and not safe_public_url(url):
             return None
-        req = urllib.request.Request(url, headers=headers or {})
+        req = urllib.request.Request(url, headers=_with_ua(headers))
         opener = _SAFE_OPENER.open if enforce_public else urllib.request.urlopen
         return opener(req, timeout=timeout).read(_MAX_BYTES).decode("utf-8", "ignore")
     except Exception:  # noqa: BLE001
