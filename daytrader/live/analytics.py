@@ -167,7 +167,75 @@ def with_trend_tag(label) -> str:
     return "unknown"
 
 
-def performance_breakdown(trades, group_by=("strategy",)) -> list[dict]:
+# Every dimension performance_breakdown can group by. Exported so callers echo
+# what was actually applied instead of guessing.
+VALID_GROUP_BY = ("strategy", "strategy_raw", "direction", "with_trend", "tod_bucket",
+                  "breadth_bucket", "breadth_trend", "sector", "sector_adx_bucket")
+
+
+def breadth_bucket_of(t: dict) -> str:
+    """Bucket a trade by the breadth recorded AT ENTRY.
+
+    Trades predating breadth capture return "unknown" rather than being silently
+    lumped into a bucket — an unlabelled trade is not evidence.
+    """
+    from daytrader.core.breadth import bucket
+    b = t.get("breadth_bucket")
+    if b:
+        return str(b)
+    pct = t.get("breadth_pct")
+    return bucket(pct) or "unknown"
+
+
+def _numeric_bucket(v, edges, labels) -> str:
+    if v is None:
+        return "unknown"
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return "unknown"
+    for edge, label in zip(edges, labels):
+        if v <= edge:
+            return label
+    return labels[-1]
+
+
+def _apply_filters(trades, filters) -> list:
+    """Keep only trades matching {field: value | {min,max} | [allowed,...]}.
+
+    Lets a desk ask the pointed question directly — "how do my EMA shorts do when
+    breadth was <= 35?" — instead of grouping and eyeballing.
+    """
+    if not filters or not isinstance(filters, dict):
+        return list(trades)
+    out = []
+    for t in trades:
+        keep = True
+        for field, cond in filters.items():
+            v = t.get(field)
+            if field == "breadth_bucket" and v is None:
+                v = breadth_bucket_of(t)
+            if isinstance(cond, dict):
+                lo, hi = cond.get("min"), cond.get("max")
+                try:
+                    fv = float(v)
+                except (TypeError, ValueError):
+                    keep = False; break
+                if lo is not None and fv < float(lo):
+                    keep = False; break
+                if hi is not None and fv > float(hi):
+                    keep = False; break
+            elif isinstance(cond, (list, tuple, set)):
+                if v not in cond:
+                    keep = False; break
+            elif v != cond:
+                keep = False; break
+        if keep:
+            out.append(t)
+    return out
+
+
+def performance_breakdown(trades, group_by=("strategy",), filters=None) -> list[dict]:
     """Group realized (closed, pnl-bearing) trades and compute per-group stats.
 
     group_by may contain "strategy" (canonicalized to a built-in bucket),
@@ -175,10 +243,10 @@ def performance_breakdown(trades, group_by=("strategy",)) -> list[dict]:
     (with_trend/counter_trend/unknown, inferred from the label), and
     "tod_bucket" (ET session window). Rows are sorted by total P&L descending.
     """
-    valid = ("strategy", "strategy_raw", "direction", "with_trend", "tod_bucket")
-    dims = [d for d in (group_by or []) if d in valid]
+    dims = [d for d in (group_by or []) if d in VALID_GROUP_BY]
     if not dims:
         dims = ["strategy"]
+    trades = _apply_filters(trades, filters)
     groups: dict[tuple, list] = {}
     for t in trades:
         pnl = t.get("pnl")
@@ -198,6 +266,18 @@ def performance_breakdown(trades, group_by=("strategy",)) -> list[dict]:
                 # fall back to inferring from the label for older trades.
                 wt = t.get("with_trend")
                 key.append(wt if wt else with_trend_tag(t.get("strategy")))
+            elif d == "breadth_bucket":
+                key.append(breadth_bucket_of(t))
+            elif d == "breadth_trend":
+                # Deterioration vs improvement at entry — often the real signal.
+                key.append(_numeric_bucket(t.get("breadth_change_20m"),
+                                           [-5.0, 5.0],
+                                           ["deteriorating", "flat", "improving"]))
+            elif d == "sector":
+                key.append(t.get("sector") or "unknown")
+            elif d == "sector_adx_bucket":
+                key.append(_numeric_bucket(t.get("sector_avg_adx"), [20.0, 30.0],
+                                           ["weak", "moderate", "strong"]))
             else:
                 key.append(tod_bucket(t.get("entry_ts")))
         groups.setdefault(tuple(key), []).append(float(pnl))

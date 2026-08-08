@@ -152,6 +152,7 @@ class PaperBroker:
                 "adx_neg_bars": int(row["adx_neg_bars"] or 0) if "adx_neg_bars" in row.keys() else 0,
                 "max_adds": (row["max_adds"] if "max_adds" in row.keys() else None),
                 "adds_used": int(row["adds_used"] or 0) if "adds_used" in row.keys() else 0,
+                "entry_ctx": _load_json(row["entry_ctx"]) if "entry_ctx" in row.keys() else None,
             }
 
         last = self.db.last_equity()
@@ -182,10 +183,48 @@ class PaperBroker:
     # ------------------------------------------------------------------ #
     # pricing                                                             #
     # ------------------------------------------------------------------ #
-    def set_cycle_context(self, spy_direction: Optional[str] = None) -> None:
-        """Per-cycle market context (currently SPY's direction) used to tag new
-        entries as with_trend / counter_trend at fill time."""
+    def set_cycle_context(self, spy_direction: Optional[str] = None,
+                          breadth: Optional[dict] = None,
+                          sectors: Optional[list] = None) -> None:
+        """Per-cycle market context, stamped onto entries at fill time.
+
+        Recording the TAPE at entry — not just the chart — is what lets
+        ``get_performance_breakdown`` later answer "do these shorts only work on
+        broad-down days?". Without it the question is unanswerable after the
+        fact, because breadth is gone by the time the trade closes.
+        """
         self._cycle_spy_direction = spy_direction
+        self._cycle_breadth = breadth or None
+        self._cycle_sectors = sectors or None
+
+    def _entry_context(self, symbol: str) -> dict:
+        """Breadth + this symbol's sector cluster, as of the current cycle."""
+        from daytrader.core.breadth import bucket
+        b = getattr(self, "_cycle_breadth", None) or {}
+        pct = b.get("breadth_pct")
+        out = {
+            "breadth_pct": float(pct) if pct is not None else None,
+            "breadth_advancers": b.get("advancers"),
+            "breadth_total": b.get("total"),
+            "breadth_bucket": b.get("breadth_bucket") or bucket(pct),
+            "breadth_change_20m": b.get("breadth_change_20m"),
+            "sector": None, "sector_avg_adx": None, "sector_pct_down": None,
+        }
+        try:
+            from daytrader.live.market_state import _SECTORS
+            from daytrader.core.breadth import sector_of
+            sec = sector_of(symbol, _SECTORS)
+            out["sector"] = sec
+            for row in (getattr(self, "_cycle_sectors", None) or []):
+                if row.get("sector") == sec:
+                    out["sector_avg_adx"] = row.get("avg_adx")
+                    # sector_clusters reports rsi/adx aggregates; pct EMA-down
+                    # comes from the same cluster row when present.
+                    out["sector_pct_down"] = row.get("pct_ema_down")
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+        return out
 
     def set_cycle_quotes(self, quote_map: Optional[dict[str, float]]) -> None:
         """Pin a per-cycle quote map. Fills served from these prices match
@@ -284,6 +323,8 @@ class PaperBroker:
             "adx_neg_bars": int(pos.get("adx_neg_bars") or 0),
             "max_adds": pos.get("max_adds"),
             "adds_used": int(pos.get("adds_used") or 0),
+            "entry_ctx": (__import__("json").dumps(pos["entry_ctx"])
+                          if pos.get("entry_ctx") else None),
         })
 
     def _audit(self, pos: dict, qty_closed: float, pnl: float):
@@ -482,6 +523,7 @@ class PaperBroker:
         from daytrader.live.analytics import with_trend_label
         with_trend = with_trend_label(symbol, side, self._cycle_spy_direction)
         planned_risk = abs(fill - stop) * qty if stop is not None else None
+        entry_ctx = self._entry_context(symbol)
         self._positions[symbol] = {
             "symbol": symbol,
             "side": side,
@@ -506,6 +548,7 @@ class PaperBroker:
             "adx_neg_bars": 0,     # consecutive cycles with a negative ADX slope
             "max_adds": int(max_adds) if max_adds is not None else None,
             "adds_used": 0,
+            "entry_ctx": entry_ctx,
             # carried for realized-pnl accounting at close:
             "commission_paid": commission,
             "slippage_paid": slip,
@@ -573,6 +616,9 @@ class PaperBroker:
             "with_trend": wt,
             "planned_risk": planned_risk,
             "risk_overrun": overrun,
+            # Entry-time tape context, so the breakdown can later ask whether
+            # this setup only works on a broad-down day.
+            **(pos.get("entry_ctx") or {}),
         })
         del self._positions[symbol]
         self.db.delete_position(symbol)
@@ -641,6 +687,7 @@ class PaperBroker:
             "commission": entry_comm + commission, "slippage_cost": entry_slip + slip,
             "pnl": pnl, "exit_reason": reason, "rationale": pos.get("rationale", ""),
             "with_trend": wt, "planned_risk": planned_risk, "risk_overrun": overrun,
+            **(pos.get("entry_ctx") or {}),
         })
         # Shrink the remaining position and its carried costs.
         pos["qty"] = qty_total - qty_close

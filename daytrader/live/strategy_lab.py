@@ -206,9 +206,14 @@ def run_backtest(
         # Inject SPY's close so RS-vs-SPY features are computable in the backtest.
         spy_df = data.get("SPY")
         regset = pinned if pinned else {Regime.ANY.value}
+        # Cross-sectional context so a rule can condition on the TAPE (breadth,
+        # sector cluster), not just the single chart. Built from the same universe
+        # the backtest trades, so it is identical to what the desk saw live.
+        market_ctx = _market_context(data, interval)
         for strat in custom_strats:
             if spy_df is not None:
                 strat._spy_close = spy_df["close"]
+            strat._market = market_ctx
             allocs.append(Allocation(strategy=strat, regimes=set(regset), weight=1.0))
     else:
         for key in names:
@@ -349,6 +354,38 @@ def run_backtest(
         "equity_curve": curve,
         "sample_trades": sample,
     }
+
+
+def _market_context(data: dict, interval: str) -> dict:
+    """Cross-sectional context: {"_global": {...}, "<SYMBOL>": {...}}.
+
+    Breadth is universe-wide and shared under "_global"; sector-cluster series
+    are per-symbol, keyed by ticker, and merged over the global entry when
+    features are built for that symbol.
+    """
+    try:
+        from daytrader.core.breadth import (bars_per_20m, market_series,
+                                            sector_series, sector_of)
+        from daytrader.live.market_state import _SECTORS
+        n20 = bars_per_20m(interval)
+        b = market_series(data, n20)
+        if not b:
+            return {}
+        ctx = {"_global": {
+            "breadth_pct": b["breadth_pct"],
+            "breadth_advancers": b["advancers"],
+            "breadth_total": b["total"],
+            "breadth_change_20m": b["breadth_change_20m"],
+        }}
+        secs = sector_series(data, _SECTORS, n20)
+        for sym in data:
+            sec = sector_of(sym, _SECTORS)
+            row = secs.get(sec) if sec else None
+            if row:
+                ctx[sym] = {k: v for k, v in row.items() if k != "members"}
+        return ctx
+    except Exception:  # noqa: BLE001 - context is optional, never fatal
+        return {}
 
 
 def _verdict(m) -> str:

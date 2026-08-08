@@ -67,6 +67,11 @@ _FEATURES = {
     # Relative-strength vs SPY (needs SPY injected; NaN otherwise) + multi-bar ADX.
     "rs_vs_spy_pct", "rs_slope_20m", "rs_persistence", "rs_stable",
     "adx_rising_nbars", "adx_decaying_nbars",
+    # Cross-sectional market context (needs the universe injected; NaN otherwise).
+    # A rule can now require the TAPE to agree, not just the chart — e.g. an EMA
+    # short only on a broad-down day: {"left":"breadth_pct","op":"<=","right":35}.
+    "breadth_pct", "breadth_advancers", "breadth_total", "breadth_change_20m",
+    "sector_avg_adx", "sector_avg_adx_slope", "sector_pct_down", "sector_breadth_pct",
 }
 
 
@@ -161,16 +166,36 @@ class CustomRuleStrategy(Strategy):
 
     # -- feature matrix (all causal) ------------------------------------
     def _features(self, df: pd.DataFrame) -> dict:
-        return build_features(df, getattr(self, "_spy_close", None))
+        # Market context is {symbol: {...}} plus a "_global" entry for the
+        # universe-wide breadth every symbol shares; sector series differ per
+        # symbol, so resolve by the ticker the loader stamped on the frame.
+        mk = getattr(self, "_market", None) or {}
+        ctx = dict(mk.get("_global") or {})
+        sym = None
+        try:
+            if "symbol" in df.columns and len(df):
+                sym = str(df["symbol"].iloc[0]).upper()
+        except Exception:  # noqa: BLE001
+            sym = None
+        if sym and isinstance(mk.get(sym), dict):
+            ctx.update(mk[sym])
+        return build_features(df, getattr(self, "_spy_close", None), ctx or None)
 
     def generate(self, df: pd.DataFrame) -> list[Signal]:
         return _generate_signals(self, df)
 
 
-def build_features(df: pd.DataFrame, spy_close=None) -> dict:
+def build_features(df: pd.DataFrame, spy_close=None, market=None) -> dict:
     """Compute the full causal feature matrix (dict of {name: np.ndarray}) used by
     the custom-strategy DSL, the backtest, and the staged-order condition check.
-    ``spy_close`` (optional) enables the rs_* relative-strength features."""
+
+    ``spy_close`` (optional) enables the rs_* relative-strength features.
+    ``market`` (optional) is a {feature_name: Series} of cross-sectional context
+    (breadth_*, sector_*) built by :mod:`daytrader.core.breadth`; it is reindexed
+    onto this symbol's bars and forward-filled. Absent, those features are NaN —
+    so a rule that conditions on breadth simply never fires rather than silently
+    evaluating against garbage.
+    """
     close = df["close"]
     high, low = df["high"], df["low"]
     macd_line, macd_sig, macd_hist = ind.macd(close)
@@ -220,6 +245,18 @@ def build_features(df: pd.DataFrame, spy_close=None) -> dict:
         nanv = pd.Series(np.nan, index=df.index)
         for k in ("rs_vs_spy_pct", "rs_slope_20m", "rs_persistence", "rs_stable"):
             feats[k] = nanv
+    # Cross-sectional context, aligned onto this symbol's bars.
+    _MARKET_FEATURES = ("breadth_pct", "breadth_advancers", "breadth_total",
+                        "breadth_change_20m", "sector_avg_adx",
+                        "sector_avg_adx_slope", "sector_pct_down",
+                        "sector_breadth_pct")
+    mk = market or {}
+    for name in _MARKET_FEATURES:
+        ser = mk.get(name)
+        if ser is None:
+            feats[name] = pd.Series(np.nan, index=df.index)
+        else:
+            feats[name] = pd.Series(ser).reindex(df.index).ffill()
     # Consecutive-bar ADX rising / decaying streaks.
     adx_ser = feats["adx"]
     rising = adx_ser.diff() > 0

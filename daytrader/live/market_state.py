@@ -244,7 +244,33 @@ def _sector_clusters(per_symbol: dict) -> list[dict]:
     return out
 
 
-def _market_summary(per_symbol: dict) -> dict:
+def _breadth_block(ups: int, downs: int, total: int, data: dict | None,
+                   interval: str) -> dict:
+    """Breadth with the fields the desks actually gate on: a percentage, a
+    bucket, and — often the real signal — whether it is deteriorating."""
+    from daytrader.core.breadth import bars_per_20m, bucket, market_series
+    pct = round(100.0 * ups / total, 1) if total else None
+    out = {"advancers": ups, "decliners": downs, "total": total,
+           "breadth_pct": pct, "breadth_bucket": bucket(pct)}
+    try:
+        b = market_series(data or {}, bars_per_20m(interval))
+        if b:
+            chg = b["breadth_change_20m"]
+            live = b["breadth_pct"]
+            if len(chg) and pd.notna(chg.iloc[-1]):
+                out["breadth_change_20m"] = round(float(chg.iloc[-1]), 1)
+            if len(live) and pd.notna(live.iloc[-1]):
+                out["breadth_pct_bars"] = round(float(live.iloc[-1]), 1)
+    except Exception:  # noqa: BLE001
+        pass
+    out["note"] = ("breadth_pct is % of the scanned universe green on the day. "
+                   "weak <=35, strong >=65. breadth_change_20m is the 20-minute "
+                   "change — deterioration often matters more than the level.")
+    return out
+
+
+def _market_summary(per_symbol: dict, data: dict | None = None,
+                    interval: str = "5m") -> dict:
     """Top-level read of the tape for fast regime/trend-day detection.
 
     ``trend_day`` reflects whether the BROAD TAPE (SPY) is actually trending —
@@ -305,7 +331,7 @@ def _market_summary(per_symbol: dict) -> dict:
         "spy_adx_rising": spy_adx_slope > 0,
         "spy_ema_trend": spy_ema_trend,
         "spy_direction": direction,
-        "breadth": {"advancers": ups, "decliners": downs, "total": len(rows)},
+        "breadth": _breadth_block(ups, downs, len(rows), data, interval),
         "big_movers": big_movers[:8],
         "rs_leaders": leaders,
         "rs_laggers": laggers,
@@ -667,7 +693,7 @@ def market_only(symbols: list[str] | None = None, interval: str = "5m") -> dict:
     _add_rs_persistence(per_symbol, data)
     fresh = _fresh_signals(data)
     now_et = datetime.now(timezone.utc).astimezone()
-    summary = _market_summary(per_symbol)
+    summary = _market_summary(per_symbol, data, interval)
     now_et_t = datetime.now(ET_ZONE).time()
     out = {
         "timestamp": now_et.isoformat(),

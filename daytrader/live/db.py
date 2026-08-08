@@ -190,6 +190,15 @@ class LiveDB:
             self._ensure_column("open_positions", "adx_neg_bars", "INTEGER DEFAULT 0")
             self._ensure_column("open_positions", "max_adds", "INTEGER")
             self._ensure_column("open_positions", "adds_used", "INTEGER DEFAULT 0")
+            self._ensure_column("open_positions", "entry_ctx", "TEXT")
+            # Entry-time TAPE context, so realized results can later be grouped
+            # by the breadth/sector that actually prevailed — unanswerable after
+            # the fact otherwise, since breadth is gone by the time a trade closes.
+            for c, d in (("breadth_pct", "REAL"), ("breadth_advancers", "REAL"),
+                         ("breadth_total", "REAL"), ("breadth_bucket", "TEXT"),
+                         ("breadth_change_20m", "REAL"), ("sector", "TEXT"),
+                         ("sector_avg_adx", "REAL"), ("sector_pct_down", "REAL")):
+                self._ensure_column("trades", c, d)
             self.conn.commit()
         except Exception:  # noqa: BLE001 - never block startup on a migration
             pass
@@ -272,6 +281,8 @@ class LiveDB:
             "symbol", "side", "strategy", "entry_ts", "entry_price", "qty",
             "exit_ts", "exit_price", "commission", "slippage_cost", "pnl",
             "exit_reason", "rationale", "with_trend", "planned_risk", "risk_overrun",
+            "breadth_pct", "breadth_advancers", "breadth_total", "breadth_bucket",
+            "breadth_change_20m", "sector", "sector_avg_adx", "sector_pct_down",
         )
         params = [trade_dict.get(c) for c in cols]
         cur = self.conn.execute(
@@ -299,6 +310,7 @@ class LiveDB:
             "stop", "target", "rationale", "horizon", "trail_atr_mult", "trail_pct",
             "with_trend", "init_stop", "planned_risk", "auto_scale_r", "auto_scale_frac", "scaled",
             "adx_decay_exit", "adx_peak", "adx_neg_bars", "max_adds", "adds_used",
+            "entry_ctx",
         )
         params = [pos_dict.get(c) for c in cols]
         self.conn.execute(

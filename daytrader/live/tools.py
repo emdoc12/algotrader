@@ -221,12 +221,26 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
             trades = db.recent_trades(limit=2000)
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": repr(e)}
-        rows = analytics.performance_breakdown(trades, group_by=group_by)
-        return {"ok": True, "group_by": [g for g in group_by if g in ("strategy", "tod_bucket")] or ["strategy"],
-                "breakdown": rows,
-                "note": ("Sorted by total P&L; time-of-day buckets are ET "
-                         "(open 9:30-10:00, morning 10:00-12:00, midday 12:00-14:00, late 14:00-16:00). "
-                         "Realized trades only.")}
+        filters = inp.get("filters")
+        rows = analytics.performance_breakdown(trades, group_by=group_by, filters=filters)
+        # Echo the dimensions ACTUALLY applied — the previous allowlist here was
+        # stale and silently reported "strategy" while grouping by something else.
+        applied = [g for g in group_by if g in analytics.VALID_GROUP_BY] or ["strategy"]
+        ignored = [g for g in group_by if g not in analytics.VALID_GROUP_BY]
+        out = {"ok": True, "group_by": applied, "breakdown": rows,
+               "note": ("Sorted by total P&L; time-of-day buckets are ET "
+                        "(open 9:30-10:00, morning 10:00-12:00, midday 12:00-14:00, "
+                        "late 14:00-16:00). Realized trades only. Tape context "
+                        "(breadth_*/sector_*) is recorded AT ENTRY, so trades taken "
+                        "before it shipped group as 'unknown' rather than being "
+                        "silently bucketed.")}
+        if ignored:
+            out["ignored_group_by"] = ignored
+            out["valid_group_by"] = list(analytics.VALID_GROUP_BY)
+        if filters:
+            out["filters_applied"] = filters
+            out["n_trades_after_filter"] = sum(r["n_trades"] for r in rows)
+        return out
 
     def get_recent_trades(inp: dict) -> dict:
         """Detailed round-trip trade blotter for post-trade review."""
@@ -851,8 +865,9 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "group_by": {"type": "array", "items": {"type": "string", "enum": ["strategy", "strategy_raw", "direction", "with_trend", "tod_bucket"]},
-                                 "description": "Dimensions to group by (default ['strategy']). 'strategy' = canonical built-in bucket; 'strategy_raw' = the exact label (so custom strategies like 'trend_follow' don't collapse into 'other'); 'direction' = long/short; 'with_trend' = with_trend/counter_trend (recorded from SPY direction at entry); 'tod_bucket' = ET session window. Combine for a setup×direction×time matrix."},
+                    "filters": {"type": "object", "description": "Keep only matching trades before grouping. Value forms: exact ({\"breadth_bucket\":\"weak\"}), range ({\"breadth_pct\":{\"max\":35}}), or allowed-list ({\"sector\":[\"semis\",\"mega_tech\"]}). Fields: breadth_pct, breadth_bucket, breadth_change_20m, sector, sector_avg_adx, sector_pct_down, with_trend, side, symbol, strategy."},
+                    "group_by": {"type": "array", "items": {"type": "string", "enum": ["strategy", "strategy_raw", "direction", "with_trend", "tod_bucket", "breadth_bucket", "breadth_trend", "sector", "sector_adx_bucket"]},
+                                 "description": "Dimensions to group by (default ['strategy']). 'strategy' = canonical built-in bucket; 'strategy_raw' = the exact label; 'direction' = long/short; 'with_trend' = with_trend/counter_trend (from SPY direction at entry); 'tod_bucket' = ET session window; 'breadth_bucket' = weak/mixed/strong breadth AT ENTRY (weak <=35% advancing, strong >=65%); 'breadth_trend' = deteriorating/flat/improving (20-min breadth change at entry); 'sector' = the symbol's sector cluster; 'sector_adx_bucket' = weak/moderate/strong sector ADX. Combine for a setup×tape matrix — e.g. ['strategy','breadth_bucket'] answers whether a short only works on broad-down days."},
                 },
             },
         },

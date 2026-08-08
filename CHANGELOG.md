@@ -9,6 +9,49 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.30.0] — 2026-08-05
+
+### Added — dev request: breadth / sector confirmation across research and review
+The failing SPY `ema_pullback` short (-$78.25) was technically clean on the chart
+and taken at breadth 13/21 when the plan wanted <=7. That mistake was
+un-analysable and un-testable: breadth existed only as a snapshot scalar, so
+`get_performance_breakdown` could not group by it and the rule grammar could not
+express it.
+
+New `daytrader/core/breadth.py` produces breadth and sector-cluster context as
+**time series over history**, not snapshot scalars — which is what lets the same
+numbers serve three places that previously could not agree.
+
+- **Rule grammar** — `backtest_custom_strategy` / `propose_hypothesis` accept
+  `breadth_pct`, `breadth_advancers`, `breadth_total`, `breadth_change_20m`,
+  `sector_avg_adx`, `sector_avg_adx_slope`, `sector_pct_down`,
+  `sector_breadth_pct`. A rule can now require the TAPE to agree, not just the
+  chart. Measured immediately on 45d/5m over 12 names: EMA short **PF 0.81** →
+  **0.90** with `breadth_pct <= 35` → **1.06** (alpha +2.05) with
+  `breadth_change_20m < 0`. Breadth is universe-wide and shared; sector series
+  are per-symbol, resolved from the ticker the loader stamps on each frame.
+  Absent context leaves the features NaN, so a breadth rule simply never fires
+  rather than evaluating against garbage.
+- **Entry-time recording** — every trade now stores the tape as it was at fill:
+  `breadth_pct`, `breadth_advancers`, `breadth_total`, `breadth_bucket`,
+  `breadth_change_20m`, `sector`, `sector_avg_adx`, `sector_pct_down`. This is
+  unrecoverable after the fact — breadth is gone by the time a trade closes.
+- **`get_performance_breakdown`** gains `breadth_bucket` (weak <=35% / mixed /
+  strong >=65%), `breadth_trend` (deteriorating / flat / improving), `sector`
+  and `sector_adx_bucket`, plus a `filters` argument taking exact values, ranges
+  (`{"breadth_pct":{"max":35}}`) or allowed-lists. Trades predating capture group
+  as `unknown` rather than being silently bucketed — an unlabelled trade is not
+  evidence.
+- **Live snapshot** breadth block now carries `breadth_pct`, `breadth_bucket`
+  and `breadth_change_20m` alongside the raw counts.
+
+### Fixed
+- `get_performance_breakdown` echoed a **stale** `group_by`: an allowlist of
+  `("strategy","tod_bucket")` meant a request grouped by `direction` or
+  `with_trend` was reported back as `strategy`. It now echoes the dimensions
+  actually applied and returns `ignored_group_by` + `valid_group_by` for any it
+  did not recognise, instead of silently substituting.
+
 ## [6.29.1] — 2026-08-05
 
 ### Fixed — the options-flow 403 was ours, not the provider's

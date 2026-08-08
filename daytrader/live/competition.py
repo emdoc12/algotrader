@@ -404,13 +404,17 @@ class Competition:
         base_adx = {sym: {"adx14": m.get("adx14"), "adx_slope": m.get("adx_slope")}
                     for sym, m in (market.get("market") or {}).items()
                     if m.get("adx14") is not None}
-        spy_dir = (market.get("market_summary") or {}).get("spy_direction")
+        _summary = market.get("market_summary") or {}
+        spy_dir = _summary.get("spy_direction")
+        cycle_breadth = _summary.get("breadth")
+        cycle_sectors = _summary.get("sector_clusters")
         for t in self.teams:
             self._risk_check(t)  # may halt + flatten this team's DAY trades
             # Per-team maps that also cover held-outside-scan symbols.
             q, a, x = self._held_symbol_data(t, cycle_quotes, base_atr, base_adx)
             t.broker.set_cycle_quotes(q)
-            t.broker.set_cycle_context(spy_direction=spy_dir)
+            t.broker.set_cycle_context(spy_direction=spy_dir,
+                                       breadth=cycle_breadth, sectors=cycle_sectors)
             try:
                 # Enforce server-side brackets EVERY cycle, even for halted teams
                 # — their surviving swing/long holds still need their stops run.
@@ -680,11 +684,15 @@ class Competition:
         base_adx = {sym: {"adx14": m.get("adx14"), "adx_slope": m.get("adx_slope")}
                     for sym, m in (market.get("market") or {}).items()
                     if m.get("adx14") is not None}
-        spy_dir = (market.get("market_summary") or {}).get("spy_direction")
+        _summary = market.get("market_summary") or {}
+        spy_dir = _summary.get("spy_direction")
+        cycle_breadth = _summary.get("breadth")
+        cycle_sectors = _summary.get("sector_clusters")
         for t in self.teams:
             q, a, x = self._held_symbol_data(t, cycle_quotes, base_atr, base_adx)
             t.broker.set_cycle_quotes(q)
-            t.broker.set_cycle_context(spy_direction=spy_dir)
+            t.broker.set_cycle_context(spy_direction=spy_dir,
+                                       breadth=cycle_breadth, sectors=cycle_sectors)
             try:
                 t.broker.manage_positions(q, a, x)
             finally:
