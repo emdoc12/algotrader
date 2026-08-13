@@ -1399,6 +1399,18 @@ function renderSettings(main, status){
     {def:"1.0", hint:"Server-enforced scale-out trigger in R multiples (R = entry→stop)."}));
   riskCard.appendChild(settingsTextField(status, "AUTO_SCALE_DEFAULT_FRAC", "AUTO_SCALE_DEFAULT_FRAC",
     {def:"0.5", hint:"Fraction auto-banked at +R, then stop to breakeven. 0 disables server-enforced scaling."}));
+  riskCard.appendChild(settingsTextField(status, "MAX_OPTION_RISK_PCT", "MAX_OPTION_RISK_PCT",
+    {def:"5.0", hint:
+      "Per-trade risk cap for OPTIONS, as %% of equity. Deliberately looser than the share cap: "
+      + "a share stop can be honored, an assigned put hands you stock you then manage, and the "
+      + "collateral cap already bounds commitment. Below about 3%% the wheel is unrunnable on "
+      + "any underlying over ~$40 in a $50k account."}));
+  riskCard.appendChild(settingsTextField(status, "MAX_OPTION_COLLATERAL_PCT", "MAX_OPTION_COLLATERAL_PCT",
+    {def:"25", hint:"Max %% of equity ONE options structure may tie up as collateral. A cash-secured put holds the whole strike."}));
+  riskCard.appendChild(settingsTextField(status, "OPTION_STRESS_MOVE_PCT", "OPTION_STRESS_MOVE_PCT",
+    {def:"20", hint:"Adverse underlying move used to size structures whose downside is the stock itself (cash-secured puts, covered calls). Width-bounded spreads are sized on true max loss instead."}));
+  riskCard.appendChild(settingsTextField(status, "OPTION_COMMISSION_PER_CONTRACT", "OPTION_COMMISSION_PER_CONTRACT",
+    {def:"0.65", hint:"Charged per contract on both open and close."}));
   riskCard.appendChild(settingsTextField(status, "FUTURES_SYMBOLS", "FUTURES_SYMBOLS",
     {def:"MES=F,MNQ=F", hint:
       "Futures added to the scanned universe so desks get indicators on what they may trade. "

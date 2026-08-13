@@ -55,13 +55,12 @@ def unsupported_instrument(symbol) -> str | None:
     # OCC / dxfeed style option symbols: ROOT + YYMMDD + C|P + strike.
     import re as _re
     if _re.search(r"[A-Z]{1,6}[ _.]*\d{6}[CP]\d+", s) or s.startswith("."):
-        return (f"{s} looks like an OPTION contract. Options are not executable here yet: "
-                "the broker has no contract multiplier (100x), premium, assignment or "
-                "exercise model, so an option order would be priced as SHARES and every "
-                "resulting number — P&L, exposure, risk — would be silently wrong. "
-                "Option CHAIN DATA is available for analysis (Greeks via tastytrade), but "
-                "execution is stocks, ETFs and listed futures only. Express the thesis with "
-                "the underlying or an ETF, and file a dev request if you need real options.")
+        return (f"{s} looks like an OPTION contract, and options do NOT go through "
+                "place_trade — that path prices everything as shares. Use "
+                "place_option_trade instead: it takes the legs (expiration, strike, "
+                "right, buy/sell) and handles the 100x multiplier, premium, collateral, "
+                "assignment and exercise properly. get_option_chain gives you the strikes "
+                "and Greeks to build it from.")
     if "-USD" in s or "-USDT" in s:
         return (f"{s} is a crypto pair. It trades 24/7, so the EOD flatten and the "
                 "session-based risk model do not apply. Use a listed proxy "
@@ -148,6 +147,84 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
             out["error"] = repr(e)
         out["mandate"] = mandate.status(db, broker)
         return out
+
+    # ---- options ------------------------------------------------------- #
+    def get_option_chain(inp: dict) -> dict:
+        """Live chain from the owner's tastytrade account (READ-ONLY data)."""
+        from daytrader.live import tastytrade_data as tt
+        inp = inp or {}
+        sym = str(inp.get("symbol", "")).upper().strip()
+        if not sym:
+            return {"ok": False, "error": "symbol required"}
+        if not tt.is_configured():
+            return {"ok": False, "error_code": "not_configured",
+                    "error": ("tastytrade is not configured, so live option chains are "
+                              "unavailable. Historical chains may still be available via "
+                              "av_historical_option_chain for research.")}
+        min_dte = inp.get("min_dte")
+        max_dte = inp.get("max_dte")
+        if min_dte is None and max_dte is None and inp.get("target_dte") is not None:
+            t = int(inp["target_dte"])
+            min_dte, max_dte = max(0, t - 7), t + 7
+        chain = tt.get_option_chain(
+            sym,
+            max_expirations=int(inp.get("max_expirations") or 2),
+            strikes_around_atr=int(inp.get("strikes") or 16),
+            min_dte=int(min_dte) if min_dte is not None else None,
+            max_dte=int(max_dte) if max_dte is not None else None,
+            strike_pct_window=float(inp.get("strike_pct_window") or 15.0),
+        )
+        if not chain:
+            return {"ok": False, "symbol": sym, "error_code": "no_chain",
+                    "error": ("no chain returned — the symbol may not have listed options, "
+                              "or the market data stream timed out. Retry once before "
+                              "abandoning the idea.")}
+        spot = None
+        try:
+            spot = round(float(broker.latest_price(sym)), 2)
+        except Exception:  # noqa: BLE001
+            pass
+        return {"ok": True, "symbol": sym, "spot": spot, "chain": chain,
+                "note": ("Prices are bid/ask with streaming Greeks. Pass the leg prices you "
+                         "would actually trade at into place_option_trade — for a credit "
+                         "structure that means the BID on shorts and the ASK on longs.")}
+
+    def place_option_trade(inp: dict) -> dict:
+        """Open a multi-leg options position (defined risk only)."""
+        inp = inp or {}
+        legs = inp.get("legs") or []
+        if not legs:
+            return {"ok": False, "error_code": "no_legs",
+                    "reason": ("legs required: a list of {expiration, strike, right, "
+                               "action, qty, price}. One leg is a single option; two make "
+                               "a vertical; four make an iron condor.")}
+        res = broker.options.open_structure(
+            str(inp.get("symbol") or inp.get("underlying") or "").upper(),
+            legs,
+            strategy=inp.get("strategy") or "options",
+            rationale=inp.get("rationale", ""),
+            profit_target_pct=inp.get("profit_target_pct", 50.0),
+            dte_exit=inp.get("dte_exit", 21),
+        )
+        db.log_agent("trader", "place_option_trade",
+                     f"{inp.get('symbol')} {len(legs)} legs -> "
+                     f"{res.get('structure') or res.get('error_code')}")
+        return res
+
+    def close_option_position(inp: dict) -> dict:
+        inp = inp or {}
+        try:
+            pid = int(inp.get("id"))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "id required — see get_option_positions"}
+        return broker.options.close_structure(pid, reason=inp.get("reason", "agent_close"))
+
+    def get_option_positions(_inp: dict) -> dict:
+        pos = broker.options.positions()
+        return {"ok": True, "count": len(pos), "positions": pos,
+                "collateral_held": round(broker.options.collateral_held(), 2),
+                "open_risk": round(broker.options.open_risk(), 2),
+                "buying_power": round(broker.buying_power(), 2)}
 
     def close_position(inp: dict) -> dict:
         res = broker.close(inp["symbol"].upper(), reason=inp.get("reason", "agent_close"))
@@ -710,6 +787,10 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
         "add_to_position": add_to_position,
         "declare_strategy": declare_strategy,
         "get_risk_state": get_risk_state,
+        "get_option_chain": get_option_chain,
+        "place_option_trade": place_option_trade,
+        "close_option_position": close_option_position,
+        "get_option_positions": get_option_positions,
         "close_position": close_position,
         "flatten_all": flatten_all,
         "take_partial": take_partial,
@@ -792,6 +873,85 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                     "rationale": {"type": "string"},
                 },
                 "required": ["symbol", "qty"],
+            },
+        },
+        {
+            "name": "get_option_chain",
+            "description": (
+                "LIVE option chain with real bid/ask and streaming Greeks (delta, gamma, "
+                "theta, vega, IV) for a symbol. Ask for the DTE window your strategy needs "
+                "(target_dte 35 for a 30-45 DTE credit spread) and read the deltas to pick "
+                "strikes — a 20-30 delta short strike is what the premium-selling playbook "
+                "means. Then pass those exact leg prices to place_option_trade."),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "Underlying, e.g. SPY"},
+                    "target_dte": {"type": "integer", "description": "Preferred days to expiration; returns expirations within +/-7 days of it."},
+                    "min_dte": {"type": "integer"},
+                    "max_dte": {"type": "integer"},
+                    "max_expirations": {"type": "integer", "description": "How many expirations (default 2)"},
+                    "strikes": {"type": "integer", "description": "Strikes per expiration, nearest the money first (default 16)"},
+                    "strike_pct_window": {"type": "number", "description": "Only strikes within this %% of spot (default 15)"},
+                },
+                "required": ["symbol"],
+            },
+        },
+        {
+            "name": "place_option_trade",
+            "description": (
+                "Open an OPTIONS position — single leg or multi-leg. This is how you run "
+                "cash-secured puts, the wheel, credit spreads, iron condors, LEAPs and "
+                "earnings vol-crush trades. Each leg is {expiration, strike, right (call/"
+                "put), action (buy/sell), qty (contracts), price (per share, from the "
+                "chain)}. The engine handles the 100x multiplier, premium, collateral, "
+                "assignment and exercise. DEFINED RISK ONLY: a naked short call is "
+                "rejected, and a short call needs 100 shares per contract to cover it. "
+                "Risk is the structure's MAX LOSS, never the premium collected; collateral "
+                "is what the position ties up (a cash-secured put holds the whole strike). "
+                "By default the system auto-closes at 50%% of max profit or 21 DTE."),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "Underlying, e.g. SPY"},
+                    "legs": {
+                        "type": "array",
+                        "description": "1-4 legs. Example bull put spread: [{expiration:'2026-09-18', strike:570, right:'put', action:'sell', qty:1, price:5.00}, {expiration:'2026-09-18', strike:565, right:'put', action:'buy', qty:1, price:3.00}]",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "expiration": {"type": "string", "description": "YYYY-MM-DD"},
+                                "strike": {"type": "number"},
+                                "right": {"type": "string", "enum": ["call", "put"]},
+                                "action": {"type": "string", "enum": ["buy", "sell"]},
+                                "qty": {"type": "number", "description": "Contracts (each = 100 shares)"},
+                                "price": {"type": "number", "description": "Per-share premium from the chain"},
+                            },
+                            "required": ["expiration", "strike", "right", "action", "qty"],
+                        },
+                    },
+                    "strategy": {"type": "string", "description": "Tag, e.g. wheel_csp / bull_put_spread / iron_condor"},
+                    "rationale": {"type": "string"},
+                    "profit_target_pct": {"type": "number", "description": "Auto-close at this %% of max profit (default 50). null to disable."},
+                    "dte_exit": {"type": "integer", "description": "Auto-close at this DTE (default 21). null to disable."},
+                },
+                "required": ["symbol", "legs"],
+            },
+        },
+        {
+            "name": "get_option_positions",
+            "description": ("Open options structures with mark-to-market P&L, %% of max "
+                            "profit captured, DTE, collateral held and remaining buying power."),
+            "input_schema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "close_option_position",
+            "description": ("Close an open options structure by id (from get_option_positions). "
+                            "Buys back shorts and sells longs at current market."),
+            "input_schema": {
+                "type": "object",
+                "properties": {"id": {"type": "integer"}, "reason": {"type": "string"}},
+                "required": ["id"],
             },
         },
         {

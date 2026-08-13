@@ -23,6 +23,7 @@ PAPER mode only -- no real orders are ever sent.
 """
 from __future__ import annotations
 
+import logging
 import os
 from typing import Optional
 
@@ -30,6 +31,8 @@ from daytrader.backtest.engine import CostModel
 from daytrader.core.types import Side
 from daytrader.data import quotes
 from daytrader.live.db import LiveDB, _now_iso
+
+log = logging.getLogger(__name__)
 
 def _envf(key: str, default: float) -> float:
     """Read a numeric rail at CALL time, so the dashboard's Settings tab takes
@@ -299,12 +302,17 @@ class PaperBroker:
         return sum(initial_margin(s, p["qty"]) for s, p in self._positions.items())
 
     def buying_power(self) -> float:
-        """Cash not already pledged as futures margin."""
-        return self._cash - self.margin_held()
+        """Cash not already pledged as futures margin or options collateral."""
+        return self._cash - self.margin_held() - self.options.collateral_held()
 
     def portfolio_heat(self) -> float:
-        """Σ open risk (entry→stop) across every position, in dollars."""
-        total = 0.0
+        """Σ open risk across every position, in dollars.
+
+        Shares and futures contribute entry→stop; options contribute their
+        computed MAX LOSS, which is the honest equivalent — the premium is not
+        the risk.
+        """
+        total = self.options.open_risk()
         for sym, p in self._positions.items():
             stop = p.get("stop")
             if stop is None:
@@ -358,6 +366,9 @@ class PaperBroker:
             "drawdown_pct": round(dd, 2),
             "cooldown_at_drawdown_pct": cool,
             "in_cooldown": bool(dd >= cool),
+            "options_open_risk": round(self.options.open_risk(), 2),
+            "options_collateral_held": round(self.options.collateral_held(), 2),
+            "buying_power": round(self.buying_power(), 2),
             "note": ("risk_budget_remaining is the dollars of NEW entry→stop risk you "
                      "may still add. In cooldown, new positions are blocked until "
                      "equity recovers; existing positions keep running their stops."),
@@ -1151,6 +1162,21 @@ class PaperBroker:
                 res = self.close(sym, reason="auto_adx_decay")
                 events.append({"symbol": sym, "action": "adx_decay",
                                "reason": decay, "pnl": res.get("pnl")})
+
+        # 4) Options: profit targets, DTE exits and expiration settlement.
+        #    Hooked in here rather than at each runner call site so every path
+        #    that manages the share book manages the options book too — an
+        #    expiring short put must be settled whether or not an agent ran.
+        try:
+            for ev in self.options.manage():
+                if ev and ev.get("ok"):
+                    events.append({"symbol": ev.get("underlying"),
+                                   "action": "option_" + str(
+                                       ev.get("reason") or ("expiration" if ev.get("settled")
+                                                            else "close")),
+                                   "option_id": ev.get("id"), "pnl": ev.get("pnl")})
+        except Exception as e:  # noqa: BLE001 - never let options break the share book
+            log.warning("options management failed: %s", e)
         return events
 
     def _check_adx_decay(self, sym: str, pos: dict, info) -> Optional[str]:
@@ -1286,7 +1312,22 @@ class PaperBroker:
                 eq += pos["qty"] * mark
             else:
                 eq += -pos["qty"] * mark
+        # Options: cash already moved by the opening credit/debit, so an open
+        # structure contributes its market value. A short structure marks
+        # NEGATIVE (buying it back costs money), which is precisely why a credit
+        # received is not profit until it decays.
+        eq += self.options.unrealized()
         return eq
+
+    @property
+    def options(self):
+        """The desk's options book (lazily built, one per broker)."""
+        book = getattr(self, "_options_book", None)
+        if book is None:
+            from daytrader.live.options_book import OptionsBook
+            book = OptionsBook(self)
+            self._options_book = book
+        return book
 
     def drawdown_pct(self) -> float:
         """Percent drawdown from the in-memory/db peak equity."""

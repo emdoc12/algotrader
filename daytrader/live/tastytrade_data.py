@@ -163,7 +163,9 @@ def get_quotes(symbols: list[str], timeout: float = 8.0) -> dict:
 # Option chain with streaming Greeks (near-the-money only)
 # --------------------------------------------------------------------------- #
 async def _collect_option_chain(
-    session, symbol: str, max_expirations: int, strikes_around_atr: int, timeout: float
+    session, symbol: str, max_expirations: int, strikes_around_atr: int, timeout: float,
+    min_dte: int | None = None, max_dte: int | None = None,
+    strike_pct_window: float | None = None,
 ) -> dict:
     from datetime import date as _date
 
@@ -175,7 +177,23 @@ async def _collect_option_chain(
     chain = get_option_chain(session, symbol)
     if not chain:
         return {}
-    expirations = sorted(chain.keys())[: max(1, max_expirations)]
+    expirations = sorted(chain.keys())
+    # Strategy work is expressed in DTE ("30-45 DTE, 20-30 delta"), not in
+    # "the next N expirations" — a desk asking for a 35-DTE spread must not be
+    # handed weeklies. Filter to the requested window before slicing.
+    if min_dte is not None or max_dte is not None:
+        today = _date.today()
+        lo = int(min_dte) if min_dte is not None else -1
+        hi = int(max_dte) if max_dte is not None else 10_000
+        windowed = [e for e in expirations
+                    if isinstance(e, _date) and lo <= (e - today).days <= hi]
+        # Nothing in the window (thin chain / holiday week): fall back to the
+        # nearest expiration BEYOND it rather than silently returning weeklies.
+        if not windowed:
+            beyond = [e for e in expirations if isinstance(e, _date) and (e - today).days >= lo]
+            windowed = beyond[:1] or expirations[:1]
+        expirations = windowed
+    expirations = expirations[: max(1, max_expirations)]
 
     # Find an at-the-money anchor from a quick underlying quote so we can keep
     # the subscription small (near-the-money strikes only).
@@ -195,6 +213,12 @@ async def _collect_option_chain(
             continue
         # Unique strikes, then pick the N closest to spot (fallback: lowest N).
         strikes = sorted({_q_num(o.strike_price) for o in options if o.strike_price is not None})
+        if spot is not None and strike_pct_window:
+            # A 20-30 delta short strike sits well outside the money, so a
+            # count-based window centred on spot misses exactly the strikes the
+            # premium-selling strategies need. Select by DISTANCE first, then cap.
+            span = float(strike_pct_window) / 100.0 * spot
+            strikes = [k for k in strikes if k is not None and abs(k - spot) <= span] or strikes
         if spot is not None:
             strikes.sort(key=lambda s: abs((s or 0.0) - spot))
         chosen = set(strikes[: max(1, strikes_around_atr)])
@@ -285,7 +309,9 @@ async def _collect_option_chain(
 
 
 def get_option_chain(
-    symbol: str, max_expirations: int = 1, strikes_around_atr: int = 6
+    symbol: str, max_expirations: int = 1, strikes_around_atr: int = 6,
+    min_dte: int | None = None, max_dte: int | None = None,
+    strike_pct_window: float | None = None, timeout: float = 8.0,
 ) -> dict:
     """Return near-the-money option data with streaming Greeks for ``symbol``.
 
@@ -304,9 +330,10 @@ def get_option_chain(
         # Total budget for chain fetch + streaming.
         result = _run(
             _collect_option_chain(
-                session, symbol, max_expirations, strikes_around_atr, 8.0
+                session, symbol, max_expirations, strikes_around_atr, timeout,
+                min_dte, max_dte, strike_pct_window,
             ),
-            12.0,
+            timeout + 4.0,
         )
         return result or {}
     except Exception as e:  # noqa: BLE001

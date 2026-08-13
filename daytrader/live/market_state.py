@@ -751,6 +751,9 @@ def with_account(market_snap: dict, broker) -> dict:
         from daytrader.live import mandate
         out["risk_state"] = broker.risk_state()
         out["mandate"] = mandate.status(broker.db, broker)
+        opts = broker.options.positions()
+        if opts:
+            out["option_positions"] = opts
     except Exception as e:  # noqa: BLE001
         out["risk_state_error"] = str(e)
 

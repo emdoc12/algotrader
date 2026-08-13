@@ -152,6 +152,28 @@ class LiveDB:
                 amount REAL NOT NULL,
                 reason TEXT
             );
+            CREATE TABLE IF NOT EXISTS option_positions (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                underlying  TEXT NOT NULL,
+                structure   TEXT,
+                legs        TEXT NOT NULL,     -- JSON: [{occ, qty, price, ...}]
+                opened_ts   TEXT,
+                open_cash   REAL,              -- net cash at open (+credit/-debit)
+                collateral  REAL,
+                max_loss    REAL,
+                max_profit  REAL,
+                expiration  TEXT,              -- earliest leg expiration
+                strategy    TEXT,
+                rationale   TEXT,
+                open_commission REAL DEFAULT 0,
+                profit_target_pct REAL,        -- auto-close at this % of max profit
+                dte_exit    INTEGER,           -- auto-close at this many DTE
+                status      TEXT DEFAULT 'open',
+                closed_ts   TEXT,
+                close_cash  REAL,
+                pnl         REAL,
+                exit_reason TEXT
+            );
             CREATE TABLE IF NOT EXISTS token_usage (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
                 ts            TEXT NOT NULL,
@@ -176,6 +198,7 @@ class LiveDB:
     def _migrate(self) -> None:
         """Backfill columns added after the original schema shipped."""
         try:
+            self._ensure_column("option_positions", "open_commission", "REAL DEFAULT 0")
             self._ensure_column("dev_requests", "resolution", "TEXT")
             self._ensure_column("dev_requests", "resolved_ts", "TEXT")
             self._ensure_column("open_positions", "horizon", "TEXT DEFAULT 'day'")
@@ -551,6 +574,45 @@ class LiveDB:
     # ------------------------------------------------------------------ #
     # capital events (deposits / withdrawals — NOT trading P&L)            #
     # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
+    # option positions                                                    #
+    # ------------------------------------------------------------------ #
+    def add_option_position(self, rec: dict) -> int:
+        cols = ("underlying", "structure", "legs", "opened_ts", "open_cash",
+                "collateral", "max_loss", "max_profit", "expiration", "strategy",
+                "rationale", "open_commission", "profit_target_pct", "dte_exit",
+                "status")
+        vals = [rec.get(c) for c in cols]
+        cur = self.conn.execute(
+            f"INSERT INTO option_positions ({','.join(cols)}) "
+            f"VALUES ({','.join('?' * len(cols))})", vals)
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def open_option_positions(self) -> list[dict]:
+        cur = self.conn.execute(
+            "SELECT * FROM option_positions WHERE status='open' ORDER BY id")
+        return [dict(r) for r in cur.fetchall()]
+
+    def get_option_position(self, pid: int) -> dict | None:
+        cur = self.conn.execute("SELECT * FROM option_positions WHERE id=?", (int(pid),))
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def close_option_position(self, pid: int, close_cash: float, pnl: float,
+                              exit_reason: str = "") -> bool:
+        cur = self.conn.execute(
+            "UPDATE option_positions SET status='closed', closed_ts=?, close_cash=?, "
+            "pnl=?, exit_reason=? WHERE id=? AND status='open'",
+            (_now_iso(), float(close_cash), float(pnl), str(exit_reason or ""), int(pid)))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def recent_option_positions(self, limit: int = 50) -> list[dict]:
+        cur = self.conn.execute(
+            "SELECT * FROM option_positions ORDER BY id DESC LIMIT ?", (int(limit),))
+        return [dict(r) for r in cur.fetchall()]
+
     def add_capital_event(self, amount: float, reason: str = "") -> int:
         """Record an owner deposit/withdrawal. Never a trade, never P&L."""
         cur = self.conn.execute(

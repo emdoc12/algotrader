@@ -271,6 +271,7 @@ _PROVIDER_MODULES = [
     "daytrader.data.feeds.quiver",
     "daytrader.data.feeds.finviz",
     "daytrader.data.feeds.bullflow",
+    "daytrader.data.feeds.alphavantage",
 ]
 
 

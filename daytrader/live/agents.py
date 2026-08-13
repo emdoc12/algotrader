@@ -42,13 +42,19 @@ BEFORE sizing one.
 - Build in tranches with add_to_position, let winners run on trailing stops, and cut \
 regime decay automatically with adx_decay_exit.
 
-NOT YET EXECUTABLE — OPTIONS. You can READ option chains and Greeks for analysis, but you \
-cannot trade options: there is no contract-multiplier, premium, assignment or exercise \
-model, so an option order would be priced as shares and every number would be wrong. That \
-means NO wheels, covered calls, cash-secured puts, spreads or premium selling for now. \
-Do not write plans around them. Express the thesis in the underlying or an ETF. If options \
-would genuinely change your edge, file ONE specific dev request saying what you'd run and \
-why — that is how this gets built.
+- OPTIONS, single-leg and multi-leg, through place_option_trade. Cash-secured puts, \
+the full wheel (get assigned, own the shares, sell calls against them), credit spreads, \
+iron condors, LEAPs and calendar structures all execute properly: real 100x multiplier, \
+premium, collateral, assignment and exercise. Pull strikes and Greeks with \
+get_option_chain (live bid/ask from a real broker feed), then pass the leg prices you \
+would actually trade at. Two hard rules the engine enforces: DEFINED RISK ONLY (a naked \
+short call is rejected; a short call needs 100 shares per contract or a long call above \
+it), and RISK IS THE STRUCTURE'S MAX LOSS, never the premium collected. Collateral is \
+what a position ties up — a cash-secured put holds the entire strike, so check \
+buying_power before sizing. Positions auto-close at 50% of max profit or 21 DTE unless \
+you say otherwise. For RESEARCH, av_historical_option_chain returns full historical \
+chains with Greeks, so you can test an options idea against real past prices instead of \
+guessing.
 - GOAL: aggressive but steady growth (or income generation). Compound the account as fast \
 as you safely can while keeping drawdowns controlled — beat a buy-and-hold of SPY and the \
 rival desks on a risk-adjusted basis. Aim for a profit factor of 2:1+ and keep max \
@@ -201,7 +207,8 @@ def _strategist(broker, db, provider=None) -> Agent:
     schemas, handlers = build_tools(broker, db)
     # Strategist can read + research (all data-feed tools) but cannot trade.
     _trading_actions = {"place_trade", "close_position", "flatten_all",
-                        "take_partial", "modify_stops", "move_stop_to_breakeven"}
+                        "take_partial", "modify_stops", "move_stop_to_breakeven",
+                        "place_option_trade", "close_option_position"}
     tools = [t for t in schemas if t["name"] not in _trading_actions]
     system = _MISSION + """
 
@@ -265,6 +272,7 @@ def _reviewer(broker, db, provider=None) -> Agent:
                "get_recent_trades", "backtest_strategy", "backtest_custom_strategy",
                "save_custom_strategy", "list_custom_strategies",
                "propose_hypothesis", "research_log", "get_risk_state", "declare_strategy",
+               "get_option_positions",
                "deploy_strategy", "undeploy_strategy", "list_deployed_strategies",
                "journal_write", "request_dev_help", "resolve_dev_request"}
     tools = [t for t in schemas if t["name"] in allowed]

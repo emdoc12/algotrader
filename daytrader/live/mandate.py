@@ -27,8 +27,9 @@ COMMIT_DAYS = int(os.environ.get("STRATEGY_COMMIT_DAYS", "5"))
 # Max share of buying power any single declared strategy may consume.
 MAX_STRATEGY_ALLOCATION_PCT = float(os.environ.get("MAX_STRATEGY_ALLOCATION_PCT", "50"))
 
-# The allowed menu. Options-based lanes are listed but gated until an options
-# engine exists — a desk must not declare a strategy it cannot actually run.
+# The allowed menu. Every lane here is executable: the options engine
+# (daytrader.live.options_book) handles multiplier, premium, collateral,
+# assignment and exercise, so a desk that declares the wheel can actually run it.
 STRATEGY_MENU = {
     "momentum_20d_high": {
         "executable": True,
@@ -52,30 +53,39 @@ STRATEGY_MENU = {
                     "non-trending tape only. Defined stop beyond the extreme."),
         "rules": {"max_concurrent": 3},
     },
-    # ---- gated: require an options engine -------------------------------
+    # ---- options lanes ---------------------------------------------------
     "wheel_csp": {
-        "executable": False,
+        "executable": True,
+        "rules": {"target_dte": [30, 45], "short_delta": [0.20, 0.35],
+                  "min_iv_rank": 40, "take_profit_pct": 55},
         "summary": ("Cash-secured puts / wheel on IV-Rank>40 underlyings; 20-35 delta, "
                     "30-45 DTE, take profit at 50-60% of max, roll or accept assignment, "
                     "then 30-40 delta covered calls."),
     },
     "bull_put_spread": {
-        "executable": False,
+        "executable": True,
+        "rules": {"target_dte": [30, 45], "short_delta": [0.20, 0.30],
+                  "width": [5, 10], "min_iv_rank": 30, "take_profit_pct": 50,
+                  "dte_exit": 21},
         "summary": ("Defined-risk bull put credit spreads; 30-45 DTE, short strike 20-30 "
                     "delta, $5-10 wide, IV Rank>30, close at 50% profit or 21 DTE."),
     },
     "iron_condor": {
-        "executable": False,
+        "executable": True,
+        "rules": {"target_dte": [30, 45], "short_delta": [0.15, 0.20],
+                  "take_profit_pct": 50},
         "summary": ("Iron condors / defined-wing strangles; 30-45 DTE, ~15-20 delta short "
                     "strikes, close at 50% profit, manage the tested side."),
     },
     "leap_debit": {
-        "executable": False,
+        "executable": True,
+        "rules": {"target_dte": [180, 365], "stop_pct_of_debit": 30},
         "summary": ("6-12 month calls or call debit spreads on strong RS names; scale out "
                     "in thirds; hard stop 25-30% of debit paid."),
     },
     "earnings_vol_crush": {
-        "executable": False,
+        "executable": True,
+        "rules": {"days_before_earnings": [3, 7], "take_profit_pct": 50},
         "summary": ("Defined-risk condors/credit spreads 3-7 days pre-earnings on elevated "
                     "IV; close the day after or at 50% profit. Reduced size for gap risk."),
     },
@@ -87,6 +97,8 @@ def executable_strategies() -> list[str]:
 
 
 def gated_strategies() -> list[str]:
+    """Lanes not yet runnable. Empty now that options execute — kept because a
+    future capability gap should surface here rather than as a failed order."""
     return sorted(k for k, v in STRATEGY_MENU.items() if not v.get("executable"))
 
 
@@ -120,15 +132,12 @@ def declare(db, name: str, plan: str = "", allocation_pct: float | None = None) 
     if name not in STRATEGY_MENU:
         return {"ok": False, "error_code": "unknown_strategy",
                 "error": f"{name!r} is not on the menu.",
-                "executable": executable_strategies(),
-                "gated_pending_options_engine": gated_strategies()}
+                "executable": executable_strategies()}
     entry = STRATEGY_MENU[name]
     if not entry.get("executable"):
         return {"ok": False, "error_code": "not_executable",
-                "error": (f"{name} is an OPTIONS strategy and cannot be run yet — there is "
-                          "no options engine (no multiplier, premium, assignment or "
-                          "exercise model), so declaring it would mean planning trades the "
-                          "system will reject."),
+                "error": (f"{name} cannot be run yet, so declaring it would mean planning "
+                          "trades the system will reject."),
                 "executable_now": executable_strategies()}
 
     cur = current(db)
@@ -164,8 +173,10 @@ def status(db, broker=None) -> dict:
     cur = current(db)
     out = {"declared": cur or None,
            "commit_days": COMMIT_DAYS,
-           "executable_strategies": executable_strategies(),
-           "gated_pending_options_engine": gated_strategies()}
+           "executable_strategies": executable_strategies()}
+    gated = gated_strategies()
+    if gated:
+        out["not_yet_executable"] = gated
     if cur.get("declared_on"):
         held = _days_between(cur["declared_on"], _today())
         out["days_held"] = held

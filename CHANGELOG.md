@@ -9,6 +9,75 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.33.0] — 2026-08-13
+
+### Added — the options engine: desks can now trade what the owner trades
+Five of the six strategies on the v6.32.0 menu were gated because options could
+not be executed. They execute now, properly — 100x multiplier, premium,
+collateral, assignment and exercise — so a desk that declares the wheel can
+actually run the wheel.
+
+**`daytrader/core/options.py`** models contracts and structures. A position is a
+list of signed legs (+long, −short), so one model prices a cash-secured put, a
+vertical and an iron condor without per-strategy special casing. Max profit,
+max loss and breakevens are **computed from the payoff**, not asserted: the
+expiration payoff is piecewise linear with breaks only at strikes, so evaluating
+those points is exact. That is what makes "defined risk only" enforceable —
+a naked short call is rejected by arithmetic, not by pattern-matching its name.
+
+**`daytrader/live/options_book.py`** runs the book against the paper account:
+
+* **Collateral is really held.** A cash-secured put ties up the strike, a
+  vertical its width. It leaves buying power until the position closes, so a
+  desk cannot sell ten puts it could never be assigned on.
+* **Expiration actually happens.** ITM shorts are assigned into real share
+  positions, longs exercise, OTM expires worthless. Assigned stock arrives at
+  the STRIKE as its cost basis and becomes an ordinary position — markable,
+  closable, and eligible to have covered calls written against it. Shares
+  already pledged to one short call cannot cover a second.
+* **Management runs every cycle**, inside `manage_positions`, so a 50%-profit
+  rule and a 21-DTE exit are rules rather than journal notes — and an expiring
+  short put settles whether or not an agent ran that cycle.
+* **P&L lands in the shared `trades` table**, so the leaderboard, profit factor
+  and per-strategy breakdown include options without knowing they exist.
+
+**Risk is modelled honestly, and it forced a real decision.** A cash-secured
+put's true max loss is strike-to-zero, which no 1.5%-of-equity cap can ever
+accommodate — under that rule the wheel is not safe, it is unrunnable, and an
+impossible rule gets bypassed rather than obeyed. So width-bounded structures
+(spreads, condors) are sized on their genuine max loss, while structures exposed
+to the underlying itself are sized on a stress loss at a 20% adverse move
+(`OPTION_STRESS_MOVE_PCT`), against a separate `MAX_OPTION_RISK_PCT` (5%)
+— with the full obligation still held as collateral, capped per structure at
+`MAX_OPTION_COLLATERAL_PCT` (25%). Options risk feeds the same portfolio-heat
+rail as shares and futures.
+
+**Data.** Live chains with real bid/ask and streaming Greeks come from the
+owner's tastytrade account, still strictly READ-ONLY — `get_option_chain` now
+selects expirations by DTE window and strikes by distance from spot, because
+"the next N expirations" hands a desk asking for a 35-DTE spread a fistful of
+weeklies, and a count-based strike window misses the 20-30 delta strikes every
+premium strategy needs.
+
+New provider **`daytrader/data/feeds/alphavantage.py`** adds HISTORICAL chains
+(`av_historical_option_chain`): every strike and expiration on a past date with
+bid/ask, volume, open interest, IV and full Greeks, ~20 years back. This makes
+options *research* possible at all — a live chain can only say what is true now.
+History never changes, so every chain is cached to disk permanently and each
+(symbol, date) is fetched once, ever, shared across all seven desks; the free
+tier's 25 requests/day is tracked and reported rather than failing opaquely.
+Requires `ALPHAVANTAGE_API_KEY` (free).
+
+Verified end to end, including a full wheel: sell the put, get assigned at the
+strike, own the shares, write a covered call, get called away. **The books
+reconcile exactly** — sum of recorded trade P&L equals the actual change in
+account equity to the cent. Getting there caught three bugs worth naming: an
+intrinsic-value mark that booked an entire credit as profit the instant a
+position opened; an assignment that recorded the share transfer as an option
+loss *and* left the shares at strike basis, double-counting it (reported −$811
+of trades against a −$14 account move); and an uncovered-call check that
+rejected iron condors by ignoring their own long wing.
+
 ## [6.32.0] — 2026-08-13
 
 ### Added — hard risk rails and a declared strategy per desk
