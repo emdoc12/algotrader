@@ -9,6 +9,50 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.31.0] — 2026-08-05
+
+### Added — one-time capital top-up, booked as capital and not as profit
+Every desk receives a **+$25,000** owner deposit, taking the capital base from
+$25k to $50k (`CAPITAL_TOPUP`, guarded by `CAPITAL_TOPUP_ID` so a restart can
+never repeat it).
+
+- New `capital_events` table and `broker.deposit()`. A deposit is explicitly
+  **not** P&L: cash rises, and the drawdown peak and the day's risk anchor rise
+  by the same amount — otherwise the injection would read as a winning day and
+  quietly hand the desk a fresh daily-loss budget.
+- **Return is now measured against the capital base** (`START_CASH` + net
+  deposits) in both the leaderboard and the dashboard standings, so the transfer
+  cannot show up as performance. Dollar `pnl` (equity − capital base) is now
+  reported alongside, and is completely immune to the deposit.
+- Every desk gets the same injection at the same moment, so relative standings
+  are preserved. Note the arithmetic side effect: a past gain now divides by a
+  larger base, so historical *return %* compresses (a $1,200 profit reads 2.4%
+  rather than 4.8%). Dollar P&L is unchanged — that is the undistorted number.
+
+### Changed — the desks' mandate is now explicitly open
+The mission read "you DAY-TRADE liquid US stocks and ETFs" and hardcoded $25k.
+It now states the mandate is broad and theirs: any horizon, any approach they can
+justify and measure, with their own realized breakdown — not habit — deciding.
+Spells out what the engine actually settles correctly (stocks/ETFs incl.
+leveraged and inverse, listed futures in contracts with real margin, day/swing/
+long horizons, tranche building, trailing stops, ADX-decay exits) and drops the
+stale "PREFER DAY TRADING" default and the $25k sizing example.
+
+### Fixed — option symbols could have been ordered as shares
+`unsupported_instrument` did not recognise OCC/dxfeed option symbols, so
+`place_trade("PLTR  260116C00150000", ...)` would have been priced as **shares** —
+the same silent-wrong-numbers trap futures had before v6.26. Now blocked with an
+explanation, across `place_trade`, `stage_order` and `broker.open`.
+
+**Options are not executable in this system.** There is no contract-multiplier,
+premium, assignment or exercise model, so wheels, covered calls, cash-secured
+puts, spreads and premium selling cannot be run — the mission now says so
+explicitly rather than letting desks write plans around them. Option chain data
+and Greeks remain available for analysis. Building real options support is a
+substantial piece of work (100x multiplier, strike/expiry, premium credit/debit,
+assignment and exercise, CSP collateral, covered-call share linkage, naked-short
+margin, expiry handling) — comparable to or larger than the futures layer.
+
 ## [6.30.0] — 2026-08-05
 
 ### Added — dev request: breadth / sector confirmation across research and review

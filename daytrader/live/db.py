@@ -146,6 +146,12 @@ class LiveDB:
                 status            TEXT DEFAULT 'pending',
                 result            TEXT
             );
+            CREATE TABLE IF NOT EXISTS capital_events (
+                id     INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts     TEXT NOT NULL,
+                amount REAL NOT NULL,
+                reason TEXT
+            );
             CREATE TABLE IF NOT EXISTS token_usage (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
                 ts            TEXT NOT NULL,
@@ -512,6 +518,26 @@ class LiveDB:
             (status, result, int(oid)))
         self.conn.commit()
         return cur.rowcount > 0
+
+    # ------------------------------------------------------------------ #
+    # capital events (deposits / withdrawals — NOT trading P&L)            #
+    # ------------------------------------------------------------------ #
+    def add_capital_event(self, amount: float, reason: str = "") -> int:
+        """Record an owner deposit/withdrawal. Never a trade, never P&L."""
+        cur = self.conn.execute(
+            "INSERT INTO capital_events (ts, amount, reason) VALUES (?,?,?)",
+            (_now_iso(), float(amount), str(reason or "")))
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def capital_contributed(self) -> float:
+        """Net capital added since inception (positive = deposits)."""
+        cur = self.conn.execute("SELECT COALESCE(SUM(amount),0) a FROM capital_events")
+        return float(cur.fetchone()["a"])
+
+    def capital_events(self) -> list[dict]:
+        cur = self.conn.execute("SELECT * FROM capital_events ORDER BY id")
+        return [dict(r) for r in cur.fetchall()]
 
     # ------------------------------------------------------------------ #
     # token usage / cost                                                  #

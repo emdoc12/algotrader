@@ -1089,6 +1089,40 @@ class PaperBroker:
             })
         return out
 
+    def capital_base(self) -> float:
+        """Starting equity plus net owner deposits — the denominator for return.
+
+        A deposit changes what you were GIVEN, not what you EARNED. Measuring
+        return against the original stake after an injection would book the
+        transfer as profit, which is the one thing it definitely is not.
+        """
+        try:
+            return self.starting_equity + self.db.capital_contributed()
+        except Exception:  # noqa: BLE001
+            return self.starting_equity
+
+    def deposit(self, amount: float, reason: str = "owner deposit") -> dict:
+        """Add owner capital. Explicitly NOT P&L.
+
+        Cash rises, and so do the drawdown peak and the day's risk anchor by the
+        same amount — otherwise the injection would read as a profitable day and
+        would quietly hand the desk a fresh daily-loss budget.
+        """
+        amount = float(amount)
+        if amount == 0:
+            return {"ok": False, "reason": "amount must be non-zero"}
+        before_eq = self.equity()
+        self._cash += amount
+        self.peak_equity = max(0.0, self.peak_equity + amount)
+        self.db.add_capital_event(amount, reason)
+        self._persist_equity()
+        after_eq = self.equity()
+        return {"ok": True, "amount": amount, "reason": reason,
+                "equity_before": round(before_eq, 2), "equity_after": round(after_eq, 2),
+                "capital_base": round(self.capital_base(), 2),
+                "note": ("Recorded as a capital event, not a trade. Return % is measured "
+                         "against the new capital base, so this shows as $0 P&L.")}
+
     def cash(self) -> float:
         return self._cash
 

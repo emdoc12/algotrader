@@ -52,6 +52,16 @@ def unsupported_instrument(symbol) -> str | None:
     if s.startswith("^"):
         return (f"{s} is an INDEX, not a tradeable instrument. Use its ETF: "
                 "^GSPC -> SPY, ^NDX -> QQQ, ^RUT -> IWM, ^VIX -> VXX/UVXY.")
+    # OCC / dxfeed style option symbols: ROOT + YYMMDD + C|P + strike.
+    import re as _re
+    if _re.search(r"[A-Z]{1,6}[ _.]*\d{6}[CP]\d+", s) or s.startswith("."):
+        return (f"{s} looks like an OPTION contract. Options are not executable here yet: "
+                "the broker has no contract multiplier (100x), premium, assignment or "
+                "exercise model, so an option order would be priced as SHARES and every "
+                "resulting number — P&L, exposure, risk — would be silently wrong. "
+                "Option CHAIN DATA is available for analysis (Greeks via tastytrade), but "
+                "execution is stocks, ETFs and listed futures only. Express the thesis with "
+                "the underlying or an ETF, and file a dev request if you need real options.")
     if "-USD" in s or "-USDT" in s:
         return (f"{s} is a crypto pair. It trades 24/7, so the EOD flatten and the "
                 "session-based risk model do not apply. Use a listed proxy "

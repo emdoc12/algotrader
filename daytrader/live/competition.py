@@ -115,6 +115,36 @@ class Team:
     halted: bool = False
 
 
+# One-time capital injection, applied once per team and guarded by a state key
+# so a restart can never repeat it. Recorded as a CAPITAL EVENT, so it lifts the
+# return denominator instead of showing up as profit.
+CAPITAL_TOPUP = float(os.environ.get("CAPITAL_TOPUP", "25000"))
+CAPITAL_TOPUP_ID = os.environ.get("CAPITAL_TOPUP_ID", "topup_50k_v1")
+
+
+def _apply_capital_topup(team: "Team") -> None:
+    if CAPITAL_TOPUP <= 0:
+        return
+    try:
+        if team.db.kv_get(f"capital_{CAPITAL_TOPUP_ID}"):
+            return
+        res = team.broker.deposit(CAPITAL_TOPUP, reason=f"owner top-up ({CAPITAL_TOPUP_ID})")
+        team.db.kv_set(f"capital_{CAPITAL_TOPUP_ID}", "done")
+        # The day's risk anchor must move with the deposit, or the injection
+        # reads as a winning day and hands the desk a fresh loss budget.
+        team.day_start_equity = float(team.day_start_equity) + CAPITAL_TOPUP
+        team.db.kv_set("risk_date", _today_et())
+        team.db.kv_set("day_start_equity", f"{team.day_start_equity}")
+        team.db.log_agent("system", "capital_event",
+                          f"+${CAPITAL_TOPUP:,.0f} capital (not P&L); base now "
+                          f"${res.get('capital_base', 0):,.0f}")
+        print(f"[capital] {team.name}: +${CAPITAL_TOPUP:,.0f} "
+              f"-> equity ${res.get('equity_after', 0):,.2f}, "
+              f"base ${res.get('capital_base', 0):,.2f}")
+    except Exception as e:  # noqa: BLE001 - never block startup on this
+        print(f"[capital] {team.name}: top-up failed: {e!r}")
+
+
 def _build_team(name: str, provider) -> Team:
     db = LiveDB(team_db_path(name))
     broker = PaperBroker(db, starting_equity=START_CASH)
@@ -122,6 +152,7 @@ def _build_team(name: str, provider) -> Team:
     team = Team(name=name, provider=provider, db=db, broker=broker, desk=desk,
                 day_start_equity=broker.equity())
     _restore_risk_state(team)
+    _apply_capital_topup(team)
     return team
 
 
@@ -164,7 +195,11 @@ def leaderboard(teams: list[Team] | None = None) -> list[dict]:
             "team": t.name,
             "model": getattr(t.provider, "model", "?"),
             "equity": round(eq, 2),
-            "return_pct": round((eq / START_CASH - 1) * 100, 2),
+            "capital_base": round(t.broker.capital_base(), 2),
+            # Dollar P&L is unaffected by a deposit; return% is measured against
+            # the new base so an injection can never read as performance.
+            "pnl": round(eq - t.broker.capital_base(), 2),
+            "return_pct": round((eq / t.broker.capital_base() - 1) * 100, 2),
             "drawdown_pct": round(t.broker.drawdown_pct(), 2),
             "profit_factor": round(perf.get("profit_factor", 0), 2),
             "win_rate": round(perf.get("win_rate", 0), 1),
@@ -209,6 +244,7 @@ def db_standings() -> list[dict]:
     for name, provider in providers.items():
         eq = START_CASH
         cash = START_CASH
+        capital_base = START_CASH
         dd = 0.0
         stats = {"n_trades": 0, "win_rate": 0.0, "profit_factor": 0.0, "total_pnl": 0.0}
         n_open = 0
@@ -221,6 +257,10 @@ def db_standings() -> list[dict]:
                 eq = float(last.get("equity", START_CASH))
                 cash = float(last.get("cash", START_CASH))
                 dd = float(last.get("drawdown_pct", 0.0))
+            try:
+                capital_base = START_CASH + db.capital_contributed()
+            except Exception:  # noqa: BLE001
+                capital_base = START_CASH
             stats = _trade_stats(db.recent_trades(limit=1000))
             n_open = len(db.load_open_positions())
             try:
@@ -237,7 +277,11 @@ def db_standings() -> list[dict]:
             "has_key": has_key(provider),
             "equity": round(eq, 2),
             "cash": round(cash, 2),
-            "return_pct": round((eq / START_CASH - 1) * 100, 2),
+            "capital_base": round(capital_base, 2),
+            # Return is measured against capital GIVEN, not the original stake —
+            # an owner deposit must never read as profit. Dollar P&L is immune.
+            "pnl": round(eq - capital_base, 2),
+            "return_pct": round((eq / capital_base - 1) * 100, 2),
             "drawdown_pct": round(dd, 2),
             "open_positions": n_open,
             "cost_today": round(cost_today, 2),
@@ -292,7 +336,7 @@ def chat_with_leader(team_name: str, message: str) -> dict:
             pass
         system = (
             f"You are the LEADER of the '{team_name}' autonomous trading desk, which "
-            f"trades a ${START_CASH:,.0f} paper account of US stocks/ETFs — day-trading by "
+            f"trades a paper account of US stocks/ETFs/futures — any horizon, by "
             f"default, but free to swing-trade or hold longer when warranted — in a "
             f"competition against rival AI desks. The owner is messaging you with a question or suggestion "
             f"about your trades and strategy. Answer directly and concisely as the desk "
