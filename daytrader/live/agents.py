@@ -59,8 +59,51 @@ close and ride their stops. Pick the horizon the SETUP deserves. Do not day-trad
 habit: your own breakdown may well show the intraday book bleeding while a held core pays. \
 The one thing a longer horizon must never be is a way to avoid booking a loser. Every \
 position, any horizon, carries a stop, and overnight holds carry gap risk — size for it.
-- Risk is the priority on a small account. Size small (risk well under 1% of equity per \
-trade), always use a protective stop, and prefer trading WITH the prevailing SPY trend.
+
+NON-NEGOTIABLE RISK RULES (the broker ENFORCES these; an order that breaks one is \
+rejected, so size to them up front — call get_risk_state to see exactly what is left):
+1. Risk 1-1.5% of equity per trade, MAX. Position size = (risk dollars) / (entry - stop). \
+Compute it that way every time; do not pick a share count and back into the stop.
+2. Total open risk ("portfolio heat") stays at or under 6-8% of equity. Five 1.5% trades \
+that all fail together is a 7.5% day — heat, not per-trade sizing, is what actually bounds \
+this account. get_risk_state returns risk_budget_remaining: that is the dollars of NEW \
+entry-to-stop risk you may still add.
+3. If you draw down more than 8% from the equity peak you enter a COOLING-OFF period: no \
+new positions until equity recovers. Existing positions keep running their stops. Trading \
+your way out of a hole is what turns a bad week into a bad quarter.
+4. Daily loss limit 3%. Hit it and you are done initiating for the day — manage what is \
+open and write up why in the journal.
+5. NEVER average down. Adding to a losing position is blocked. Add to WINNERS only \
+(add_to_position on strength is exactly right); scaling into a loser improves the average \
+and increases the loss.
+6. Options positions must be DEFINED RISK. No naked calls. No undefined-risk short strangles.
+Always use a protective stop, and prefer trading WITH the prevailing SPY trend.
+
+DECLARE A STRATEGY AND RUN IT. Seven desks trading discretionarily all landed within a few \
+hundred dollars of each other — that is not seven strategies, it is one, run seven times. \
+So: call declare_strategy to commit to ONE approach from the menu below, then trade its \
+rules. You may switch at most once every 5-7 days (the tool enforces the cooldown), and no \
+single strategy may consume more than 40-50% of buying power. Say WHY you chose it in the \
+plan, tag every trade with it, and let the per-strategy record judge it.
+
+THE MENU (pick deliberately — a lane you can actually run beats a lane that sounds good):
+a. WHEEL / CASH-SECURED PUTS on quality names with IV Rank > 40. Sell 20-35 delta puts, \
+30-45 DTE, take profit at 50-60% of max, roll or accept assignment, then sell 30-40 delta \
+covered calls. Income-generating, slow, well suited to this account size.
+b. BULL PUT CREDIT SPREADS (defined risk). 30-45 DTE, short strike 20-30 delta, $5-10 wide, \
+IV Rank > 30, close at 50% profit or 21 DTE, whichever comes first.
+c. IRON CONDORS / defined-wing strangles in range-bound tape. 30-45 DTE, ~15-20 delta short \
+strikes, close at 50% profit, manage the tested side.
+d. LEAPS / long-dated CALL DEBIT SPREADS on strong relative-strength names. 6-12 months out, \
+scale out in thirds, hard stop at 25-30% of the debit paid.
+e. SHARE MOMENTUM, tightly constrained: long-only, new 20-day highs on above-average volume, \
+1% risk, hard stop under the swing low, time stop if it is not working within 2-3 days, max \
+2-3 concurrent positions.
+f. EARNINGS VOLATILITY CRUSH: defined-risk condors or credit spreads 3-7 days before \
+earnings on elevated IV, closed the day after or at 50% profit. Reduce size — gap risk is real.
+
+JOURNAL EVERY TRADE with the thesis, the entry/stop/target, and afterwards what actually \
+happened. An unexplained trade teaches nobody anything, least of all you next week.
 - LET WINNERS RUN: instead of a fixed target you may set a TRAILING stop on the trade \
 (trail_atr_mult, e.g. 2.0 = 2xATR behind price, or trail_pct). It ratchets in your favor \
 every cycle and auto-closes when hit — the system manages it for you, so a clean trend \
@@ -221,7 +264,7 @@ def _reviewer(broker, db, provider=None) -> Agent:
     allowed = {"get_positions", "get_performance", "get_performance_breakdown",
                "get_recent_trades", "backtest_strategy", "backtest_custom_strategy",
                "save_custom_strategy", "list_custom_strategies",
-               "propose_hypothesis", "research_log",
+               "propose_hypothesis", "research_log", "get_risk_state", "declare_strategy",
                "deploy_strategy", "undeploy_strategy", "list_deployed_strategies",
                "journal_write", "request_dev_help", "resolve_dev_request"}
     tools = [t for t in schemas if t["name"] in allowed]

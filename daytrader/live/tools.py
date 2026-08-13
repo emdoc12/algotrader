@@ -124,10 +124,30 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
             stop=inp.get("stop"), target=inp.get("target"),
             auto_scale_r=inp.get("auto_scale_r"),
             auto_scale_frac=inp.get("auto_scale_frac"),
+            allow_average_down=bool(inp.get("allow_average_down")),
             rationale=inp.get("rationale", ""))
         db.log_agent("trader", "add_to_position",
                      str({k: inp.get(k) for k in ("symbol", "qty", "stop")}))
         return res
+
+    def declare_strategy(inp: dict) -> dict:
+        """Commit to one strategy from the menu for the commitment period."""
+        from daytrader.live import mandate
+        inp = inp or {}
+        return mandate.declare(db, inp.get("strategy") or inp.get("name") or "",
+                               plan=inp.get("plan", ""),
+                               allocation_pct=inp.get("allocation_pct"))
+
+    def get_risk_state(_inp: dict) -> dict:
+        """Remaining risk budget, portfolio heat, cooldown state, declaration."""
+        from daytrader.live import mandate
+        out = {"ok": True}
+        try:
+            out.update(broker.risk_state())
+        except Exception as e:  # noqa: BLE001
+            out["error"] = repr(e)
+        out["mandate"] = mandate.status(db, broker)
+        return out
 
     def close_position(inp: dict) -> dict:
         res = broker.close(inp["symbol"].upper(), reason=inp.get("reason", "agent_close"))
@@ -688,6 +708,8 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
     handlers = {
         "place_trade": place_trade,
         "add_to_position": add_to_position,
+        "declare_strategy": declare_strategy,
+        "get_risk_state": get_risk_state,
         "close_position": close_position,
         "flatten_all": flatten_all,
         "take_partial": take_partial,
@@ -765,11 +787,45 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                     "stop": {"type": "number", "description": "New stop for the whole blended position. Omit to keep the current one — but note adding moves your average, so re-check that the old stop still sits the right side of the new entry."},
                     "target": {"type": "number", "description": "New target for the blended position. Omit to keep."},
                     "auto_scale_frac": {"type": "number", "description": "Pass 0 to keep a core hold unmanaged by server-side scaling. Omit to inherit the parent position's setting."},
+                    "allow_average_down": {"type": "boolean", "description": "Adding to an UNDERWATER position is blocked by default — it is the most reliable way to turn a small mistake into an account-level one. Set true ONLY if your declared strategy defines this specific adjustment."},
                     "auto_scale_r": {"type": "number", "description": "Override the scale-out R multiple, measured from the blended entry."},
                     "rationale": {"type": "string"},
                 },
                 "required": ["symbol", "qty"],
             },
+        },
+        {
+            "name": "declare_strategy",
+            "description": (
+                "Commit this desk to ONE strategy from the approved menu. Required before "
+                "trading. You must keep it for the commitment period (default 5 trading "
+                "days) — a lane switched every cycle is not a strategy and produces no "
+                "evidence. Trade its rules, tag every trade with the strategy name, and "
+                "let the record judge it. Options lanes (wheel_csp, bull_put_spread, "
+                "iron_condor, leap_debit, earnings_vol_crush) are on the menu but NOT "
+                "executable yet and will be refused."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "strategy": {"type": "string", "description": "One of: momentum_20d_high, trend_position, mean_reversion_range (executable now)."},
+                    "plan": {"type": "string", "description": "How you will run it: entry trigger, stop rule, management, what would make you abandon it."},
+                    "allocation_pct": {"type": "number", "description": "Share of buying power this strategy may use (capped at 50)."},
+                },
+                "required": ["strategy"],
+            },
+        },
+        {
+            "name": "get_risk_state",
+            "description": (
+                "The risk budget you actually have RIGHT NOW: open portfolio heat (sum of "
+                "entry→stop risk across positions), dollars of new risk still permitted, "
+                "per-trade cap, drawdown and whether you are in cooling-off (no new "
+                "positions), plus your current strategy declaration. Call this BEFORE "
+                "sizing — it tells you the budget instead of you discovering it through a "
+                "rejected order."
+            ),
+            "input_schema": {"type": "object", "properties": {}},
         },
         {
             "name": "close_position",

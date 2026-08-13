@@ -9,6 +9,53 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.32.0] — 2026-08-13
+
+### Added — hard risk rails and a declared strategy per desk
+Seven desks trading with an open mandate all landed within a few hundred dollars
+of each other. That is not seven strategies competing; it is one undifferentiated
+discretionary approach, run seven times. Two things change.
+
+**The risk rules are now enforced by the broker, not suggested in the prompt.**
+An order that breaks one is rejected with a message the desk can act on:
+
+| Rail | Default | Env |
+|---|---|---|
+| Per-trade risk (entry→stop) | 1.5% of equity (was 2.0%) | `MAX_TRADE_RISK_PCT` |
+| Portfolio heat — Σ open risk across ALL positions | 8% of equity | `MAX_PORTFOLIO_HEAT_PCT` |
+| Daily realized loss before new entries stop | 3% of equity | `DAILY_LOSS_LIMIT_PCT` |
+| Drawdown from peak that triggers cooling-off | 8% | `COOLDOWN_DRAWDOWN_PCT` |
+| Averaging down (adding while underwater) | blocked | `ALLOW_AVERAGE_DOWN` |
+
+Portfolio heat is the one that actually bounds the account: per-trade sizing
+alone permits six "small" 1.5% trades that all fail together, which is a 9% day.
+Cooling-off and the daily loss limit cover different failure modes on purpose —
+an account can lose 3% today, recover, and lose 3% tomorrow without ever tripping
+a peak-to-trough threshold. Both block *new* positions only; open positions keep
+running their stops.
+
+`get_risk_state` and the snapshot's `risk_state` report `risk_budget_remaining`
+and `daily_loss_remaining`, so a desk sizes against the budget that is actually
+left instead of discovering it through a rejection.
+
+**Desks must declare a strategy and stay in it** (`declare_strategy`, new module
+`daytrader/live/mandate.py`). A lane can be switched at most once every
+`STRATEGY_COMMIT_DAYS` (5) and may consume at most `MAX_STRATEGY_ALLOCATION_PCT`
+(50%) of buying power. The menu is in the mission: wheel/CSP, bull put spreads,
+iron condors, LEAPs/debit spreads, constrained share momentum, and earnings vol
+crush. The options lanes are listed but **gated** — `declare_strategy` refuses
+them until the options engine lands, because declaring a strategy the engine
+would reject on every order is worse than not offering it.
+
+All six rails verified end to end: the heat cap fires on the 6th of six 1.4%
+entries at 7.0% heat; a 2.0% order is rejected against the 1.5% cap; a 9.0%
+drawdown blocks new entries and clears on recovery; the daily limit fires after
+three ~$700 losses on a $50k account; adds are blocked while underwater and
+allowed on strength; and `add_to_position` re-checks heat on the blended
+position rather than double-counting the leg it replaces.
+
+New settings are editable in the dashboard Settings tab under "Trading rails".
+
 ## [6.31.1] — 2026-08-05
 
 ### Fixed — the capital top-up put a $25k cliff in the equity chart

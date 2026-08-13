@@ -53,8 +53,18 @@ def _envb(key: str, default: bool = True) -> bool:
 # breaching them is rejected with an actionable message the agent can act on.
 # Kept as module constants for backwards compatibility; the live code paths read
 # the _env* accessors so Settings-tab changes apply without a restart.
-MAX_TRADE_RISK_PCT = _envf("MAX_TRADE_RISK_PCT", 2.0)   # entry→stop loss ≤ this % of equity
+MAX_TRADE_RISK_PCT = _envf("MAX_TRADE_RISK_PCT", 1.5)   # entry→stop loss ≤ this % of equity
 MAX_GROSS_EXPOSURE = _envf("MAX_GROSS_EXPOSURE", 2.0)   # Σ|position notional| ≤ this × equity
+# Σ open risk (entry→stop across ALL positions) ≤ this % of equity. Per-trade
+# sizing alone does not bound the account: eight "small" 1.5% trades that all
+# fail together is a 12% day. Heat is what actually caps correlated exposure.
+MAX_PORTFOLIO_HEAT_PCT = _envf("MAX_PORTFOLIO_HEAT_PCT", 8.0)
+# Cooling-off: no NEW positions while equity is this far below its peak.
+# Existing positions keep running their stops — this stops digging, not holding.
+COOLDOWN_DRAWDOWN_PCT = _envf("COOLDOWN_DRAWDOWN_PCT", 8.0)
+# Adding to a position that is UNDERWATER is averaging down. Off by default;
+# a strategy that genuinely allows a defined adjustment can pass allow_average_down.
+ALLOW_AVERAGE_DOWN = _envb("ALLOW_AVERAGE_DOWN", False)
 REQUIRE_STOP = _envb("REQUIRE_STOP", True)
 
 # Server-enforced scale-out: by default, bank AUTO_SCALE_DEFAULT_FRAC of a
@@ -292,6 +302,67 @@ class PaperBroker:
         """Cash not already pledged as futures margin."""
         return self._cash - self.margin_held()
 
+    def portfolio_heat(self) -> float:
+        """Σ open risk (entry→stop) across every position, in dollars."""
+        total = 0.0
+        for sym, p in self._positions.items():
+            stop = p.get("stop")
+            if stop is None:
+                continue
+            total += abs(float(p["entry_price"]) - float(stop)) * float(p["qty"]) * self._mult(sym)
+        return total
+
+    def heat_pct(self) -> float:
+        eq = self.equity()
+        return (100.0 * self.portfolio_heat() / eq) if eq > 0 else 0.0
+
+    def session_realized_pnl(self) -> float:
+        """Realized P&L booked TODAY (ET), from closed round trips."""
+        from daytrader.live import analytics as _an
+        from daytrader.live.competition import _today_et
+        try:
+            today = _today_et()
+        except Exception:  # noqa: BLE001
+            return 0.0
+        total = 0.0
+        for tr in self.db.recent_trades(limit=500):
+            ex = _an._to_et(tr.get("exit_ts"))
+            if ex is None or str(ex.date()) != str(today):
+                continue
+            if tr.get("pnl") is not None:
+                total += float(tr["pnl"])
+        return total
+
+    def risk_state(self) -> dict:
+        """What the rails currently permit — surfaced so a desk sizes to the
+        budget that actually remains instead of discovering it via a rejection."""
+        eq = self.equity()
+        heat = self.portfolio_heat()
+        heat_cap = _envf("MAX_PORTFOLIO_HEAT_PCT", 8.0) / 100.0 * eq
+        dd = self.drawdown_pct()
+        cool = _envf("COOLDOWN_DRAWDOWN_PCT", 8.0)
+        day_pnl = self.session_realized_pnl()
+        day_cap = _envf("DAILY_LOSS_LIMIT_PCT", 3.0)
+        return {
+            "equity": round(eq, 2),
+            "session_realized_pnl": round(day_pnl, 2),
+            "daily_loss_limit_pct": day_cap,
+            "daily_loss_remaining": round(max(0.0, day_cap / 100.0 * eq + day_pnl), 2),
+            "daily_loss_limit_hit": bool(day_cap > 0 and eq > 0
+                                         and day_pnl <= -(day_cap / 100.0 * eq)),
+            "open_risk": round(heat, 2),
+            "open_risk_pct": round(self.heat_pct(), 2),
+            "heat_cap_pct": _envf("MAX_PORTFOLIO_HEAT_PCT", 8.0),
+            "risk_budget_remaining": round(max(0.0, heat_cap - heat), 2),
+            "max_trade_risk_pct": _envf("MAX_TRADE_RISK_PCT", 1.5),
+            "drawdown_pct": round(dd, 2),
+            "cooldown_at_drawdown_pct": cool,
+            "in_cooldown": bool(dd >= cool),
+            "note": ("risk_budget_remaining is the dollars of NEW entry→stop risk you "
+                     "may still add. In cooldown, new positions are blocked until "
+                     "equity recovers; existing positions keep running their stops."),
+        }
+
     # ------------------------------------------------------------------ #
     # orders                                                              #
     # ------------------------------------------------------------------ #
@@ -440,8 +511,33 @@ class PaperBroker:
                 return self._fail(symbol, side, qty,
                                   f"short target {target:.2f} must be BELOW entry {fill:.2f}")
         eq = self.equity()
+        # Daily loss limit. Bounds the DAY, which the peak-to-trough cooling-off
+        # rule does not: an account can lose 3% today, recover, and lose 3% again
+        # tomorrow without ever tripping a drawdown threshold.
+        day_cap = _envf("DAILY_LOSS_LIMIT_PCT", 3.0)
+        if day_cap > 0 and eq > 0:
+            day_pnl = self.session_realized_pnl()
+            if day_pnl <= -(day_cap / 100.0 * eq):
+                return self._fail(
+                    symbol, side, qty,
+                    f"daily_loss_limit: today's realized P&L is ${day_pnl:,.0f}, at or past "
+                    f"the {day_cap:.1f}% daily loss limit (${day_cap / 100.0 * eq:,.0f}). "
+                    "You are done INITIATING for the day — manage what is open and write up "
+                    "in the journal what went wrong. New entries resume tomorrow.")
+        # Cooling-off. A desk deep in drawdown is the one most likely to try to
+        # trade its way out; this blocks NEW risk while letting existing
+        # positions keep running their stops.
+        cool = _envf("COOLDOWN_DRAWDOWN_PCT", 8.0)
+        dd = self.drawdown_pct()
+        if cool > 0 and dd >= cool:
+            return self._fail(
+                symbol, side, qty,
+                f"cooling_off: equity is {dd:.1f}% below its peak, at or beyond the "
+                f"{cool:.1f}% cooling-off threshold. No NEW positions until equity "
+                "recovers; open positions keep running their stops. Review what is "
+                "not working before adding risk.")
         if stop is not None and eq > 0:
-            risk_pct = _envf("MAX_TRADE_RISK_PCT", 2.0)
+            risk_pct = _envf("MAX_TRADE_RISK_PCT", 1.5)
             risk_amt = abs(fill - stop) * qty * mult
             cap = risk_pct / 100.0 * eq
             if risk_amt > cap:
@@ -449,6 +545,21 @@ class PaperBroker:
                     symbol, side, qty,
                     f"trade risk ${risk_amt:,.0f} exceeds the {risk_pct:.1f}% cap "
                     f"(${cap:,.0f}); reduce qty or tighten the stop")
+            # Portfolio heat. Per-trade sizing does not bound the account:
+            # eight "small" 1.5% trades that fail together is a 12% day.
+            heat_pct_cap = _envf("MAX_PORTFOLIO_HEAT_PCT", 8.0)
+            if heat_pct_cap > 0:
+                heat = self.portfolio_heat()
+                heat_cap = heat_pct_cap / 100.0 * eq
+                if (heat + risk_amt) > heat_cap:
+                    return self._fail(
+                        symbol, side, qty,
+                        f"portfolio_heat: open risk is already ${heat:,.0f} "
+                        f"({100.0 * heat / eq:.1f}% of equity) and this order adds "
+                        f"${risk_amt:,.0f}, exceeding the {heat_pct_cap:.1f}% heat cap "
+                        f"(${heat_cap:,.0f}). ${max(0.0, heat_cap - heat):,.0f} of new "
+                        "risk remains — size to that, close something, or tighten stops. "
+                        "Call get_risk_state to see the budget before sizing.")
         if eq > 0:
             from daytrader.live.tastytrade_margin import equity_buying_power_multiple
             mirroring = equity_buying_power_multiple() > 1.0
@@ -705,6 +816,7 @@ class PaperBroker:
                         target: Optional[float] = None,
                         auto_scale_r: Optional[float] = None,
                         auto_scale_frac: Optional[float] = None,
+                        allow_average_down: bool = False,
                         rationale: str = "") -> dict:
         """Scale INTO an existing position, blending into one averaged position.
 
@@ -751,6 +863,21 @@ class PaperBroker:
             return {"ok": False, "symbol": symbol, "error_code": "price_unavailable",
                     "reason": f"price unavailable: {e}"}
 
+        # No averaging down. Adding to a position that is already underwater
+        # improves the average but increases the loss — it is the single most
+        # reliable way to turn a small mistake into an account-level one.
+        # Scaling INTO strength is still allowed, which is the point of tranching.
+        if not (allow_average_down or ALLOW_AVERAGE_DOWN):
+            underwater = ((side == Side.LONG and raw < float(pos["entry_price"]))
+                          or (side == Side.SHORT and raw > float(pos["entry_price"])))
+            if underwater:
+                return {"ok": False, "symbol": symbol, "error_code": "averaging_down",
+                        "reason": (f"{symbol} is underwater (mark {raw:.2f} vs entry "
+                                   f"{float(pos['entry_price']):.2f}) — adding here is "
+                                   "averaging down, which is blocked. Add on strength, or "
+                                   "pass allow_average_down=true only if your DECLARED "
+                                   "strategy defines this adjustment.")}
+
         from daytrader.core.contracts import initial_margin, spec_for
         spec = spec_for(symbol)
         mult = self._mult(symbol)
@@ -777,15 +904,31 @@ class PaperBroker:
         eq = self.equity()
         total_risk = (abs(blended - eff_stop) * new_qty * mult) if eff_stop is not None else None
         if eff_stop is not None and eq > 0:
-            cap = _envf("MAX_TRADE_RISK_PCT", 2.0) / 100.0 * eq
+            cap = _envf("MAX_TRADE_RISK_PCT", 1.5) / 100.0 * eq
             if total_risk > cap:
                 return {"ok": False, "symbol": symbol, "error_code": "risk_cap",
                         "reason": (f"blended position risk ${total_risk:,.0f} "
                                    f"({new_qty:g} @ {blended:.2f} → stop {eff_stop:.2f}) "
-                                   f"exceeds the {_envf('MAX_TRADE_RISK_PCT', 2.0):.1f}% cap "
+                                   f"exceeds the {_envf('MAX_TRADE_RISK_PCT', 1.5):.1f}% cap "
                                    f"(${cap:,.0f}); add less or tighten the stop"),
                         "blended_entry": round(blended, 4), "total_qty": new_qty,
                         "total_planned_risk": round(total_risk, 2)}
+            # Heat, measured on the portfolio AFTER the blend: the existing
+            # position's contribution is replaced, not added to.
+            heat_pct_cap = _envf("MAX_PORTFOLIO_HEAT_PCT", 8.0)
+            if heat_pct_cap > 0:
+                old_risk = (abs(float(pos["entry_price"]) - float(pos["stop"])) * old_qty * mult
+                            if pos.get("stop") is not None else 0.0)
+                projected = self.portfolio_heat() - old_risk + total_risk
+                heat_cap = heat_pct_cap / 100.0 * eq
+                if projected > heat_cap:
+                    return {"ok": False, "symbol": symbol, "error_code": "portfolio_heat",
+                            "reason": (f"this add would put total open risk at ${projected:,.0f} "
+                                       f"({100.0 * projected / eq:.1f}% of equity), past the "
+                                       f"{heat_pct_cap:.1f}% heat cap (${heat_cap:,.0f}). "
+                                       "Add less, tighten stops, or close another position."),
+                            "projected_open_risk": round(projected, 2),
+                            "heat_cap": round(heat_cap, 2)}
 
         # ---- funding ---------------------------------------------------------
         if spec is not None:

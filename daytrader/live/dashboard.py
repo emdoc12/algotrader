@@ -1378,7 +1378,19 @@ function renderSettings(main, status){
     "Hard broker-level limits on every desk. Orders that breach them are rejected with an actionable "
     + "message. Blank uses the default shown. Takes effect on the next cycle — no restart needed."));
   riskCard.appendChild(settingsTextField(status, "MAX_TRADE_RISK_PCT", "MAX_TRADE_RISK_PCT",
-    {def:"2.0", hint:"Max entry→stop loss as % of equity, per trade. For futures this is measured in real dollars: (entry-stop) x contracts x multiplier."}));
+    {def:"1.5", hint:"Max entry→stop loss as % of equity, per trade. For futures this is measured in real dollars: (entry-stop) x contracts x multiplier."}));
+  riskCard.appendChild(settingsTextField(status, "MAX_PORTFOLIO_HEAT_PCT", "MAX_PORTFOLIO_HEAT_PCT",
+    {def:"8.0", hint:"Σ open risk (entry→stop across ALL positions) ≤ this % of equity. This is what actually bounds the account — six 'small' 1.5% trades that fail together is a 9% day. 0 disables."}));
+  riskCard.appendChild(settingsTextField(status, "DAILY_LOSS_LIMIT_PCT", "DAILY_LOSS_LIMIT_PCT",
+    {def:"3.0", hint:"Realized loss in one day that stops NEW entries until tomorrow. Open positions keep running their stops. 0 disables."}));
+  riskCard.appendChild(settingsTextField(status, "COOLDOWN_DRAWDOWN_PCT", "COOLDOWN_DRAWDOWN_PCT",
+    {def:"8.0", hint:"Drawdown from the equity peak that triggers cooling-off: no new positions until equity recovers. 0 disables."}));
+  riskCard.appendChild(settingsTextField(status, "ALLOW_AVERAGE_DOWN", "ALLOW_AVERAGE_DOWN",
+    {options:["0","1"], def:"0", hint:"0 = adding to an underwater position is blocked. Adding to winners is always allowed."}));
+  riskCard.appendChild(settingsTextField(status, "STRATEGY_COMMIT_DAYS", "STRATEGY_COMMIT_DAYS",
+    {def:"5", hint:"Days a desk must keep a declared strategy before switching. A lane switched every cycle produces no evidence about anything."}));
+  riskCard.appendChild(settingsTextField(status, "MAX_STRATEGY_ALLOCATION_PCT", "MAX_STRATEGY_ALLOCATION_PCT",
+    {def:"50", hint:"Max share of buying power one declared strategy may consume."}));
   riskCard.appendChild(settingsTextField(status, "MAX_GROSS_EXPOSURE", "MAX_GROSS_EXPOSURE",
     {def:"2.0", hint:"Σ|position notional| ≤ this x equity. Raised automatically to match your buying-power multiple when USE_TASTYTRADE_MARGIN is on."}));
   riskCard.appendChild(settingsTextField(status, "REQUIRE_STOP", "REQUIRE_STOP",

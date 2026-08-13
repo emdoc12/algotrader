@@ -744,6 +744,16 @@ def with_account(market_snap: dict, broker) -> dict:
     except Exception as e:  # noqa: BLE001
         out["account_error"] = str(e)
 
+    # What the risk rails currently permit, and which strategy the desk committed
+    # to. Both are surfaced every cycle so sizing is done against the real budget
+    # instead of discovered through a rejection.
+    try:
+        from daytrader.live import mandate
+        out["risk_state"] = broker.risk_state()
+        out["mandate"] = mandate.status(broker.db, broker)
+    except Exception as e:  # noqa: BLE001
+        out["risk_state_error"] = str(e)
+
     # Signals from THIS desk's deployed (out-of-sample-validated) strategies.
     # Per-team, so it belongs here rather than in the shared market snapshot.
     try:
