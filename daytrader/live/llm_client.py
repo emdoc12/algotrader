@@ -25,6 +25,11 @@ class AgentResult:
     refused: bool = False
     error: str | None = None
     usage: dict = field(default_factory=dict)  # {input_tokens, output_tokens, cached_input_tokens}
+    # Classified provider failure (see providers.classify_provider_error).
+    # ``terminal`` means retrying cannot help — out of credit, bad key, bad
+    # model — so the runner pauses the desk instead of calling every cycle.
+    error_code: str | None = None
+    terminal: bool = False
 
 
 class Agent:

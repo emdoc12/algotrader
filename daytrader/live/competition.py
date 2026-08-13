@@ -113,6 +113,10 @@ class Team:
     desk: TradingTeam
     day_start_equity: float = START_CASH
     halted: bool = False
+    # Set when the PROVIDER cannot serve this desk at all (out of credit, bad
+    # key, bad model). Distinct from `halted`, which is a risk decision the desk
+    # earned; this one is an account problem only the owner can clear.
+    provider_down: str | None = None
 
 
 # One-time capital injection, applied once per team and guarded by a state key
@@ -165,6 +169,7 @@ def _restore_risk_state(team: Team) -> None:
             if dse:
                 team.day_start_equity = float(dse)
             team.halted = team.db.kv_get("halted") == "1"
+            team.provider_down = team.db.kv_get("provider_down") or None
         else:
             team.day_start_equity = team.broker.equity()
             team.halted = False
@@ -242,6 +247,7 @@ def db_standings() -> list[dict]:
     providers = default_team_providers()
     rows = []
     for name, provider in providers.items():
+        provider_down = None
         eq = START_CASH
         cash = START_CASH
         capital_base = START_CASH
@@ -263,6 +269,7 @@ def db_standings() -> list[dict]:
                 capital_base = START_CASH
             stats = _trade_stats(db.recent_trades(limit=1000))
             n_open = len(db.load_open_positions())
+            provider_down = db.kv_get("provider_down") or None
             try:
                 cost_today = db.usage_totals(since_iso=datetime.now(ET).strftime("%Y-%m-%dT00:00:00"))["cost_usd"]
                 cost_total = db.usage_totals()["cost_usd"]
@@ -275,6 +282,9 @@ def db_standings() -> list[dict]:
             "team": name,
             "model": getattr(provider, "model", "?"),
             "has_key": has_key(provider),
+            # Why a desk is idle, when it is: an account problem the owner must
+            # clear, not something the desk can trade its way out of.
+            "provider_down": provider_down,
             "equity": round(eq, 2),
             "cash": round(cash, 2),
             "capital_base": round(capital_base, 2),
@@ -392,14 +402,83 @@ class Competition:
         except Exception:  # noqa: BLE001
             pass
 
+    def _note_provider_result(self, t, res) -> bool:
+        """Record a cycle's provider outcome. Returns True if the desk is usable.
+
+        A terminal provider failure pauses the desk: continuing to call an API
+        that has no credit cannot succeed, and doing it every cycle only buries
+        the real message under a wall of identical errors. A cycle that succeeds
+        clears the pause automatically, so topping the account up is all the
+        owner has to do — no restart, no button.
+        """
+        err = getattr(res, "error", None)
+        if not err:
+            if t.provider_down:
+                t.provider_down = None
+                try:
+                    t.db.kv_set("provider_down", "")
+                    t.db.log_agent("runner", "provider_recovered",
+                                   f"{t.name}: provider is answering again — desk resumed")
+                except Exception:  # noqa: BLE001
+                    pass
+                _notify(f"✅ Team {t.name} provider recovered — desk resumed.")
+            return True
+        if getattr(res, "terminal", False):
+            code = getattr(res, "error_code", "provider_error")
+            if t.provider_down != code:      # announce the transition once, not every cycle
+                t.provider_down = code
+                try:
+                    t.db.kv_set("provider_down", code)
+                    # Start the retry clock at the FAILURE. Without this the
+                    # probe timer reads as "never probed" and lets the very next
+                    # cycle straight back through to the dead endpoint.
+                    import time as _t
+                    t.db.kv_set("provider_down_probe", str(_t.time()))
+                    t.db.log_agent("runner", "provider_down", f"{t.name}: {err}")
+                except Exception:  # noqa: BLE001
+                    pass
+                _notify(f"🚫 Team {t.name} paused — {err}", throttle_key=f"down_{t.name}")
+            return False
+        _notify(f"⚠️ Team {t.name} ({getattr(t.provider,'model','?')}) cycle error: {err}",
+                throttle_key=f"err_{t.name}")
+        return True
+
+    def _provider_paused(self, t) -> bool:
+        """True if this desk should be skipped entirely this cycle.
+
+        Retried once every RETRY_PROVIDER_MINUTES so a top-up is picked up on
+        its own, without a restart and without hammering a dead endpoint.
+        """
+        if not t.provider_down:
+            return False
+        import time as _t
+        every = float(os.environ.get("RETRY_PROVIDER_MINUTES", "20")) * 60.0
+        last = 0.0
+        try:
+            last = float(t.db.kv_get("provider_down_probe") or 0.0)
+        except (TypeError, ValueError):
+            last = 0.0
+        now = _t.time()
+        if now - last >= every:
+            try:
+                t.db.kv_set("provider_down_probe", str(now))
+            except Exception:  # noqa: BLE001
+                pass
+            return False          # let this cycle through as a probe
+        return True
+
     def plan_all(self):
         market = market_only()
         d = _today_et()
         for t in self.teams:
             if t.db.kv_get("planned_date") == d:
                 continue  # already planned today (idempotent across restarts)
+            if self._provider_paused(t):
+                continue
             res = t.desk.plan_day(with_account(market, t.broker))
             self._record_usage(t, "strategist", res)
+            if not self._note_provider_result(t, res):
+                continue          # don't mark the day planned on a dead provider
             t.db.kv_set("planned_date", d)
 
     @staticmethod
@@ -463,12 +542,10 @@ class Competition:
                 # Enforce server-side brackets EVERY cycle, even for halted teams
                 # — their surviving swing/long holds still need their stops run.
                 t.broker.manage_positions(q, a, x)
-                if not t.halted:
+                if not t.halted and not self._provider_paused(t):
                     res = t.desk.trade_cycle(with_account(market, t.broker))
                     self._record_usage(t, "trader", res)
-                    if getattr(res, "error", None):
-                        _notify(f"⚠️ Team {t.name} ({getattr(t.provider,'model','?')}) cycle error: {res.error}",
-                                throttle_key=f"err_{t.name}")
+                    self._note_provider_result(t, res)
             finally:
                 t.broker.set_cycle_quotes(None)
             t.broker.db.record_equity(t.broker.cash(), t.broker.equity(),
@@ -490,10 +567,14 @@ class Competition:
                 continue
             if day_open:
                 continue  # flatten still failing; retry next cycle, don't review yet
+            if self._provider_paused(t):
+                continue
             if market is None:
                 market = market_only()
             res = t.desk.review_day(with_account(market, t.broker))
             self._record_usage(t, "reviewer", res)
+            if not self._note_provider_result(t, res):
+                continue          # not reviewed; retry once the provider is back
             t.db.kv_set("reviewed_date", d)
         # 3) Drain the research queue once the desks have proposed — pure
         #    compute, no tokens. Reports only survivors; silence is expected.

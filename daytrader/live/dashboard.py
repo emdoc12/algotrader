@@ -627,6 +627,12 @@ PAGE_HTML = r"""<!DOCTYPE html>
 "use strict";
 const TEAMS = ["claude","openai","grok","qwen","deepseek","glm","kimi"];
 const LABELS = {claude:"Claude", openai:"OpenAI", grok:"Grok", qwen:"Qwen", deepseek:"DeepSeek", glm:"GLM", kimi:"Kimi"};
+const PROVIDER_FIX = {
+  out_of_credit: "is OUT OF CREDIT — the provider rejected the call for insufficient balance. Add credit in that provider's billing console; this is not a rate limit and retrying cannot fix it.",
+  bad_api_key:   "had its API KEY REJECTED — paste a valid key on the Settings tab.",
+  no_access:     "is DENIED ACCESS to its model — the key is valid but lacks permission for that model or endpoint.",
+  bad_model:     "has an INVALID MODEL configured — set a model this provider actually serves, on the Settings tab.",
+};
 const COLORS = {claude:"#36d399", openai:"#7c8cff", grok:"#f87272", qwen:"#ffd479", deepseek:"#22d3ee", glm:"#c084fc", kimi:"#fb923c"};
 const START = __START_CASH_NUM__;
 let current = "overview";
@@ -715,6 +721,28 @@ async function loadOverview(){
   if(current !== "overview") return;
 
   main.innerHTML = "";
+
+  // Anything requiring the owner personally goes at the very top. A desk that
+  // is out of credit stops trading silently otherwise — it just looks idle.
+  const blocked = (data.standings||[]).filter(s => s.provider_down);
+  if(blocked.length){
+    const warn = el("div", {class:"card", style:"border-left:3px solid var(--red)"});
+    warn.appendChild(el("h2", {style:"color:var(--red)"},
+      blocked.length === 1 ? "1 desk is blocked" : blocked.length + " desks are blocked"));
+    blocked.forEach(s => {
+      const line = el("div", {style:"margin:8px 0"});
+      line.appendChild(teamPill(s.team));
+      line.appendChild(document.createTextNode("  "));
+      line.appendChild(el("span", null, PROVIDER_FIX[s.provider_down] || s.provider_down));
+      warn.appendChild(line);
+    });
+    warn.appendChild(el("div", {class:"muted", style:"font-size:12px;margin-top:10px"},
+      "These desks are PAUSED — the runner stopped calling the API rather than retrying an "
+      + "error no retry can fix. They resume on their own within ~20 minutes of the account "
+      + "being fixed; no restart needed."));
+    main.appendChild(warn);
+  }
+
   // leaderboard
   const lbCard = el("div", {class:"card"});
   lbCard.appendChild(el("h2", null, "Leaderboard"));
@@ -725,12 +753,16 @@ async function loadOverview(){
   tbl.appendChild(head);
   (data.standings||[]).forEach(s => {
     const tr = el("tr");
-    const nameCell = s.has_key
-      ? LABELS[s.team] || s.team
-      : (LABELS[s.team]||s.team) + "  (no key — idle)";
+    const DOWN = {out_of_credit:"OUT OF CREDIT", bad_api_key:"KEY REJECTED",
+                  no_access:"NO ACCESS", bad_model:"BAD MODEL"};
+    const nameCell = !s.has_key
+      ? (LABELS[s.team]||s.team) + "  (no key — idle)"
+      : (s.provider_down
+          ? (LABELS[s.team]||s.team) + "  \u26a0 " + (DOWN[s.provider_down]||s.provider_down)
+          : (LABELS[s.team] || s.team));
     const cells = [
       el("td", null, String(s.rank)),
-      el("td", {class: s.has_key?"":"gray"}, nameCell),
+      el("td", {class: !s.has_key ? "gray" : (s.provider_down ? "red" : "")}, nameCell),
       el("td", {class:"gray"}, s.model||"?"),
       el("td", {class: Number(s.equity)>=START?"green":"red"}, fmtMoney(s.equity)),
       el("td", {class: clsFor(s.return_pct)}, fmtPct(s.return_pct)),

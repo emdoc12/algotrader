@@ -37,6 +37,8 @@ except Exception:  # pragma: no cover - defensive fallback
         actions: list[dict] = field(default_factory=list)  # [{tool, input, result}]
         refused: bool = False
         error: str | None = None
+        error_code: str | None = None
+        terminal: bool = False
 
 
 Handlers = dict[str, Callable[[dict], dict]]
@@ -72,6 +74,96 @@ def _run_handler(handlers: Handlers, name: str, inp: dict) -> dict:
         return handler(inp)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": repr(e)}
+
+
+# --------------------------------------------------------------------------- #
+# error classification                                                        #
+# --------------------------------------------------------------------------- #
+# Providers overload HTTP status codes, and 429 is the worst offender: it means
+# BOTH "you are going too fast, back off and retry" and "your account is out of
+# money, retrying is pointless forever". Z.AI returns the second as
+# 429 code 1113 ("Insufficient balance or no resource package"), which the SDK
+# raises as RateLimitError — so the desk retried on a backoff schedule, refiled
+# the same opaque error every cycle, and nothing in the dashboard said the one
+# thing the owner needed to know: go add credit.
+#
+# Classifying the error is what lets the runner tell "wait a bit" apart from
+# "this desk cannot trade until a human acts".
+_TERMINAL_HINTS = (
+    ("insufficient balance", "out_of_credit"),
+    ("no resource package", "out_of_credit"),
+    ("please recharge", "out_of_credit"),
+    ("insufficient_quota", "out_of_credit"),
+    ("exceeded your current quota", "out_of_credit"),
+    ("billing", "out_of_credit"),
+    ("payment required", "out_of_credit"),
+    ("credit balance is too low", "out_of_credit"),
+    ("arrearage", "out_of_credit"),
+    ("invalid api key", "bad_api_key"),
+    ("incorrect api key", "bad_api_key"),
+    ("invalid_api_key", "bad_api_key"),
+    ("unauthorized", "bad_api_key"),
+    ("authentication", "bad_api_key"),
+    ("permission denied", "no_access"),
+    ("model not found", "bad_model"),
+    ("does not exist or you do not have access", "bad_model"),
+)
+
+_RECHARGE_URL = {
+    "glm": "https://z.ai (or open.bigmodel.cn) → Billing",
+    "kimi": "https://platform.moonshot.ai → Billing",
+    "deepseek": "https://platform.deepseek.com → Top up",
+    "qwen": "https://dashscope.console.aliyun.com → Billing",
+    "grok": "https://console.x.ai → Billing",
+    "openai": "https://platform.openai.com/account/billing",
+    "claude": "https://console.anthropic.com → Plans & billing",
+}
+
+
+def classify_provider_error(exc: Exception | str, team: str = "") -> dict:
+    """Turn a raw provider exception into something the runner can act on.
+
+    Returns ``{"code", "terminal", "message"}``. ``terminal`` means retrying
+    cannot help — a human must add credit, fix a key, or change the model — so
+    the runner should stop calling the API instead of hammering it every cycle.
+    """
+    raw = exc if isinstance(exc, str) else repr(exc)
+    low = raw.lower()
+    code = None
+    for needle, kind in _TERMINAL_HINTS:
+        if needle in low:
+            code = kind
+            break
+    if code is None:
+        # Not terminal: genuine rate limiting, an overloaded upstream, or a
+        # transient network fault. All of these are worth retrying next cycle.
+        if "rate limit" in low or "429" in low:
+            return {"code": "rate_limited", "terminal": False,
+                    "message": "rate limited by the provider — will retry next cycle"}
+        if "timeout" in low or "timed out" in low or "connection" in low:
+            return {"code": "network", "terminal": False,
+                    "message": "network/timeout talking to the provider — will retry next cycle"}
+        if "overloaded" in low or "503" in low or "502" in low:
+            return {"code": "provider_down", "terminal": False,
+                    "message": "provider is overloaded — will retry next cycle"}
+        return {"code": "unknown", "terminal": False, "message": raw[:300]}
+
+    where = _RECHARGE_URL.get(str(team).lower(), "the provider's billing console")
+    if code == "out_of_credit":
+        msg = (f"OUT OF CREDIT — the provider rejected the call for insufficient balance. "
+               f"This desk is paused and will not burn further cycles until it is topped "
+               f"up: {where}. (Reported as HTTP 429, but it is a billing problem, not "
+               f"rate limiting — retrying cannot fix it.)")
+    elif code == "bad_api_key":
+        msg = (f"API KEY REJECTED — the provider refused the credentials. Paste a valid key "
+               f"in Settings; the desk is paused until then. ({where})")
+    elif code == "no_access":
+        msg = ("ACCESS DENIED — the key is valid but not permitted to use this model or "
+               "endpoint. Check the plan/permissions, then re-enable in Settings.")
+    else:
+        msg = ("MODEL NOT AVAILABLE — the configured model was rejected by the provider. "
+               "Set a valid model for this desk in Settings.")
+    return {"code": code, "terminal": True, "message": msg}
 
 
 class BaseProvider:
@@ -213,7 +305,13 @@ class AnthropicProvider(BaseProvider):
             return _finish(text="(max iterations reached)", actions=actions,
                            error="max_iterations_reached")
         except Exception as e:  # noqa: BLE001 - network / SDK / missing-key variability
-            return _finish(text="", actions=actions, error=repr(e))
+            # Classified rather than raw, so the runner can tell a transient
+            # rate limit from an account that is out of money, and the owner
+            # reads an instruction instead of an SDK repr.
+            info = classify_provider_error(e, getattr(self, "name", ""))
+            return _finish(text="", actions=actions,
+                           error=f"[{info['code']}] {info['message']}",
+                           error_code=info["code"], terminal=info["terminal"])
 
 
 def _to_openai_tools(tools: list[dict]) -> list[dict]:
@@ -384,7 +482,13 @@ class OpenAICompatibleProvider(BaseProvider):
             return _finish(text="(max iterations reached)", actions=actions,
                            error="max_iterations_reached")
         except Exception as e:  # noqa: BLE001 - network / SDK / missing-key variability
-            return _finish(text="", actions=actions, error=repr(e))
+            # Classified rather than raw, so the runner can tell a transient
+            # rate limit from an account that is out of money, and the owner
+            # reads an instruction instead of an SDK repr.
+            info = classify_provider_error(e, getattr(self, "name", ""))
+            return _finish(text="", actions=actions,
+                           error=f"[{info['code']}] {info['message']}",
+                           error_code=info["code"], terminal=info["terminal"])
 
 
 def make_provider(spec: dict) -> BaseProvider:

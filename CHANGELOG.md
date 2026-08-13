@@ -9,6 +9,45 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.34.1] — 2026-08-13
+
+### Fixed — an out-of-credit provider was treated as a rate limit and retried forever
+GLM returned `429 code 1113 — "Insufficient balance or no resource package.
+Please recharge."` The `429` made the SDK raise `RateLimitError`, so the runner
+treated an empty account as a transient throttle: it retried every cycle, filed
+the same SDK repr into the activity feed each time, and nothing anywhere said
+the one thing that would fix it. **No retry can succeed against an account with
+no money in it.**
+
+`classify_provider_error()` now separates the two meanings of 429 — and the
+other overloaded statuses — into a code and a `terminal` flag:
+
+| Classified as | Terminal | Behaviour |
+|---|---|---|
+| `out_of_credit` (insufficient balance, quota exhausted, low credit) | yes | pause the desk |
+| `bad_api_key`, `no_access`, `bad_model` | yes | pause the desk |
+| `rate_limited`, `network`, `provider_down` | no | retry next cycle, as before |
+
+A terminal failure **pauses that desk**: the runner stops calling the API from
+the Strategist, Trader and Reviewer alike, rather than burning cycles and
+tokens on a call that cannot succeed. The desk's positions keep running their
+stops — `manage_positions` was already outside the agent path and stays there.
+The pause persists across restarts, and the day is not marked planned or
+reviewed on a dead provider, so those run properly once it is back.
+
+**Recovery needs no intervention beyond fixing the account.** A paused desk is
+probed once every `RETRY_PROVIDER_MINUTES` (20); the first probe that succeeds
+clears the pause and announces the desk resumed. Verified: 20 consecutive
+cycles skipped with zero API calls, exactly one probe allowed at the 21-minute
+mark, automatic recovery on success, and a genuine rate limit correctly NOT
+pausing the desk. The retry clock is stamped at the moment of failure — without
+that, the timer read as "never probed" and let the very next cycle straight back
+through to the dead endpoint.
+
+**The dashboard now says so.** A blocked desk gets a red banner at the top of
+the overview naming the desk, what is wrong, and where to fix it, plus a marker
+in the leaderboard row. Previously such a desk simply looked idle.
+
 ## [6.34.0] — 2026-08-13
 
 ### Added — the overview page now shows every desk's work in one place
