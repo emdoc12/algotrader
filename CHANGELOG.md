@@ -9,6 +9,20 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.33.3] — 2026-08-13
+
+### Fixed — PROJECT_NOTES.md described a system that no longer existed
+It still said "four AI desks" with "$10,000" accounts and options "once a
+brokerage is connected" — against seven desks on a $50,000 capital base with a
+working options engine. Rewritten and, more importantly, **verified**: every
+factual claim in it (desk names, starting capital, all seven risk-rail defaults,
+the micro futures list, the strategy count, the commitment period, and the tool
+names) is now asserted against the live code rather than written from memory.
+
+Adds sections the file never had: what the desks can actually trade, the
+broker-enforced risk rails with their defaults and env vars, the data sources
+and which of them are read-only, and the research loop.
+
 ## [6.33.2] — 2026-08-13
 
 ### Fixed — VERSION was stale, so the dashboard misreported the running build
