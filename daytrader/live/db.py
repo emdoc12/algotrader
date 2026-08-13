@@ -273,10 +273,39 @@ class LiveDB:
         return [dict(r) for r in cur.fetchall()][::-1]  # oldest first
 
     def equity_curve(self, limit: int = 500) -> list[dict]:
+        """Equity over time, with owner capital removed from the plotted series.
+
+        Raw equity steps vertically the moment capital is added, which reads as a
+        huge gain on a chart even though nothing was earned. Each point therefore
+        also carries ``contributed`` (deposits up to that moment) and
+        ``equity_adj`` = equity - contributed — a continuous curve showing ONLY
+        trading performance, comparable across the deposit boundary and across
+        desks. Raw ``equity`` is left untouched for anything that needs the real
+        account value.
+        """
         cur = self.conn.execute(
             "SELECT ts, equity, cash, drawdown_pct FROM equity_snapshots "
             "ORDER BY id DESC LIMIT ?", (limit,))
-        return [dict(r) for r in cur.fetchall()][::-1]
+        rows = [dict(r) for r in cur.fetchall()][::-1]
+        try:
+            events = self.capital_events()
+        except Exception:  # noqa: BLE001
+            events = []
+        if not events:
+            for r in rows:
+                r["contributed"] = 0.0
+                r["equity_adj"] = r.get("equity")
+            return rows
+        events.sort(key=lambda e: str(e.get("ts") or ""))
+        for r in rows:
+            ts = str(r.get("ts") or "")
+            contributed = sum(float(e["amount"]) for e in events
+                              if str(e.get("ts") or "") <= ts)
+            r["contributed"] = round(contributed, 2)
+            eq = r.get("equity")
+            r["equity_adj"] = (round(float(eq) - contributed, 2)
+                               if eq is not None else None)
+        return rows
 
     # ------------------------------------------------------------------ #
     # trades                                                             #

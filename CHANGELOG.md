@@ -9,6 +9,21 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.31.1] — 2026-08-05
+
+### Fixed — the capital top-up put a $25k cliff in the equity chart
+v6.31.0 kept `return_pct` and `pnl` honest but left the **equity curve** plotting
+raw account value, so the deposit drew a vertical $25,000 step — reading as an
+enormous gain on the one view that is meant to show trading skill.
+
+`equity_curve()` now carries `contributed` (capital added up to that point) and
+`equity_adj` = equity − contributed, and the dashboard chart plots `equity_adj`.
+The line is continuous across the deposit and moves only on realized/unrealized
+P&L, which also keeps the seven desks comparable across the boundary. Raw
+`equity` is untouched for anything that needs true account value (standings,
+stat tiles, risk checks). Verified: a deposit that stepped the raw series
+$25,000 leaves a maximum plotted step of $400 — the amount actually earned.
+
 ## [6.31.0] — 2026-08-05
 
 ### Added — one-time capital top-up, booked as capital and not as profit

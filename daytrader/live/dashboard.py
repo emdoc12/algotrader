@@ -692,6 +692,11 @@ function drawEquityChart(canvas, data){
 
   const curves = data.curves || {};
   const start = Number(data.start_cash || START);
+  // Plot TRADING performance, not account size: raw equity jumps vertically when
+  // the owner adds capital, which reads as a huge gain though nothing was earned.
+  // equity_adj already has contributed capital removed, so the line stays
+  // continuous across a deposit.
+  const eqOf = (p) => Number(p.equity_adj != null ? p.equity_adj : p.equity);
 
   // gather min/max equity + max length
   let lo = start, hi = start, maxLen = 0, anyPoints = false;
@@ -701,7 +706,7 @@ function drawEquityChart(canvas, data){
     if(c.length){ anyPoints = true; tsFirst[tm] = c[0].ts; tsLast[tm] = c[c.length-1].ts; }
     maxLen = Math.max(maxLen, c.length);
     for(const p of c){
-      const e = Number(p.equity);
+      const e = eqOf(p);
       if(isFinite(e)){ lo = Math.min(lo,e); hi = Math.max(hi,e); }
     }
   }
@@ -748,13 +753,13 @@ function drawEquityChart(canvas, data){
     ctx.strokeStyle = COLORS[tm]; ctx.lineWidth = 1.8;
     ctx.beginPath();
     if(c.length === 1){
-      const y = yFor(Number(c[0].equity));
+      const y = yFor(eqOf(c[0]));
       ctx.arc(xFor(0,1), y, 2.4, 0, Math.PI*2);
       ctx.fillStyle = COLORS[tm]; ctx.fill();
       continue;
     }
     c.forEach((p,i) => {
-      const x = xFor(i, c.length), y = yFor(Number(p.equity));
+      const x = xFor(i, c.length), y = yFor(eqOf(p));
       if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
     });
     ctx.stroke();
