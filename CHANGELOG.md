@@ -9,6 +9,21 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.33.2] — 2026-08-13
+
+### Fixed — VERSION was stale, so the dashboard misreported the running build
+`VERSION` had sat at 6.31.1 across three shipped releases. The dashboard header
+reads that file directly, which meant a container running the options engine
+still badged itself v6.31.1. Bumped to match, and `CLAUDE.md` now records that
+VERSION and CHANGELOG are updated together on every shipped change.
+
+### Added — CLAUDE.md with the repo's standing working agreements
+Chiefly: **all work is pushed to `main`** — this repo does not run feature
+branches, and no pull request is opened unless asked. Also records the
+paper-trading-only constraint (tastytrade stays READ-ONLY), the rule against
+changing working interfaces as a side effect, and the version-first commit and
+changelog convention.
+
 ## [6.33.1] — 2026-08-13
 
 ### Changed — the overview chart plots pure profit and loss
