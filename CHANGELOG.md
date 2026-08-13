@@ -9,6 +9,33 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.33.1] — 2026-08-13
+
+### Changed — the overview chart plots pure profit and loss
+Account VALUE is a poor comparison chart. Every desk's line starts at the same
+large number, so the only thing being judged — what each desk actually earned —
+was a few hundred dollars of wiggle inside a $50,000 axis. The chart now plots
+P&L from zero: every desk shares an origin, break-even is always on screen, and
+the full vertical range goes to the difference between them. Each line is
+labelled with its current P&L at the right edge, because with seven desks
+bunched within a few hundred dollars the legend colour alone does not say who
+is ahead.
+
+The series is still `equity_adj` (owner-contributed capital removed), measured
+against the original starting equity, so the +$25k deposit remains invisible:
+verified on a series where raw equity steps $25,320 between two points while the
+plotted step is $320.
+
+The page header was stale in two ways and is now correct — it claimed "Four AI
+desks" against seven, and "$25,000" against accounts that hold $50,000.
+
+### Added — Alpha Vantage key field in Settings
+`ALPHAVANTAGE_API_KEY` is now a masked field on the Settings page under research
+data providers, with `ALPHAVANTAGE_DAILY_LIMIT` alongside it, so enabling
+historical option chains does not require an env edit and a container restart.
+Verified through the real save path: the key persists, masks in the status
+payload, applies to the environment, and flips the provider to configured.
+
 ## [6.33.0] — 2026-08-13
 
 ### Added — the options engine: desks can now trade what the owner trades

@@ -527,8 +527,8 @@ PAGE_HTML = r"""<!DOCTYPE html>
 <header>
   <span class="ver" title="Running version">v__VERSION__</span>
   <h1>AI Trading Desk Competition</h1>
-  <div class="sub">Four AI desks &mdash; Claude, OpenAI, Grok, Qwen &mdash; each start with
-    <b>$__START_CASH__</b> in an identical paper account. May the best model win.</div>
+  <div class="sub" id="subtitle">Seven AI desks, one model each, competing in identical
+    paper accounts. May the best model win.</div>
 </header>
 <div class="tabs" id="tabs"></div>
 <main id="main"></main>
@@ -659,7 +659,7 @@ async function loadOverview(){
 
   // equity chart
   const chartCard = el("div", {class:"card"});
-  chartCard.appendChild(el("h2", null, "Equity Curves"));
+  chartCard.appendChild(el("h2", null, "Profit / Loss"));
   const cv = el("canvas", {id:"equityChart"});
   chartCard.appendChild(cv);
   const legend = el("div", {class:"legend"});
@@ -668,8 +668,7 @@ async function loadOverview(){
       el("span",{class:"sw", style:"background:"+COLORS[tm]}), LABELS[tm]));
   }
   legend.appendChild(el("div",{class:"li"},
-    el("span",{class:"sw", style:"background:var(--gray)"}),
-    "$"+START.toLocaleString()+" baseline"));
+    el("span",{class:"sw", style:"background:var(--gray)"}), "break-even"));
   chartCard.appendChild(legend);
   main.appendChild(chartCard);
   requestAnimationFrame(() => drawEquityChart(cv, data));
@@ -692,21 +691,28 @@ function drawEquityChart(canvas, data){
 
   const curves = data.curves || {};
   const start = Number(data.start_cash || START);
-  // Plot TRADING performance, not account size: raw equity jumps vertically when
-  // the owner adds capital, which reads as a huge gain though nothing was earned.
-  // equity_adj already has contributed capital removed, so the line stays
-  // continuous across a deposit.
-  const eqOf = (p) => Number(p.equity_adj != null ? p.equity_adj : p.equity);
+  // PURE PROFIT AND LOSS, plotted from zero. Account VALUE is a poor comparison
+  // chart: every line starts at the same big number, so the part that actually
+  // differs between desks is a few hundred dollars of wiggle inside a $50,000
+  // axis. Subtracting the starting capital puts every desk on a common origin
+  // and gives the whole vertical range to the only thing being judged — what
+  // each desk earned or lost.
+  //
+  // equity_adj already has owner-contributed capital removed (a deposit is not
+  // profit), so the baseline it is measured against is the ORIGINAL starting
+  // equity, which is exactly start_cash.
+  const pnlOf = (p) => Number(p.equity_adj != null ? p.equity_adj : p.equity) - start;
 
-  // gather min/max equity + max length
-  let lo = start, hi = start, maxLen = 0, anyPoints = false;
+  // gather min/max P&L + max length. Zero is always in range: a chart of profit
+  // that does not show break-even hides whether a desk is up or down at all.
+  let lo = 0, hi = 0, maxLen = 0, anyPoints = false;
   const tsFirst = {}, tsLast = {};
   for(const tm of TEAMS){
     const c = curves[tm] || [];
     if(c.length){ anyPoints = true; tsFirst[tm] = c[0].ts; tsLast[tm] = c[c.length-1].ts; }
     maxLen = Math.max(maxLen, c.length);
     for(const p of c){
-      const e = eqOf(p);
+      const e = pnlOf(p);
       if(isFinite(e)){ lo = Math.min(lo,e); hi = Math.max(hi,e); }
     }
   }
@@ -714,6 +720,7 @@ function drawEquityChart(canvas, data){
   if(hi === lo){ hi = lo + 1; }
   const range = hi - lo;
   lo -= range * 0.06; hi += range * 0.06;
+  const fmtPnl = v => (v < 0 ? "-$" : "+$") + Math.abs(Math.round(v)).toLocaleString();
 
   const yFor = v => padT + plotH - ((v - lo)/(hi - lo)) * plotH;
   const xFor = (i, n) => padL + (n <= 1 ? plotW/2 : (i/(n-1)) * plotW);
@@ -727,12 +734,12 @@ function drawEquityChart(canvas, data){
     const v = lo + (hi-lo)*(i/ticks);
     const y = yFor(v);
     ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W-padR, y); ctx.stroke();
-    ctx.fillText("$"+Math.round(v).toLocaleString(), padL-8, y);
+    ctx.fillText(fmtPnl(v), padL-8, y);
   }
 
-  // baseline at start_cash (dashed) if in range
-  if(start >= lo && start <= hi){
-    const y = yFor(start);
+  // break-even line at zero — the reference the whole chart is about.
+  {
+    const y = yFor(0);
     ctx.save();
     ctx.strokeStyle = "#8b8b96"; ctx.setLineDash([5,4]); ctx.lineWidth = 1.2;
     ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W-padR, y); ctx.stroke();
@@ -742,7 +749,7 @@ function drawEquityChart(canvas, data){
   if(!anyPoints){
     ctx.fillStyle = "#8b8b96"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
     ctx.font = "13px sans-serif";
-    ctx.fillText("No equity snapshots yet — waiting for trading to begin.", W/2, H/2);
+    ctx.fillText("No P&L yet — waiting for trading to begin.", W/2, H/2);
     return;
   }
 
@@ -753,16 +760,26 @@ function drawEquityChart(canvas, data){
     ctx.strokeStyle = COLORS[tm]; ctx.lineWidth = 1.8;
     ctx.beginPath();
     if(c.length === 1){
-      const y = yFor(eqOf(c[0]));
+      const y = yFor(pnlOf(c[0]));
       ctx.arc(xFor(0,1), y, 2.4, 0, Math.PI*2);
       ctx.fillStyle = COLORS[tm]; ctx.fill();
       continue;
     }
     c.forEach((p,i) => {
-      const x = xFor(i, c.length), y = yFor(eqOf(p));
+      const x = xFor(i, c.length), y = yFor(pnlOf(p));
       if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
     });
     ctx.stroke();
+    // Current P&L at the end of the line. With seven desks bunched inside a few
+    // hundred dollars, the legend colour alone does not tell you who is ahead.
+    const last = pnlOf(c[c.length-1]);
+    if(isFinite(last)){
+      ctx.save();
+      ctx.fillStyle = COLORS[tm]; ctx.font = "10px sans-serif";
+      ctx.textAlign = "right"; ctx.textBaseline = "bottom";
+      ctx.fillText(fmtPnl(last), W-padR, yFor(last) - 2);
+      ctx.restore();
+    }
   }
 
   // time axis labels (first/last) using the longest available series
@@ -1428,6 +1445,16 @@ function renderSettings(main, status){
   dataCard.appendChild(settingsSecretField(status, "BULLFLOW_API_KEY", "BULLFLOW_API_KEY (options flow alerts)"));
   dataCard.appendChild(settingsSecretField(status, "QUIVER_API_KEY", "QUIVER_API_KEY (congress / insider / WSB / gov contracts)"));
   dataCard.appendChild(settingsSecretField(status, "FINVIZ_AUTH_TOKEN", "FINVIZ_AUTH_TOKEN (Elite screener export)"));
+  dataCard.appendChild(settingsSecretField(status, "ALPHAVANTAGE_API_KEY", "ALPHAVANTAGE_API_KEY (HISTORICAL option chains with Greeks)"));
+  dataCard.appendChild(el("div", {class:"muted", style:"font-size:11px;margin:-6px 0 12px 0"},
+    "Free key, ~20 seconds to claim at alphavantage.co/support/#api-key. Unlocks options RESEARCH: "
+    + "full historical chains (every strike, bid/ask, open interest, IV, all Greeks) going back ~20 years, "
+    + "so a desk can test a wheel or a credit spread against real past prices instead of guessing. "
+    + "Live chains come from tastytrade and do not need this. Chains are cached to disk forever "
+    + "(history never changes) and shared by all seven desks, so only NEW dates count against the "
+    + "free tier's 25/day."));
+  dataCard.appendChild(settingsTextField(status, "ALPHAVANTAGE_DAILY_LIMIT", "ALPHAVANTAGE_DAILY_LIMIT",
+    {def:"25", hint:"New historical-chain fetches allowed per day. Raise it to match a premium plan."}));
   main.appendChild(dataCard);
 
   // Other
