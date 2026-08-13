@@ -9,6 +9,34 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.34.0] — 2026-08-13
+
+### Added — the overview page now shows every desk's work in one place
+Seven desks meant seven tabs, and anything that lived only on a team page was
+seen a seventh at a time. Three sections now aggregate across all desks:
+
+* **Dev requests** — every desk's open requests in one queue, newest first, each
+  tagged with the desk in its chart colour and closable in place with "Mark
+  done". This is the one thing that needs the owner personally; requests were
+  sitting unread simply because nobody opened that tab.
+* **Who is running what** — each desk's declared strategy, when it was declared,
+  its allocation, and how many share and options positions it currently holds.
+  This is what the P&L chart is actually testing, so it belongs next to it.
+* **Open positions** — every desk's open risk in one table: side, quantity,
+  entry, live mark, unrealized P&L, stop, target, strategy and horizon, plus a
+  net-unrealized total across all desks, and a second table for open options
+  structures with their credit/debit, max loss and collateral.
+
+Marks come from the 30-second quote cache the trading loop already fills, so a
+dashboard refresh is a dictionary lookup rather than a burst of network calls.
+A symbol that cannot be priced shows a blank mark rather than falling back to
+its entry price, which would render a losing position as flat. Futures P&L
+applies the contract multiplier: a 15-point adverse move on 2 MES shows −$150,
+not −$30.
+
+The team pages now render their dev requests through the same component, so the
+two views cannot drift apart.
+
 ## [6.33.3] — 2026-08-13
 
 ### Fixed — PROJECT_NOTES.md described a system that no longer existed

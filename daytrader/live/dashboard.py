@@ -54,20 +54,110 @@ def _safe(db: LiveDB | None, method: str, *args, default):
 
 
 def overview_payload() -> dict:
-    """Standings for all four teams plus their equity curves."""
+    """Standings, equity curves, and every desk's open dev requests.
+
+    Dev requests are aggregated here because they are the one thing the owner
+    must act on personally: seven desks filing them into seven separate team
+    pages means the queue is only ever seen a seventh at a time, and requests
+    sit unread simply because nobody opened that tab.
+    """
     curves: dict[str, list] = {}
+    devs: list[dict] = []
+    positions: list[dict] = []
+    options: list[dict] = []
+    strategies: list[dict] = []
     for name in team_names():
         db = _team_db(name)
         try:
             curves[name] = _safe(db, "equity_curve", 500, default=[])
+            for d in _safe(db, "open_dev_requests", default=[]) or []:
+                devs.append({**d, "team": name})
+            for p in _safe(db, "load_open_positions", default=[]) or []:
+                positions.append({**p, "team": name})
+            for o in _safe(db, "open_option_positions", default=[]) or []:
+                options.append({**o, "team": name})
+            strategies.append(_declared_strategy(db, name))
         finally:
             if db is not None:
                 db.close()
+    # Newest first across all desks. Ties broken by id so the order is stable
+    # between refreshes rather than jittering on equal timestamps.
+    devs.sort(key=lambda d: (str(d.get("ts") or ""), int(d.get("id") or 0)), reverse=True)
+    _mark_positions(positions)
+    positions.sort(key=lambda p: -abs(float(p.get("unrealized") or 0.0)))
+    options.sort(key=lambda o: str(o.get("expiration") or ""))
+    for s in strategies:
+        s["open_positions"] = sum(1 for p in positions if p["team"] == s["team"])
+        s["open_options"] = sum(1 for o in options if o["team"] == s["team"])
     return {
         "start_cash": START_CASH,
         "standings": db_standings(),
         "curves": curves,
+        "dev_requests": devs,
+        "dev_request_count": len(devs),
+        "positions": positions,
+        "option_positions": options,
+        "strategies": strategies,
     }
+
+
+def _declared_strategy(db, name: str) -> dict:
+    """The lane this desk committed to, for the overview's strategy table."""
+    out = {"team": name, "strategy": None, "declared_on": None, "plan": None}
+    try:
+        import json as _json
+        raw = db.kv_get("declared_strategy")
+        rec = _json.loads(raw) if raw else {}
+        out["strategy"] = rec.get("name")
+        out["declared_on"] = rec.get("declared_on")
+        out["plan"] = (rec.get("plan") or "")[:240] or None
+        out["allocation_pct"] = rec.get("allocation_pct")
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _mark_positions(positions: list[dict]) -> None:
+    """Annotate each open position with a live mark and unrealized P&L.
+
+    Quotes come from the shared 30-second cache the trading loop already fills,
+    so this is a dictionary lookup in the normal case rather than a burst of
+    network calls on every 15-second dashboard refresh. A symbol that cannot be
+    priced keeps a null mark instead of falling back to its entry, which would
+    render a losing position as flat.
+    """
+    if not positions:
+        return
+    try:
+        from daytrader.core.contracts import multiplier
+    except Exception:  # noqa: BLE001
+        def multiplier(_s):  # type: ignore[misc]
+            return 1.0
+    marks: dict[str, float] = {}
+    try:
+        from daytrader.data import quotes
+        syms = sorted({str(p.get("symbol") or "").upper() for p in positions if p.get("symbol")})
+        marks = quotes.get_quotes(syms, max_age_sec=120.0) or {}
+    except Exception:  # noqa: BLE001
+        marks = {}
+    for p in positions:
+        sym = str(p.get("symbol") or "").upper()
+        mark = marks.get(sym)
+        p["mark"] = round(float(mark), 4) if mark is not None else None
+        p["unrealized"] = None
+        p["unrealized_pct"] = None
+        if mark is None:
+            continue
+        try:
+            entry = float(p.get("entry_price") or 0.0)
+            qty = float(p.get("qty") or 0.0)
+            mult = float(multiplier(sym) or 1.0)
+            direction = -1.0 if str(p.get("side", "")).lower() == "short" else 1.0
+            p["unrealized"] = round(direction * (float(mark) - entry) * qty * mult, 2)
+            if entry:
+                p["unrealized_pct"] = round(direction * (float(mark) / entry - 1.0) * 100.0, 2)
+        except (TypeError, ValueError, ZeroDivisionError):
+            continue
 
 
 def close_dev_request(team: str, req_id, status: str = "closed",
@@ -673,9 +763,177 @@ async function loadOverview(){
   main.appendChild(chartCard);
   requestAnimationFrame(() => drawEquityChart(cv, data));
 
+  // who is running what
+  main.appendChild(strategyCard(data.strategies || []));
+
+  // every desk's open risk in one table
+  main.appendChild(openPositionsCard(data.positions || [], data.option_positions || []));
+
+  // dev requests from every desk, in one queue
+  main.appendChild(devRequestCard(data.dev_requests || [], () => loadOverview()));
+
   if(!refreshTimer && current === "overview"){
     refreshTimer = setInterval(() => { if(current==="overview") loadOverview(); }, 15000);
   }
+}
+
+// A desk's name in its chart colour, so a row can be traced to a line.
+function teamPill(team){
+  const c = COLORS[team] || "#8b8b96";
+  return el("span",{class:"pill",
+    style:"background:"+c+"22;color:"+c+";border:1px solid "+c+"55"},
+    LABELS[team] || team);
+}
+
+function strategyCard(rows){
+  const card = el("div", {class:"card"});
+  card.appendChild(el("h2", null, "Who is running what"));
+  card.appendChild(el("div", {class:"muted", style:"font-size:12px;margin-bottom:12px"},
+    "Each desk commits to one strategy and must keep it before switching, so these lanes "
+    + "are what the P&L above is actually testing. A desk showing a dash has not declared yet."));
+  const tbl = el("table");
+  const head = el("tr");
+  ["Desk","Strategy","Since","Alloc","Shares/Futures","Options","Plan"]
+    .forEach(h => head.appendChild(el("th", null, h)));
+  tbl.appendChild(head);
+  (rows||[]).forEach(r => {
+    const tr = el("tr");
+    tr.appendChild(el("td", null, teamPill(r.team)));
+    tr.appendChild(el("td", {class: r.strategy?"":"gray"}, r.strategy || "— not declared"));
+    tr.appendChild(el("td", {class:"gray"}, r.declared_on || "—"));
+    tr.appendChild(el("td", {class:"gray"}, r.allocation_pct!=null ? Number(r.allocation_pct)+"%" : "—"));
+    tr.appendChild(el("td", null, String(r.open_positions||0)));
+    tr.appendChild(el("td", null, String(r.open_options||0)));
+    tr.appendChild(el("td", {class:"gray", style:"font-size:11px;max-width:340px"}, r.plan || "—"));
+    tbl.appendChild(tr);
+  });
+  card.appendChild(tbl);
+  return card;
+}
+
+function openPositionsCard(positions, options){
+  const card = el("div", {class:"card"});
+  const n = (positions||[]).length + (options||[]).length;
+  card.appendChild(el("h2", null, "Open positions" + (n ? "  ("+n+")" : "")));
+  if(!n){
+    card.appendChild(el("div",{class:"empty"},"No desk is holding anything right now."));
+    return card;
+  }
+  let net = 0;
+  (positions||[]).forEach(p => { if(p.unrealized != null) net += Number(p.unrealized); });
+  card.appendChild(el("div", {class:"muted", style:"font-size:12px;margin-bottom:12px"},
+    "Every desk's open risk in one place. Unrealized P&L is marked against a live quote; "
+    + "a blank mark means the quote is unavailable rather than that the position is flat."));
+
+  if((positions||[]).length){
+    const tbl = el("table");
+    const head = el("tr");
+    ["Desk","Symbol","Side","Qty","Entry","Mark","Unrealized","Stop","Target","Strategy","Horizon"]
+      .forEach(h => head.appendChild(el("th", null, h)));
+    tbl.appendChild(head);
+    positions.forEach(p => {
+      const tr = el("tr");
+      const short = String(p.side||"").toLowerCase()==="short";
+      tr.appendChild(el("td", null, teamPill(p.team)));
+      tr.appendChild(el("td", null, p.symbol||"?"));
+      tr.appendChild(el("td", {class: short?"red":"green"}, short?"SHORT":"LONG"));
+      tr.appendChild(el("td", null, String(p.qty)));
+      tr.appendChild(el("td", null, fmtMoney(p.entry_price)));
+      tr.appendChild(el("td", {class: p.mark==null?"gray":""}, p.mark==null?"—":fmtMoney(p.mark)));
+      const u = p.unrealized;
+      tr.appendChild(el("td", {class: u==null?"gray":clsFor(u)},
+        u==null ? "—" : (u>=0?"+":"-") + fmtMoney(Math.abs(u))
+                  + (p.unrealized_pct!=null ? "  ("+(p.unrealized_pct>=0?"+":"")+Number(p.unrealized_pct).toFixed(1)+"%)" : "")));
+      tr.appendChild(el("td", {class:"gray"}, p.stop!=null?fmtMoney(p.stop):"—"));
+      tr.appendChild(el("td", {class:"gray"}, p.target!=null?fmtMoney(p.target):"—"));
+      tr.appendChild(el("td", {class:"gray"}, p.strategy||"—"));
+      tr.appendChild(el("td", {class:"gray"}, p.horizon||"day"));
+      tbl.appendChild(tr);
+    });
+    card.appendChild(tbl);
+    card.appendChild(el("div", {class:"muted", style:"font-size:12px;margin-top:8px"},
+      el("span", null, "Net unrealized across all desks: "),
+      el("span", {class: clsFor(net)}, (net>=0?"+":"-") + fmtMoney(Math.abs(net)))));
+  }
+
+  if((options||[]).length){
+    card.appendChild(el("h2", {style:"font-size:13px;margin-top:18px"}, "Options"));
+    const ot = el("table");
+    const oh = el("tr");
+    ["Desk","Underlying","Structure","Expiry","Credit/Debit","Max loss","Collateral","Strategy"]
+      .forEach(h => oh.appendChild(el("th", null, h)));
+    ot.appendChild(oh);
+    options.forEach(o => {
+      const tr = el("tr");
+      const cash = Number(o.open_cash||0);
+      tr.appendChild(el("td", null, teamPill(o.team)));
+      tr.appendChild(el("td", null, o.underlying||"?"));
+      tr.appendChild(el("td", null, o.structure||"—"));
+      tr.appendChild(el("td", {class:"gray"}, o.expiration||"—"));
+      tr.appendChild(el("td", {class: cash>=0?"green":"red"},
+        (cash>=0 ? "credit " : "debit ") + fmtMoney(Math.abs(cash))));
+      tr.appendChild(el("td", {class:"red"}, o.max_loss!=null?fmtMoney(o.max_loss):"—"));
+      tr.appendChild(el("td", {class:"gray"}, o.collateral!=null?fmtMoney(o.collateral):"—"));
+      tr.appendChild(el("td", {class:"gray"}, o.strategy||"—"));
+      ot.appendChild(tr);
+    });
+    card.appendChild(ot);
+  }
+  return card;
+}
+
+// Shared by the overview (all desks) and a team page (one desk). `devs` items
+// carry a `team` on the overview; on a team page the team is passed in instead.
+function devRequestCard(devs, onChange, forcedTeam){
+  const card = el("div", {class:"card"});
+  const head = el("div", {class:"row", style:"align-items:center"});
+  head.appendChild(el("h2", {style:"margin:0"},
+    "Dev requests" + (devs.length ? "  (" + devs.length + " open)" : "")));
+  card.appendChild(head);
+  if(!forcedTeam){
+    card.appendChild(el("div", {class:"muted", style:"font-size:12px;margin:6px 0 12px 0"},
+      "Every desk's open requests in one queue, newest first. These are the things the "
+      + "desks say are blocking them — a missing data source, a tool that does not exist, "
+      + "a bug. Mark one done once it has shipped and the desk stops re-filing it."));
+  }
+  if(!devs.length){
+    card.appendChild(el("div",{class:"empty"},
+      forcedTeam ? "No open dev requests." : "No open dev requests from any desk."));
+    return card;
+  }
+  devs.forEach(d => {
+    const team = forcedTeam || d.team;
+    const item = el("div",{class:"item"});
+    const meta = el("div",{class:"meta", style:"display:flex;align-items:center;gap:10px;justify-content:space-between"});
+    const left = el("div",{style:"display:flex;align-items:center;gap:8px;flex-wrap:wrap"});
+    if(!forcedTeam && team){
+      // Colour-matched to the desk's chart line, so the queue reads at a glance.
+      left.appendChild(el("span",{class:"pill",
+        style:"background:"+(COLORS[team]||"#8b8b96")+"22;color:"+(COLORS[team]||"#8b8b96")
+              +";border:1px solid "+(COLORS[team]||"#8b8b96")+"55"},
+        LABELS[team] || team));
+    }
+    left.appendChild(el("span",{class:"pill"}, "#"+(d.id!=null?d.id:"?")+" "+(d.status||"open")));
+    if(d.ts) left.appendChild(el("span",{class:"gray", style:"font-size:11px"}, fmtWhen(d.ts)));
+    meta.appendChild(left);
+    const btn = el("button",{class:"btn-ghost", style:"padding:4px 10px;font-size:11px"}, "Mark done");
+    btn.addEventListener("click", async () => {
+      btn.disabled = true; btn.textContent = "…";
+      await closeDevReq(team, d.id, onChange);
+    });
+    meta.appendChild(btn);
+    item.appendChild(meta);
+    const title = el("div",{class:"body"});
+    title.appendChild(document.createTextNode(d.title||"(untitled)"));
+    if(safeUrl(d.url)){
+      title.appendChild(document.createTextNode("  "));
+      title.appendChild(el("a",{href:safeUrl(d.url), target:"_blank", rel:"noopener"}, "link"));
+    }
+    item.appendChild(title);
+    if(d.body) item.appendChild(el("div",{class:"muted", style:"font-size:12px;margin-top:3px;white-space:pre-wrap"}, d.body));
+    card.appendChild(item);
+  });
+  return card;
 }
 
 function drawEquityChart(canvas, data){
@@ -926,35 +1184,8 @@ async function loadTeam(name){
   }
   main.appendChild(thinkCard);
 
-  // dev requests
-  const devCard = el("div", {class:"card"});
-  devCard.appendChild(el("h2", null, "Dev requests"));
-  const devs = data.dev_requests || [];
-  if(devs.length){
-    devs.forEach(d => {
-      const item = el("div",{class:"item"});
-      const meta = el("div",{class:"meta", style:"display:flex;align-items:center;gap:10px;justify-content:space-between"});
-      const left = el("div",{style:"display:flex;align-items:center;gap:8px;flex-wrap:wrap"});
-      left.appendChild(el("span",{class:"pill"}, "#"+(d.id!=null?d.id:"?")+" "+(d.status||"open")));
-      if(d.ts) left.appendChild(el("span",{class:"gray", style:"font-size:11px"}, fmtWhen(d.ts)));
-      meta.appendChild(left);
-      meta.appendChild(el("button",{class:"btn-ghost", style:"padding:4px 10px;font-size:11px",
-        onclick:()=>closeDevReq(name, d.id)}, "Mark done"));
-      item.appendChild(meta);
-      const title = el("div",{class:"body"});
-      title.appendChild(document.createTextNode(d.title||"(untitled)"));
-      if(safeUrl(d.url)){
-        title.appendChild(document.createTextNode("  "));
-        title.appendChild(el("a",{href:safeUrl(d.url), target:"_blank", rel:"noopener"}, "link"));
-      }
-      item.appendChild(title);
-      if(d.body) item.appendChild(el("div",{class:"muted", style:"font-size:12px;margin-top:3px;white-space:pre-wrap"}, d.body));
-      devCard.appendChild(item);
-    });
-  } else {
-    devCard.appendChild(el("div",{class:"empty"},"No open dev requests."));
-  }
-  main.appendChild(devCard);
+  // dev requests (same renderer the overview uses, scoped to this desk)
+  main.appendChild(devRequestCard(data.dev_requests || [], () => loadTeam(name), name));
 
   // chat panel
   const chatCard = el("div", {class:"card"});
@@ -1039,7 +1270,7 @@ async function sendChat(name){
   }
 }
 
-async function closeDevReq(team, id){
+async function closeDevReq(team, id, onChange){
   if(id == null) return;
   try{
     await apiFetch("/api/devrequest/close", {
@@ -1049,6 +1280,7 @@ async function closeDevReq(team, id){
                             resolution: "marked done from dashboard"}),
     });
   }catch(e){ /* ignore; reload reflects truth */ }
+  if(typeof onChange === "function"){ onChange(); return; }
   if(current === team) loadTeam(team);
   else if(current === "health") loadHealth();
 }
