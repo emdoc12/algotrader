@@ -9,6 +9,27 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.34.7] — 2026-08-17
+
+### Fixed — the Grok desk's API cost was understated by ~2.5x
+The pricing table carried `grok: (1.25, 2.50)`, which is **grok-4.3's** rate.
+The desk runs grok-4.5, which bills $2.00 / $6.00 — verified against xAI's own
+model-pricing endpoint rather than from memory. On a representative cycle
+(40k input, 35k of it cached, 3k output) the dashboard reported $0.0181 against
+an actual $0.0455.
+
+Cached input is now priced from the provider's published rate where we have it,
+instead of a flat "10% of input" assumption. That assumption is well off for
+xAI — grok-4.6 caches at 25% of its input rate — and cached tokens are most of
+the volume here, because every cycle resends the same ~29k-character mission.
+Override per team with `<TEAM>_PRICE_CACHED`.
+
+### Note — Grok is pinned to grok-4.5; grok-4.6 shipped 2026-08-12
+Model ids are pinned deliberately, so nothing moves on its own. Switching is one
+field: Settings → `XAI_MODEL` → `grok-4.6`. Input and output pricing are
+identical between 4.5 and 4.6 ($2.00 / $6.00), so the switch is cost-neutral
+apart from a slightly dearer cache rate.
+
 ## [6.34.6] — 2026-08-17
 
 ### Fixed — a closed dev request kept coming back
