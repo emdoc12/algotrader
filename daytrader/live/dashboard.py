@@ -74,7 +74,19 @@ def overview_payload() -> dict:
         try:
             curves[name] = _safe(db, "equity_curve", 500, default=[])
             for d in _safe(db, "open_dev_requests", default=[]) or []:
-                devs.append({**d, "team": name})
+                entry = {**d, "team": name}
+                # Was this same complaint already closed once? Then the desk is
+                # telling you the fix did not land for them — which reads very
+                # differently from a first report.
+                try:
+                    prev = db.find_resolved_dev_request(d.get("title") or "",
+                                                        exclude_id=d.get("id"))
+                    if prev:
+                        entry["reopened_after"] = {"id": prev.get("id"),
+                                                   "resolved_ts": prev.get("resolved_ts")}
+                except Exception:  # noqa: BLE001
+                    pass
+                devs.append(entry)
             for p in _safe(db, "load_open_positions", default=[]) or []:
                 positions.append({**p, "team": name})
             for o in _safe(db, "open_option_positions", default=[]) or []:
@@ -1127,28 +1139,47 @@ function devRequestCard(devs, onChange, forcedTeam){
         LABELS[team] || team));
     }
     left.appendChild(el("span",{class:"pill"}, "#"+(d.id!=null?d.id:"?")+" "+(d.status||"open")));
+    if(Number(d.report_count||1) > 1){
+      left.appendChild(el("span",{class:"pill", style:"background:#f8727222;color:var(--red)"},
+        "reported " + d.report_count + "x"));
+    }
+    if(d.reopened_after){
+      left.appendChild(el("span",{class:"pill", style:"background:#ffd47922;color:var(--yellow,#ffd479)"},
+        "back after a fix"));
+    }
     if(d.ts) left.appendChild(el("span",{class:"gray", style:"font-size:11px"}, fmtWhen(d.ts)));
     meta.appendChild(left);
-    const btn = el("button",{class:"btn-ghost", style:"padding:4px 10px;font-size:11px"}, "Mark done");
-    meta.appendChild(btn);
+    // ONE CLICK. The common case is "this is fixed, tell them to try again" —
+    // that must not require typing a justification. The note is optional and
+    // tucked behind a secondary link for the rare case it adds something.
+    const btn = el("button",{class:"btn-ghost", style:"padding:4px 10px;font-size:11px"},
+                   "Fixed \u2014 tell them");
+    btn.addEventListener("click", async () => {
+      btn.disabled = true; btn.textContent = "\u2026";
+      await closeDevReq(team, d.id, "", "closed", onChange);
+    });
+    const wf = el("button",{class:"btn-ghost", style:"padding:4px 10px;font-size:11px;opacity:.7"},
+                  "Won\u0027t fix");
+    wf.addEventListener("click", async () => {
+      wf.disabled = true; wf.textContent = "\u2026";
+      await closeDevReq(team, d.id, "", "wont_fix", onChange);
+    });
+    const withNote = el("a", {href:"#", style:"font-size:11px;opacity:.6;margin-left:2px"}, "+ note");
+    meta.appendChild(el("div", {style:"display:flex;gap:6px;align-items:center"}, btn, wf, withNote));
     item.appendChild(meta);
-    // A note is worth prompting for: "closed" tells the desk nothing, while
-    // "fixed in v6.34.2, get_option_chain works again" tells it to re-test the
-    // lane it had written off.
     const noteRow = el("div", {style:"display:none;gap:6px;margin:6px 0;align-items:center"});
     const noteIn = el("input", {type:"text", style:"flex:1;font-size:12px;padding:5px 8px",
-      placeholder:"what changed? the desk reads this — e.g. 'fixed in v6.34.2, retry get_option_chain'"});
-    const okBtn = el("button", {class:"btn-ghost", style:"padding:4px 10px;font-size:11px"}, "Confirm");
-    const noBtn = el("button", {class:"btn-ghost", style:"padding:4px 10px;font-size:11px"}, "Won\u0027t fix");
-    const send = async (status) => {
-      okBtn.disabled = noBtn.disabled = true; okBtn.textContent = "…";
-      await closeDevReq(team, d.id, onChange, noteIn.value, status);
+      placeholder:"optional \u2014 what changed (the desks read this)"});
+    const okBtn = el("button", {class:"btn-ghost", style:"padding:4px 10px;font-size:11px"}, "Send");
+    const sendNote = async () => {
+      okBtn.disabled = true; okBtn.textContent = "\u2026";
+      await closeDevReq(team, d.id, noteIn.value, "closed", onChange);
     };
-    okBtn.addEventListener("click", () => send("closed"));
-    noBtn.addEventListener("click", () => send("wont_fix"));
-    noteIn.addEventListener("keydown", e => { if(e.key==="Enter") send("closed"); });
-    noteRow.appendChild(noteIn); noteRow.appendChild(okBtn); noteRow.appendChild(noBtn);
-    btn.addEventListener("click", () => {
+    okBtn.addEventListener("click", sendNote);
+    noteIn.addEventListener("keydown", e => { if(e.key==="Enter") sendNote(); });
+    noteRow.appendChild(noteIn); noteRow.appendChild(okBtn);
+    withNote.addEventListener("click", e => {
+      e.preventDefault();
       noteRow.style.display = noteRow.style.display === "flex" ? "none" : "flex";
       if(noteRow.style.display === "flex") noteIn.focus();
     });
@@ -1500,13 +1531,14 @@ async function sendChat(name){
   }
 }
 
-async function closeDevReq(team, id, onChange, note, status){
+async function closeDevReq(team, id, note, status, onChange){
   if(id == null) return;
   const resolution = (note && note.trim())
     ? note.trim()
     : (status === "wont_fix"
         ? "The owner will not build this. Stop planning around it."
-        : "The owner marked this delivered. RE-TEST the capability — it should work now.");
+        : "FIXED — this has been shipped. TRY IT AGAIN before assuming it is still broken, "
+          + "and drop any workaround you built for it.");
   try{
     await apiFetch("/api/devrequest/close", {
       method:"POST",
@@ -1711,7 +1743,7 @@ async function loadHealth(){
     row.appendChild(left);
     if(d.id!=null) row.appendChild(el("button",{class:"btn-ghost",
       style:"padding:4px 10px;font-size:11px;flex:0 0 auto",
-      onclick:()=>closeDevReq(d.team, d.id)}, "Mark done"));
+      onclick:()=>closeDevReq(d.team, d.id, "", "closed")}, "Fixed \u2014 tell them"));
     dc.appendChild(row);
   });
   main.appendChild(dc);

@@ -9,6 +9,35 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.34.6] — 2026-08-17
+
+### Fixed — a closed dev request kept coming back
+`add_dev_request()` had no duplicate check, so every cycle that re-hit the same
+bug inserted another row. Closing one did nothing about the six identical ones
+behind it, and the next cycle filed another — the owner closed the same
+complaint repeatedly and watched it reappear each time.
+
+A re-report now collapses onto the existing open row, incrementing
+`report_count` instead of multiplying rows. Matching is exact-normalized, or
+Jaccard ≥ 0.6, or containment ≥ 0.9 on titles of five words or more — the last
+one catches the same bug restated more briefly (two wordings of the SPY chain
+report score only 0.69 on word overlap but are plainly one bug). Length-gated
+deliberately: wrongly fusing two real requests hides one, which is worse than a
+duplicate. Verified that four wordings of the chain bug collapse to one row while
+four genuinely different requests stay distinct.
+
+Two new signals in the queue: **"reported Nx"** when a desk keeps hitting it, and
+**"back after a fix"** when a closed complaint is filed again — which means the
+fix did not reach that desk and reads very differently from a first report.
+
+### Changed — "Fixed — tell them" is one click, no typing
+Closing a request required expanding a note field and clicking Confirm. The
+common case is "this is fixed, tell them to try again", which should not require
+writing a justification. One click now broadcasts to all seven desks: *"FIXED —
+this has been shipped. TRY IT AGAIN before assuming it is still broken, and drop
+any workaround you built for it."* **Won't fix** sits beside it, and an optional
+`+ note` link remains for the rare case a note adds something.
+
 ## [6.34.5] — 2026-08-17
 
 ### Fixed — rejected orders were logged nowhere

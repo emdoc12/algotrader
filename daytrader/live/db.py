@@ -199,6 +199,8 @@ class LiveDB:
         """Backfill columns added after the original schema shipped."""
         try:
             self._ensure_column("option_positions", "open_commission", "REAL DEFAULT 0")
+            self._ensure_column("dev_requests", "report_count", "INTEGER DEFAULT 1")
+            self._ensure_column("dev_requests", "last_reported_ts", "TEXT")
             self._ensure_column("dev_requests", "resolution", "TEXT")
             self._ensure_column("dev_requests", "resolved_ts", "TEXT")
             self._ensure_column("open_positions", "horizon", "TEXT DEFAULT 'day'")
@@ -409,13 +411,100 @@ class LiveDB:
     # ------------------------------------------------------------------ #
     # dev requests                                                        #
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _norm_title(title: str) -> str:
+        """Normalized form used to recognise the same request filed again."""
+        import re
+        t = str(title or "").lower()
+        t = re.sub(r"[^a-z0-9 ]+", " ", t)
+        return " ".join(t.split())
+
+    def find_similar_dev_request(self, title: str, open_only: bool = True) -> Optional[dict]:
+        """An existing request that is really the same complaint, if any.
+
+        Exact normalized match, or a high word-overlap match to catch the same
+        problem reported with slightly different wording on a later day.
+        """
+        want = self._norm_title(title)
+        if not want:
+            return None
+        want_words = set(want.split())
+        sql = "SELECT * FROM dev_requests"
+        if open_only:
+            sql += " WHERE status='open'"
+        rows = [dict(r) for r in self.conn.execute(sql + " ORDER BY id DESC LIMIT 200")]
+        for r in rows:
+            got = self._norm_title(r.get("title"))
+            if got == want:
+                return r
+            got_words = set(got.split())
+            if not got_words or not want_words:
+                continue
+            shared = len(got_words & want_words)
+            jaccard = shared / max(len(got_words | want_words), 1)
+            # Containment catches the same complaint restated more briefly —
+            # "…returns error_code no_chain for SPY on every call" vs
+            # "…returns no_chain for SPY" scores only 0.69 on Jaccard but is
+            # plainly one bug. Gated on length so short titles cannot merge:
+            # wrongly fusing two real requests hides one, which is worse than a
+            # duplicate.
+            smaller = min(len(got_words), len(want_words))
+            containment = shared / max(smaller, 1)
+            if jaccard >= 0.6 or (containment >= 0.9 and smaller >= 5):
+                return r
+        return None
+
+    def find_resolved_dev_request(self, title: str, exclude_id: int | None = None) -> Optional[dict]:
+        """A CLOSED request that is the same complaint — i.e. this is back after a fix.
+
+        Scanning all requests would match the live row itself, so resolved rows
+        are queried directly and the current id excluded.
+        """
+        want = self._norm_title(title)
+        if not want:
+            return None
+        want_words = set(want.split())
+        rows = [dict(r) for r in self.conn.execute(
+            "SELECT * FROM dev_requests WHERE status!='open' ORDER BY id DESC LIMIT 200")]
+        for r in rows:
+            if exclude_id is not None and int(r.get("id") or 0) == int(exclude_id):
+                continue
+            got = self._norm_title(r.get("title"))
+            if got == want:
+                return r
+            got_words = set(got.split())
+            if not got_words:
+                continue
+            shared = len(got_words & want_words)
+            jaccard = shared / max(len(got_words | want_words), 1)
+            smaller = min(len(got_words), len(want_words))
+            containment = shared / max(smaller, 1)
+            if jaccard >= 0.6 or (containment >= 0.9 and smaller >= 5):
+                return r
+        return None
+
     def add_dev_request(
         self, title: str, body: str, url: Optional[str] = None, status: str = "open"
     ) -> int:
+        """Record a dev request, COLLAPSING a re-report onto the existing row.
+
+        Without this every cycle that re-hits the same bug filed another row, so
+        the owner could close the same complaint repeatedly and watch it
+        reappear. A duplicate now updates the existing request in place instead
+        of multiplying it.
+        """
+        dup = self.find_similar_dev_request(title, open_only=True)
+        if dup is not None:
+            n = int(dup.get("report_count") or 1) + 1
+            self.conn.execute(
+                "UPDATE dev_requests SET report_count=?, last_reported_ts=?, body=? WHERE id=?",
+                (n, _now_iso(), str(body or dup.get("body") or "")[:8000], int(dup["id"])))
+            self.conn.commit()
+            return int(dup["id"])
         cur = self.conn.execute(
-            "INSERT INTO dev_requests (ts, title, body, status, url) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (_now_iso(), title, body, status, url),
+            "INSERT INTO dev_requests (ts, title, body, status, url, report_count, "
+            "last_reported_ts) VALUES (?, ?, ?, ?, ?, 1, ?)",
+            (_now_iso(), title, body, status, url, _now_iso()),
         )
         self.conn.commit()
         return int(cur.lastrowid)
