@@ -230,6 +230,23 @@ def record_provider_error(url: str, err: dict) -> None:
     }
 
 
+def record_named_error(label: str, error_code: str, error: str, hint: str = "") -> None:
+    """Record a failure for a source that is not a plain HTTP GET.
+
+    The option-chain path is a websocket stream behind an SDK, so it has no URL
+    to classify — but a desk still needs it in ``degraded`` before it plans a
+    premium-selling lane around data it cannot fetch.
+    """
+    _PROVIDER_HEALTH[str(label)] = {
+        "error_code": error_code, "error": error, "hint": hint,
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime()),
+    }
+
+
+def clear_named_error(label: str) -> None:
+    _PROVIDER_HEALTH.pop(str(label), None)
+
+
 def provider_health() -> dict:
     """Configured providers plus the most recent failure for each, if any.
 

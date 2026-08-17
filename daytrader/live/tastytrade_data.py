@@ -34,6 +34,29 @@ log = logging.getLogger("daytrader.tastytrade")
 
 # How many symbols get a full option-chain enrichment per snapshot (latency bound).
 _MAX_OPTION_SYMBOLS = 3
+# The full-chain HTTP fetch is the slow phase for a big underlying (SPY has
+# thousands of listed contracts), so it gets its own budget instead of sharing
+# the streaming one.
+_CHAIN_FETCH_TIMEOUT = float(os.environ.get("OPTION_CHAIN_FETCH_TIMEOUT", "25"))
+# Give up on a quiet stream after this long with no new event.
+_STREAM_QUIET_SEC = float(os.environ.get("OPTION_STREAM_QUIET_SEC", "4"))
+# Hard cap on contracts subscribed for Greeks/quotes in one call.
+_MAX_STREAM_SYMBOLS = int(os.environ.get("OPTION_MAX_STREAM_SYMBOLS", "80"))
+
+
+class _ChainError(Exception):
+    """A chain fetch that failed for a REASON worth reporting.
+
+    Every failure path used to return an empty dict, which is why a desk saw
+    "no chain returned — the symbol may not have listed options" for SPY, and
+    why data_providers.degraded stayed empty: the reason was thrown away at the
+    point it was discovered.
+    """
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
 # Cached session, guarded by a lock so concurrent cycles share one login.
 _session = None
@@ -90,6 +113,11 @@ def _run(coro, timeout: float):
     loop = asyncio.new_event_loop()
     try:
         return loop.run_until_complete(asyncio.wait_for(coro, timeout=timeout))
+    except _ChainError:
+        # A diagnosed failure must reach the caller. Folding it into None here
+        # would relabel "this symbol has no listed options" as a timeout — the
+        # exact loss of information that had a desk chasing a phantom SPY bug.
+        raise
     except Exception as e:  # noqa: BLE001 - timeout, cancellation, network, etc.
         log.info("tastytrade: async op failed/timed out (%s)", e)
         return None
@@ -174,9 +202,15 @@ async def _collect_option_chain(
     from tastytrade.instruments import OptionType, get_option_chain  # read chain only
 
     # 12.x: get_option_chain(session, symbol) -> {expiration_date: [Option, ...]}
-    chain = get_option_chain(session, symbol)
+    # This is a BLOCKING HTTP call that downloads and parses the symbol's entire
+    # option chain — thousands of contracts for an index ETF. Run it in a thread
+    # so it cannot stall the event loop the streamer also needs, and give it its
+    # own budget rather than letting it eat the streaming allowance.
+    chain = await asyncio.wait_for(
+        asyncio.to_thread(get_option_chain, session, symbol),
+        timeout=_CHAIN_FETCH_TIMEOUT)
     if not chain:
-        return {}
+        raise _ChainError("empty_chain", f"{symbol} returned no option chain")
     expirations = sorted(chain.keys())
     # Strategy work is expressed in DTE ("30-45 DTE, 20-30 delta"), not in
     # "the next N expirations" — a desk asking for a 35-DTE spread must not be
@@ -198,9 +232,12 @@ async def _collect_option_chain(
     # Find an at-the-money anchor from a quick underlying quote so we can keep
     # the subscription small (near-the-money strikes only).
     spot = None
-    uq = await _collect_quotes(session, [symbol], min(timeout, 4.0))
-    if uq.get(symbol):
-        spot = uq[symbol].get("mid") or uq[symbol].get("last")
+    try:
+        uq = await asyncio.wait_for(_collect_quotes(session, [symbol], 4.0), timeout=5.0)
+        if uq.get(symbol):
+            spot = uq[symbol].get("mid") or uq[symbol].get("last")
+    except Exception:  # noqa: BLE001 - a missing spot only widens strike selection
+        spot = None
 
     result: dict = {}
     streamer_symbols: list[str] = []
@@ -242,7 +279,15 @@ async def _collect_option_chain(
             sym_index[streamer_sym] = (exp_key, side, strike_px)
 
     if not streamer_symbols:
-        return result
+        raise _ChainError("no_contracts",
+                          f"{symbol} chain had no contracts in the requested "
+                          "expiration/strike window")
+    # Every subscribed contract is one more event to wait for. Cap it so a wide
+    # request cannot turn into a slow one.
+    if len(streamer_symbols) > _MAX_STREAM_SYMBOLS:
+        streamer_symbols = streamer_symbols[:_MAX_STREAM_SYMBOLS]
+        keep = set(streamer_symbols)
+        sym_index = {k: v for k, v in sym_index.items() if k in keep}
 
     # Stream Greeks + quotes for just those near-the-money contracts.
     greeks_by_sym: dict[str, dict] = {}
@@ -255,9 +300,14 @@ async def _collect_option_chain(
             need_greeks = set(streamer_symbols)
             need_quotes = set(streamer_symbols)
 
+            # Return as soon as the flow goes quiet rather than holding out for
+            # every contract: an illiquid strike may never publish an event, and
+            # waiting for it burned the whole budget while usable data for the
+            # liquid strikes sat already collected.
             async def _greeks():
                 while need_greeks:
-                    g = await streamer.get_event(Greeks)
+                    g = await asyncio.wait_for(streamer.get_event(Greeks),
+                                               timeout=_STREAM_QUIET_SEC)
                     sym = getattr(g, "event_symbol", None)
                     if sym is None:
                         continue
@@ -273,7 +323,8 @@ async def _collect_option_chain(
 
             async def _quotes():
                 while need_quotes:
-                    q = await streamer.get_event(Quote)
+                    q = await asyncio.wait_for(streamer.get_event(Quote),
+                                               timeout=_STREAM_QUIET_SEC)
                     sym = getattr(q, "event_symbol", None)
                     if sym is None:
                         continue
@@ -282,8 +333,9 @@ async def _collect_option_chain(
                     quotes_by_sym[sym] = {"bid": bid, "ask": ask}
                     need_quotes.discard(sym)
 
-            # Wait for both, but never beyond the budget.
-            await asyncio.gather(_greeks(), _quotes())
+            # Partial data is a success, so a quiet stream on one leg must not
+            # discard what the other collected.
+            await asyncio.gather(_greeks(), _quotes(), return_exceptions=True)
 
     # Bound the pump; partial data is fine.
     try:
@@ -308,37 +360,195 @@ async def _collect_option_chain(
     return result
 
 
+def fetch_option_chain(
+    symbol: str, max_expirations: int = 2, strikes_around_atr: int = 16,
+    min_dte: int | None = None, max_dte: int | None = None,
+    strike_pct_window: float | None = None, timeout: float = 10.0,
+    attempts: int = 2, allow_historical_fallback: bool = True,
+) -> dict:
+    """Fetch a chain and REPORT what happened.
+
+    Returns an envelope::
+
+        {"ok", "chain", "source", "stale", "as_of", "error_code", "error",
+         "n_contracts", "partial"}
+
+    The plain-dict version of this function swallowed every failure into ``{}``,
+    so a desk could not tell "this symbol has no options" from "the market-data
+    stream timed out" from "the session expired" — and the snapshot's degraded
+    list had nothing to report. Each phase now fails with a code.
+
+    Live quotes are tried first, twice (the streamer is genuinely flaky). If
+    live is unavailable and ``allow_historical_fallback`` is set, the most recent
+    HISTORICAL chain is returned instead, flagged ``stale`` with its ``as_of``
+    date — usable for structure selection and strike/delta research, and clearly
+    marked as not tradeable pricing.
+    """
+    symbol = str(symbol or "").upper().strip()
+    if not symbol:
+        return _chain_err("bad_symbol", "symbol required", symbol)
+
+    last: dict | None = None
+    if is_configured():
+        for attempt in range(max(1, int(attempts))):
+            try:
+                session = _get_session()
+                if session is None:
+                    last = _chain_err("no_session",
+                                      "tastytrade session could not be established — check "
+                                      "TASTYTRADE_CLIENT_SECRET / TASTYTRADE_REFRESH_TOKEN",
+                                      symbol)
+                    break
+                # Budget must COVER its phases, not equal one of them: the old
+                # 12s cap had to fit a full-chain download plus a 4s spot quote
+                # plus an 8s stream, which is why a big chain could never finish.
+                budget = _CHAIN_FETCH_TIMEOUT + 5.0 + timeout + 5.0
+                result = _run(
+                    _collect_option_chain(
+                        session, symbol, max_expirations, strikes_around_atr,
+                        timeout, min_dte, max_dte, strike_pct_window,
+                    ),
+                    budget,
+                )
+                if result:
+                    n = sum(len(b.get("strikes") or {}) for b in result.values())
+                    if n:
+                        return {"ok": True, "chain": result, "source": "tastytrade",
+                                "stale": False, "as_of": None, "n_contracts": n,
+                                "symbol": symbol, "attempt": attempt + 1}
+                    last = _chain_err("no_quotes",
+                                      "the chain was retrieved but no strike received a "
+                                      "quote or Greeks event before the deadline (quiet "
+                                      "market-data stream)", symbol)
+                else:
+                    last = _chain_err("stream_timeout",
+                                      f"chain fetch exceeded its {budget:.0f}s budget",
+                                      symbol)
+            except _ChainError as e:
+                last = _chain_err(e.code, e.message, symbol)
+                if e.code in ("empty_chain", "no_contracts"):
+                    break        # deterministic: retrying changes nothing
+            except Exception as e:  # noqa: BLE001
+                last = _chain_err("fetch_failed", repr(e)[:300], symbol)
+    else:
+        last = _chain_err("not_configured",
+                          "tastytrade is not configured, so live chains are unavailable",
+                          symbol)
+
+    if allow_historical_fallback:
+        hist = _historical_chain_fallback(symbol, min_dte, max_dte, strike_pct_window,
+                                         max_expirations, strikes_around_atr)
+        if hist:
+            hist["degraded_reason"] = (last or {}).get("error")
+            hist["live_error_code"] = (last or {}).get("error_code")
+            return hist
+    return last or _chain_err("unknown", "chain unavailable", symbol)
+
+
+def _chain_err(code: str, message: str, symbol: str) -> dict:
+    return {"ok": False, "chain": {}, "symbol": symbol, "source": None,
+            "stale": False, "as_of": None, "n_contracts": 0,
+            "error_code": code, "error": message}
+
+
+def _historical_chain_fallback(symbol, min_dte, max_dte, strike_pct_window,
+                               max_expirations, max_strikes) -> dict | None:
+    """Build a chain from the most recent HISTORICAL data, shaped like a live one.
+
+    Explicitly stale, and labelled so. A desk choosing strikes by delta for a
+    30-45 DTE credit spread can do that off yesterday's chain; what it must not
+    do is believe those premiums are executable prices today.
+    """
+    try:
+        from daytrader.data.feeds import alphavantage as av
+        if not av.is_configured():
+            return None
+        cached = av.cached_dates(symbol)
+        res = av.historical_chain(symbol, cached[-1] if cached else None)
+        rows = (res or {}).get("contracts") or []
+        if not rows:
+            return None
+        from datetime import date as _d
+        today = _d.today()
+
+        def _dte(exp):
+            try:
+                y, m, dd = (int(x) for x in str(exp)[:10].split("-"))
+                return (_d(y, m, dd) - today).days
+            except Exception:  # noqa: BLE001
+                return None
+
+        spot = None
+        try:
+            from daytrader.data import quotes as _q
+            spot = _q.get_quote(symbol)
+        except Exception:  # noqa: BLE001
+            spot = None
+
+        exps: dict[str, list] = {}
+        for r in rows:
+            d = _dte(r.get("expiration"))
+            if d is None or d < 0:
+                continue
+            if min_dte is not None and d < int(min_dte):
+                continue
+            if max_dte is not None and d > int(max_dte):
+                continue
+            if spot and strike_pct_window and r.get("strike"):
+                if abs(float(r["strike"]) - spot) > float(strike_pct_window) / 100.0 * spot:
+                    continue
+            exps.setdefault(str(r["expiration"]), []).append(r)
+        if not exps:
+            return None
+
+        chain: dict = {}
+        for exp in sorted(exps)[: max(1, int(max_expirations))]:
+            rows_e = exps[exp]
+            strikes = sorted({float(r["strike"]) for r in rows_e if r.get("strike")})
+            if spot:
+                strikes.sort(key=lambda k: abs(k - spot))
+            keep = set(strikes[: max(1, int(max_strikes))])
+            block = {"expiration": exp, "days_to_expiration": _dte(exp), "strikes": {}}
+            for r in rows_e:
+                k = float(r.get("strike") or 0)
+                if k not in keep:
+                    continue
+                slot = block["strikes"].setdefault(str(k), {"strike": k})
+                slot["call" if r.get("type") == "call" else "put"] = {
+                    "bid": r.get("bid"), "ask": r.get("ask"), "mark": r.get("mark"),
+                    "delta": r.get("delta"), "gamma": r.get("gamma"),
+                    "theta": r.get("theta"), "vega": r.get("vega"),
+                    "iv": r.get("implied_volatility"),
+                    "open_interest": r.get("open_interest"), "volume": r.get("volume"),
+                }
+            if block["strikes"]:
+                chain[exp] = block
+        if not chain:
+            return None
+        n = sum(len(b["strikes"]) for b in chain.values())
+        return {"ok": True, "chain": chain, "source": "alphavantage_historical",
+                "stale": True, "as_of": res.get("date"), "n_contracts": n,
+                "symbol": symbol}
+    except Exception as e:  # noqa: BLE001
+        log.info("options: historical fallback for %s failed (%s)", symbol, e)
+        return None
+
+
 def get_option_chain(
     symbol: str, max_expirations: int = 1, strikes_around_atr: int = 6,
     min_dte: int | None = None, max_dte: int | None = None,
     strike_pct_window: float | None = None, timeout: float = 8.0,
 ) -> dict:
-    """Return near-the-money option data with streaming Greeks for ``symbol``.
+    """Near-the-money option data with streaming Greeks. Returns {} on failure.
 
-    Shape: {expiration_date: {expiration, days_to_expiration,
-            strikes: {strike: {strike, call:{...greeks/quote}, put:{...}}}}}.
-
-    Kept intentionally small (a few strikes around the money, nearest
-    expirations) to bound latency. Returns {} on any problem; never raises.
+    Kept for callers that only want the chain; :func:`fetch_option_chain` is the
+    one that explains a failure. Live-only — a caller wanting the plain shape is
+    marking positions, and must never mark them off a stale chain.
     """
-    try:
-        if not symbol:
-            return {}
-        session = _get_session()
-        if session is None:
-            return {}
-        # Total budget for chain fetch + streaming.
-        result = _run(
-            _collect_option_chain(
-                session, symbol, max_expirations, strikes_around_atr, timeout,
-                min_dte, max_dte, strike_pct_window,
-            ),
-            timeout + 4.0,
-        )
-        return result or {}
-    except Exception as e:  # noqa: BLE001
-        log.info("tastytrade: get_option_chain(%s) failed (%s)", symbol, e)
-        return {}
+    env = fetch_option_chain(symbol, max_expirations, strikes_around_atr,
+                             min_dte, max_dte, strike_pct_window, timeout,
+                             attempts=1, allow_historical_fallback=False)
+    return env.get("chain") or {}
 
 
 # --------------------------------------------------------------------------- #

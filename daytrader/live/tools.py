@@ -156,17 +156,12 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
         sym = str(inp.get("symbol", "")).upper().strip()
         if not sym:
             return {"ok": False, "error": "symbol required"}
-        if not tt.is_configured():
-            return {"ok": False, "error_code": "not_configured",
-                    "error": ("tastytrade is not configured, so live option chains are "
-                              "unavailable. Historical chains may still be available via "
-                              "av_historical_option_chain for research.")}
         min_dte = inp.get("min_dte")
         max_dte = inp.get("max_dte")
         if min_dte is None and max_dte is None and inp.get("target_dte") is not None:
             t = int(inp["target_dte"])
             min_dte, max_dte = max(0, t - 7), t + 7
-        chain = tt.get_option_chain(
+        env = tt.fetch_option_chain(
             sym,
             max_expirations=int(inp.get("max_expirations") or 2),
             strikes_around_atr=int(inp.get("strikes") or 16),
@@ -174,20 +169,71 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
             max_dte=int(max_dte) if max_dte is not None else None,
             strike_pct_window=float(inp.get("strike_pct_window") or 15.0),
         )
-        if not chain:
-            return {"ok": False, "symbol": sym, "error_code": "no_chain",
-                    "error": ("no chain returned — the symbol may not have listed options, "
-                              "or the market data stream timed out. Retry once before "
-                              "abandoning the idea.")}
+        if not env.get("ok"):
+            # The real reason, not a guess. Also recorded so the snapshot's
+            # degraded list warns the next desk before it plans around options.
+            try:
+                from daytrader.data.feeds.base import record_named_error
+                record_named_error(
+                    "tastytrade_options", str(env.get("error_code")),
+                    f"{sym}: {env.get('error')}",
+                    hint=_chain_advice(env.get("error_code")))
+            except Exception:  # noqa: BLE001
+                pass
+            return {"ok": False, "symbol": sym,
+                    "error_code": env.get("error_code"),
+                    "error": env.get("error"),
+                    "what_to_do": _chain_advice(env.get("error_code"))}
         spot = None
         try:
             spot = round(float(broker.latest_price(sym)), 2)
         except Exception:  # noqa: BLE001
             pass
-        return {"ok": True, "symbol": sym, "spot": spot, "chain": chain,
-                "note": ("Prices are bid/ask with streaming Greeks. Pass the leg prices you "
-                         "would actually trade at into place_option_trade — for a credit "
-                         "structure that means the BID on shorts and the ASK on longs.")}
+        # A stale fallback still counts as DEGRADED. Returning ok=True with old
+        # prices and a clean health report would let the next desk plan a
+        # premium lane believing it has live quotes.
+        try:
+            from daytrader.data.feeds.base import clear_named_error, record_named_error
+            if env.get("stale"):
+                record_named_error(
+                    "tastytrade_options", "stale_fallback",
+                    f"{sym}: live chain unavailable ({env.get('live_error_code')}); serving the "
+                    f"historical chain as of {env.get('as_of')}",
+                    hint=("Strikes/deltas/IV are usable for structure selection; premiums are "
+                          "NOT executable prices. Size conservatively and expect fill slippage."))
+            else:
+                clear_named_error("tastytrade_options")
+        except Exception:  # noqa: BLE001
+            pass
+        out = {"ok": True, "symbol": sym, "spot": spot,
+               "source": env.get("source"), "n_contracts": env.get("n_contracts"),
+               "chain": env.get("chain")}
+        if env.get("stale"):
+            out["stale"] = True
+            out["as_of"] = env.get("as_of")
+            out["warning"] = (
+                f"STALE PRICES — the live stream was unavailable ({env.get('live_error_code')}), "
+                f"so this is the HISTORICAL chain as of {env.get('as_of')}. Strikes, deltas and "
+                "IV are still sound for choosing a structure; the premiums are NOT executable "
+                "prices today. You may trade off them (place_option_trade accepts them and will "
+                "record the staleness), but size conservatively and expect fills to differ.")
+        else:
+            out["note"] = ("Live bid/ask with streaming Greeks. Pass the leg prices you would "
+                           "actually trade at — BID on shorts, ASK on longs.")
+        return out
+
+    def _chain_advice(code: str | None) -> str:
+        return {
+            "not_configured": ("tastytrade is not configured. Set ALPHAVANTAGE_API_KEY to at "
+                               "least research options off historical chains."),
+            "no_session": "the tastytrade session failed — the owner must refresh credentials.",
+            "empty_chain": "this underlying appears to have no listed options; pick another.",
+            "no_contracts": ("no contracts matched your expiration/strike window — widen "
+                             "target_dte or strike_pct_window."),
+            "no_quotes": ("the chain loaded but the market-data stream stayed quiet — usually "
+                          "outside market hours. Retry during the session."),
+            "stream_timeout": "the fetch timed out; retry once, then report it if it persists.",
+        }.get(str(code), "retry once; if it persists, file a dev request with this error_code.")
 
     def place_option_trade(inp: dict) -> dict:
         """Open a multi-leg options position (defined risk only)."""
@@ -961,14 +1007,16 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                 "trading. You must keep it for the commitment period (default 5 trading "
                 "days) — a lane switched every cycle is not a strategy and produces no "
                 "evidence. Trade its rules, tag every trade with the strategy name, and "
-                "let the record judge it. Options lanes (wheel_csp, bull_put_spread, "
-                "iron_condor, leap_debit, earnings_vol_crush) are on the menu but NOT "
-                "executable yet and will be refused."
+                "let the record judge it. ALL menu lanes are executable, options included "
+                "(wheel_csp, bull_put_spread, iron_condor, leap_debit, earnings_vol_crush) — "
+                "place_option_trade handles the 100x multiplier, premium, collateral, "
+                "assignment and exercise. The authoritative list is "
+                "get_risk_state().mandate.executable_strategies."
             ),
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "strategy": {"type": "string", "description": "One of: momentum_20d_high, trend_position, mean_reversion_range (executable now)."},
+                    "strategy": {"type": "string", "description": "One of: momentum_20d_high, trend_position, mean_reversion_range, wheel_csp, bull_put_spread, iron_condor, leap_debit, earnings_vol_crush."},
                     "plan": {"type": "string", "description": "How you will run it: entry trigger, stop rule, management, what would make you abandon it."},
                     "allocation_pct": {"type": "number", "description": "Share of buying power this strategy may use (capped at 50)."},
                 },

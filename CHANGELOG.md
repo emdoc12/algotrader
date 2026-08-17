@@ -9,6 +9,65 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.34.2] — 2026-08-17
+
+### Fixed — get_option_chain returned "no_chain" for SPY on every call
+A desk reported this as blocking five of the eight menu strategies, and it was
+three compounding bugs plus a reporting failure that hid all of them.
+
+**The timeout budget could not cover its own phases.** The outer bound was
+`timeout + 4` = 12s. Inside it: a spot quote allowed 4s, then the Greeks/quote
+stream allowed the full `timeout` = 8s. 4 + 8 = 12s — the entire budget — which
+left **zero seconds** for the full-chain HTTP download that has to happen first.
+For an underlying with thousands of listed contracts that download cannot finish
+in no time, so the outer `wait_for` cancelled, `_run` returned `None`, and the
+caller reported "no chain". This was deterministic for SPY, which is why
+narrowing the strike window never helped: narrowing strikes does not shrink the
+initial chain fetch. Each phase now has its own budget and the total is their
+sum.
+
+**The blocking fetch ran on the event loop.** `get_option_chain(session, symbol)`
+is synchronous HTTP called from inside a coroutine, so it stalled the same loop
+the streamer needed. It now runs via `asyncio.to_thread`.
+
+**The stream waited for every contract.** `while need_greeks:` only exited once
+*all* subscribed contracts had reported, so one illiquid strike that never
+publishes burned the whole allowance while usable data for the liquid strikes
+sat already collected. It now returns on quiescence
+(`OPTION_STREAM_QUIET_SEC`, 4s), treats partial data as success, and caps the
+subscription at `OPTION_MAX_STREAM_SYMBOLS` (80).
+
+**Every failure returned `{}`.** That is why one message covered "this symbol has
+no options", "the session expired" and "the stream timed out" — and why
+`data_providers.degraded` had nothing to report. `fetch_option_chain()` now
+returns a diagnosed envelope with an `error_code` of `not_configured` /
+`no_session` / `empty_chain` / `no_contracts` / `no_quotes` / `stream_timeout`,
+each with specific advice, and `_run` re-raises a diagnosed error instead of
+flattening it to a timeout. Live fetches retry twice.
+
+### Added — historical-chain fallback, and degraded reporting for options data
+When live quotes are unavailable, the chain is served from the most recent
+HISTORICAL data (Alpha Vantage) flagged `stale: true` with its `as_of` date.
+Strikes, deltas and IV remain sound for choosing a structure; the premiums are
+explicitly not executable prices. `place_option_trade` accepts leg prices from
+that chain rather than refusing the lane, and returns a `quote_warning` when no
+live quote could cross-check them. Mark-to-market still holds such a position
+flat instead of inventing a value.
+
+Both an outright failure **and** a stale fallback now register in
+`snapshot.data_providers.degraded` (`record_named_error`, for sources that are
+SDK streams rather than plain HTTP GETs), and clear automatically when live
+quotes return — so a desk learns the state before planning a premium lane
+around it.
+
+### Fixed — declare_strategy contradicted the mandate about options
+Its tool description still said options lanes "are on the menu but NOT
+executable yet and will be refused", written when that was true in v6.32.0 and
+never updated when v6.33.0 shipped the engine. Meanwhile
+`mandate.executable_strategies` correctly listed all five. The description was
+the wrong one: **all eight lanes are executable.** It now says so and points at
+`get_risk_state().mandate.executable_strategies` as authoritative.
+
 ## [6.34.1] — 2026-08-13
 
 ### Fixed — an out-of-credit provider was treated as a rate limit and retried forever

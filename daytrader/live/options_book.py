@@ -343,6 +343,11 @@ class OptionsBook:
 
         # ---- book it -------------------------------------------------------- #
         self.broker._cash += opened_cash - commission
+        # Did the engine independently see a live price for any leg? If not, the
+        # structure was priced entirely from what the desk supplied, which is
+        # allowed — refusing the whole lane because the stream is down would be
+        # worse — but it must be recorded rather than silently assumed live.
+        priced_live = any(self._chain_price(l.contract) is not None for l in legs[:1])
         rec = {
             "underlying": underlying,
             "structure": info["structure"],
@@ -380,7 +385,14 @@ class OptionsBook:
                 "commission": round(commission, 2),
                 "expiration": rec["expiration"],
                 "legs": [str(l.contract) + f" x{l.qty:+g} @ {l.price:.2f}" for l in legs],
-                "managed": self._management_note(profit_target_pct, dte_exit)}
+                "managed": self._management_note(profit_target_pct, dte_exit),
+                **({} if priced_live else {"quote_warning": (
+                    "OPENED ON UNVERIFIED PRICES — no live chain quote was available to "
+                    "cross-check your leg prices, so the fill used exactly what you passed. "
+                    "The structure and its risk are computed correctly from those numbers, "
+                    "but if they came from a stale/historical chain the real fill would "
+                    "differ. Mark-to-market will hold this position flat until live quotes "
+                    "return rather than invent a value.")})}
 
     def _blocked_by_account_rails(self, eq: float) -> dict | None:
         """Cooling-off and daily-loss checks, shared with the share book."""
