@@ -1404,6 +1404,16 @@ class PaperBroker:
         self.db.record_equity(self._cash, eq, len(self._positions), dd)
 
     def _fail(self, symbol: str, side: Side, qty: float, reason: str) -> dict:
+        # Log the rejection. Without this a desk that TRIES to trade every cycle
+        # and is refused by a rail is indistinguishable from a desk that chose to
+        # stand aside — both simply show no positions, which is why six idle
+        # desks looked like they were "doing god knows what".
+        try:
+            self.db.log_agent("broker", "rejected",
+                              f"{side.value if isinstance(side, Side) else side} "
+                              f"{qty:g} {symbol}: {reason}"[:500])
+        except Exception:  # noqa: BLE001
+            pass
         return {
             "ok": False,
             "symbol": symbol,

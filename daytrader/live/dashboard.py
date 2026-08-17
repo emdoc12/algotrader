@@ -21,6 +21,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from daytrader.live.competition import (
+    ET,
     START_CASH,
     Competition,
     chat_with_leader,
@@ -66,6 +67,8 @@ def overview_payload() -> dict:
     positions: list[dict] = []
     options: list[dict] = []
     strategies: list[dict] = []
+    activity: list[dict] = []
+    stand = db_standings()
     for name in team_names():
         db = _team_db(name)
         try:
@@ -77,6 +80,8 @@ def overview_payload() -> dict:
             for o in _safe(db, "open_option_positions", default=[]) or []:
                 options.append({**o, "team": name})
             strategies.append(_declared_strategy(db, name))
+            srow = next((r for r in stand if r.get("team") == name), {})
+            activity.append(_desk_activity(db, name, srow))
         finally:
             if db is not None:
                 db.close()
@@ -91,7 +96,8 @@ def overview_payload() -> dict:
         s["open_options"] = sum(1 for o in options if o["team"] == s["team"])
     return {
         "start_cash": START_CASH,
-        "standings": db_standings(),
+        "standings": stand,
+        "activity": activity,
         "curves": curves,
         "dev_requests": devs,
         "dev_request_count": len(devs),
@@ -99,6 +105,94 @@ def overview_payload() -> dict:
         "option_positions": options,
         "strategies": strategies,
     }
+
+
+def _desk_activity(db, name: str, row: dict) -> dict:
+    """Why this desk is doing what it is doing — or nothing.
+
+    A flat desk has at least seven distinct causes, and the dashboard used to
+    render all of them identically as "no open positions". Distinguishing them is
+    the difference between "it is thinking and standing aside" (fine) and "it has
+    been rejected by a rail forty times" or "its provider has no credit" (not
+    fine, and only the owner can fix it).
+    """
+    from datetime import datetime
+    out = {"team": name, "cycles_today": 0, "trades_today": 0, "rejections_today": 0,
+           "last_activity": None, "top_rejections": [], "idle_reason": None,
+           "idle_detail": None}
+    try:
+        today = datetime.now(ET).strftime("%Y-%m-%d")
+    except Exception:  # noqa: BLE001
+        today = ""
+    reasons: dict[str, int] = {}
+    try:
+        for r in db.recent_agent_log(limit=400):
+            ts = str(r.get("ts") or "")
+            if out["last_activity"] is None:
+                out["last_activity"] = ts
+            if today and not ts.startswith(today):
+                continue
+            action = str(r.get("action") or "")
+            if action == "cycle" and str(r.get("agent")) == "trader":
+                out["cycles_today"] += 1
+            elif action in ("open", "open_option", "add_to_position"):
+                out["trades_today"] += 1
+            elif action == "rejected":
+                out["rejections_today"] += 1
+                detail = str(r.get("detail") or "")
+                key = detail.split(":", 1)[1].strip() if ":" in detail else detail
+                key = key.split(";")[0].split("(")[0].strip()[:70]
+                reasons[key] = reasons.get(key, 0) + 1
+    except Exception:  # noqa: BLE001
+        pass
+    out["top_rejections"] = sorted(
+        ({"reason": k, "count": v} for k, v in reasons.items()),
+        key=lambda d: -d["count"])[:3]
+
+    # Most actionable cause first: the ones only the owner can clear.
+    open_pos = int(row.get("open_positions") or 0)
+    if row.get("has_key") is False:
+        out["idle_reason"] = "no_api_key"
+        out["idle_detail"] = "No API key configured — this desk never runs."
+    elif row.get("provider_down"):
+        out["idle_reason"] = "provider_down"
+        out["idle_detail"] = f"Provider unavailable ({row['provider_down']}) — the desk is paused."
+    else:
+        try:
+            halted = db.kv_get("halted") == "1"
+        except Exception:  # noqa: BLE001
+            halted = False
+        if halted:
+            out["idle_reason"] = "halted_daily_loss"
+            out["idle_detail"] = "Hit the daily loss limit — halted until tomorrow."
+        elif float(row.get("drawdown_pct") or 0) >= _envf_dash("COOLDOWN_DRAWDOWN_PCT", 8.0):
+            out["idle_reason"] = "cooling_off"
+            out["idle_detail"] = (f"{row.get('drawdown_pct')}% below peak — in cooling-off, "
+                                  "no new positions until equity recovers.")
+        elif out["cycles_today"] == 0:
+            out["idle_reason"] = "no_cycles_today"
+            out["idle_detail"] = ("No trader cycle has run today — outside market hours, or "
+                                  "the runner is not reaching this desk.")
+        elif out["rejections_today"] and not out["trades_today"]:
+            top = out["top_rejections"][0]["reason"] if out["top_rejections"] else "a risk rail"
+            out["idle_reason"] = "orders_rejected"
+            out["idle_detail"] = (f"Tried to trade and was REJECTED {out['rejections_today']}x "
+                                  f"today — most often: {top}. The desk is not idle, it is "
+                                  "being refused.")
+        elif not open_pos and not out["trades_today"]:
+            out["idle_reason"] = "chose_not_to_trade"
+            out["idle_detail"] = (f"Ran {out['cycles_today']} cycle(s) and deliberately placed "
+                                  "no trades — no setup met its criteria.")
+    return out
+
+
+def _envf_dash(key: str, default: float) -> float:
+    import os as _o
+    try:
+        v = _o.environ.get(key)
+        return float(v) if v not in (None, "") else float(default)
+    except (TypeError, ValueError):
+        return float(default)
 
 
 def _declared_strategy(db, name: str) -> dict:
@@ -836,6 +930,9 @@ async function loadOverview(){
   main.appendChild(chartCard);
   requestAnimationFrame(() => drawEquityChart(cv, data));
 
+  // why each desk is doing what it is doing
+  main.appendChild(activityCard(data.activity || []));
+
   // who is running what
   main.appendChild(strategyCard(data.strategies || []));
 
@@ -856,6 +953,49 @@ function teamPill(team){
   return el("span",{class:"pill",
     style:"background:"+c+"22;color:"+c+";border:1px solid "+c+"55"},
     LABELS[team] || team);
+}
+
+const IDLE_LABEL = {
+  no_api_key:        ["no API key",        "red"],
+  provider_down:     ["provider down",     "red"],
+  halted_daily_loss: ["halted: daily loss","red"],
+  cooling_off:       ["cooling off",       "red"],
+  orders_rejected:   ["orders REJECTED",   "red"],
+  no_cycles_today:   ["no cycles today",   "gray"],
+  chose_not_to_trade:["stood aside",       "gray"],
+};
+
+function activityCard(rows){
+  const card = el("div", {class:"card"});
+  card.appendChild(el("h2", null, "What each desk is doing"));
+  card.appendChild(el("div", {class:"muted", style:"font-size:12px;margin-bottom:12px"},
+    "A desk with no positions has several very different causes. \"Stood aside\" means it ran "
+    + "and judged nothing worth taking. \"Orders REJECTED\" means it tried and a risk rail "
+    + "refused it — that is not idleness and the reason is shown. The red states need you."));
+  const tbl = el("table");
+  const head = el("tr");
+  ["Desk","State","Cycles today","Trades","Rejected","Detail"]
+    .forEach(h => head.appendChild(el("th", null, h)));
+  tbl.appendChild(head);
+  (rows||[]).forEach(r => {
+    const tr = el("tr");
+    const lab = IDLE_LABEL[r.idle_reason] || (r.idle_reason ? [r.idle_reason,"gray"] : ["trading","green"]);
+    tr.appendChild(el("td", null, teamPill(r.team)));
+    tr.appendChild(el("td", {class: lab[1]}, lab[0]));
+    tr.appendChild(el("td", {class: r.cycles_today ? "" : "gray"}, String(r.cycles_today||0)));
+    tr.appendChild(el("td", null, String(r.trades_today||0)));
+    tr.appendChild(el("td", {class: r.rejections_today ? "red" : "gray"}, String(r.rejections_today||0)));
+    const d = el("td", {class:"gray", style:"font-size:11px;max-width:420px"});
+    d.appendChild(document.createTextNode(r.idle_detail || "Holding open positions."));
+    (r.top_rejections||[]).forEach(x => {
+      d.appendChild(el("div", {style:"color:var(--red);font-size:11px;margin-top:2px"},
+        x.count + "x  " + x.reason));
+    });
+    tr.appendChild(d);
+    tbl.appendChild(tr);
+  });
+  card.appendChild(tbl);
+  return card;
 }
 
 function strategyCard(rows){

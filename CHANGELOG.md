@@ -9,6 +9,38 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.34.5] — 2026-08-17
+
+### Fixed — rejected orders were logged nowhere
+`_fail()` returned a rejection to the caller and recorded nothing. So a desk that
+TRIED to trade every cycle and was refused by a risk rail was indistinguishable
+from a desk that deliberately stood aside: both showed no positions and an empty
+activity feed. Every rejection now lands in the agent log with its reason.
+
+### Added — "What each desk is doing" on the overview
+Six flat desks rendered identically to six idle ones, with no way to tell which.
+A desk with no open position has at least seven distinct causes, and they demand
+completely different responses:
+
+| State | Meaning |
+|---|---|
+| `no_api_key` | never runs — no key configured |
+| `provider_down` | paused: out of credit / bad key / bad model |
+| `halted_daily_loss` | tripped the daily circuit breaker |
+| `cooling_off` | past the drawdown threshold, new entries blocked |
+| `orders_rejected` | **tried to trade and was refused** — with the top reasons and counts |
+| `no_cycles_today` | no trader cycle ran at all |
+| `chose_not_to_trade` | ran, judged nothing worth taking — the only benign one |
+
+The card shows cycles run today, trades placed, rejections, and the three most
+common rejection reasons with counts, so "40x trade risk exceeds the 1.5% cap"
+reads as a sizing bug rather than as inactivity. The four states only the owner
+can clear are red.
+
+Verified by constructing all seven states across seven desks and asserting each
+is classified correctly, including a desk rejected 7 times whose reasons group as
+5x risk-cap and 2x missing-stop.
+
 ## [6.34.4] — 2026-08-17
 
 ### Added — get_platform_updates: the complete history, not just the recent few
