@@ -137,6 +137,27 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                                plan=inp.get("plan", ""),
                                allocation_pct=inp.get("allocation_pct"))
 
+    def get_platform_updates(inp: dict) -> dict:
+        """The complete history of fixes and capability changes shipped."""
+        inp = inp or {}
+        try:
+            limit = max(1, min(int(inp.get("limit") or 25), 100))
+        except (TypeError, ValueError):
+            limit = 25
+        rows = db.platform_updates(limit=limit)
+        total = db.platform_update_count()
+        return {
+            "ok": True, "total": total, "returned": len(rows),
+            "updates": [{"ts": r["ts"], "note": r["note"]} for r in rows],
+            "note": ("The authoritative record of what this system can do. Every entry "
+                     "applies to EVERY desk regardless of which one reported it. If an "
+                     "update says a tool, data source or strategy lane now works, RE-TEST "
+                     "it — a workaround kept for a bug that was fixed is how a desk "
+                     "quietly excludes itself from a lane it could be trading. Read this "
+                     "whenever you are about to conclude something is impossible, and "
+                     "after any stretch where your desk was idle."),
+        }
+
     def get_risk_state(_inp: dict) -> dict:
         """Remaining risk budget, portfolio heat, cooldown state, declaration."""
         from daytrader.live import mandate
@@ -833,6 +854,7 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
         "add_to_position": add_to_position,
         "declare_strategy": declare_strategy,
         "get_risk_state": get_risk_state,
+        "get_platform_updates": get_platform_updates,
         "get_option_chain": get_option_chain,
         "place_option_trade": place_option_trade,
         "close_option_position": close_option_position,
@@ -1021,6 +1043,19 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                     "allocation_pct": {"type": "number", "description": "Share of buying power this strategy may use (capped at 50)."},
                 },
                 "required": ["strategy"],
+            },
+        },
+        {
+            "name": "get_platform_updates",
+            "description": (
+                "The FULL history of fixes and new capabilities the developer has shipped — "
+                "not just the recent ones the snapshot shows. Every entry applies to every "
+                "desk, whoever reported the problem. Call this before concluding that "
+                "something is impossible, and after any period where your desk was idle or "
+                "paused: the fix that unblocks the lane you gave up on may already be here."),
+            "input_schema": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "description": "How many, newest first (default 25, max 100)."}},
             },
         },
         {

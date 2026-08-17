@@ -426,6 +426,24 @@ class LiveDB:
         )
         return [dict(r) for r in cur.fetchall()]
 
+    def platform_updates(self, limit: int = 50, offset: int = 0) -> list[dict]:
+        """Every platform update this desk has been told about, newest first.
+
+        The snapshot can only afford to carry a handful each cycle, so without a
+        way to read the whole history an update older than that window becomes
+        permanently invisible — and a desk that was paused for a few days (an
+        out-of-credit provider, say) could miss the fix that unblocks it
+        entirely.
+        """
+        cur = self.conn.execute(
+            "SELECT id, ts, note FROM journal WHERE topic='dev_resolved' "
+            "ORDER BY id DESC LIMIT ? OFFSET ?", (int(limit), int(offset)))
+        return [dict(r) for r in cur.fetchall()]
+
+    def platform_update_count(self) -> int:
+        cur = self.conn.execute("SELECT COUNT(*) c FROM journal WHERE topic='dev_resolved'")
+        return int(cur.fetchone()["c"])
+
     def recently_resolved_dev_requests(self, days: int = 4, limit: int = 12) -> list[dict]:
         """Requests the OWNER closed recently, so the desk learns it was delivered.
 

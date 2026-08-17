@@ -9,6 +9,27 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.34.4] — 2026-08-17
+
+### Added — get_platform_updates: the complete history, not just the recent few
+v6.34.3 broadcast each fix to every desk, but the snapshot can only carry the
+newest handful per cycle, and there was no journal READ tool — so an update
+older than that window became permanently invisible. The failure case is
+specific: a desk paused for days (an out-of-credit provider) could miss the very
+fix that unblocks it, and never know to look.
+
+`get_platform_updates` returns the full history, newest first, to all three
+roles. The snapshot still shows the newest 8 for immediacy and now reports the
+total when more exist, pointing at the tool for the rest. Verified against 12
+shipped fixes: the snapshot surfaces 8 and says so, while the tool reaches all
+12 including the oldest, from a desk that filed none of them.
+
+**Rules are a separate mechanism and were never subject to this.** The mission —
+risk rails, the strategy menu, what is tradeable — is rebuilt from code and sent
+in full to every desk on every cycle, so all seven always hold the complete,
+current rule set with no dependence on memory or notification. Updates are the
+rolling record of what CHANGED; the mission is the standing statement of what IS.
+
 ## [6.34.3] — 2026-08-17
 
 ### Added — marking a dev request done now notifies EVERY desk

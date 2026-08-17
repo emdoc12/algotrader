@@ -279,7 +279,7 @@ def _reviewer(broker, db, provider=None) -> Agent:
                "get_recent_trades", "backtest_strategy", "backtest_custom_strategy",
                "save_custom_strategy", "list_custom_strategies",
                "propose_hypothesis", "research_log", "get_risk_state", "declare_strategy",
-               "get_option_positions",
+               "get_option_positions", "get_platform_updates",
                "deploy_strategy", "undeploy_strategy", "list_deployed_strategies",
                "journal_write", "request_dev_help", "resolve_dev_request"}
     tools = [t for t in schemas if t["name"] in allowed]

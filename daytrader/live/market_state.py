@@ -828,10 +828,17 @@ def with_account(market_snap: dict, broker) -> dict:
             # Fixes are broadcast to every desk, not just whoever filed them — a
             # repaired tool changes what ALL desks can run, and six desks
             # silently avoiding a working lane is the expensive failure.
-            updates = db.recent_journal_by_topics(("dev_resolved",), limit=8)
+            updates = db.platform_updates(limit=8)
             if updates:
+                total = db.platform_update_count()
                 out["platform_updates"] = [
                     {"ts": u.get("ts"), "note": u.get("note")} for u in updates]
+                if total > len(updates):
+                    out["platform_updates_more"] = (
+                        f"{total} updates exist in total; the {len(updates)} newest are shown. "
+                        "Call get_platform_updates to read the full history — every fix and "
+                        "capability change ever shipped, which is the authoritative record of "
+                        "what this system can do.")
                 out["platform_updates_note"] = (
                     "Fixes and capability changes the owner shipped recently — these apply to "
                     "EVERY desk, whoever reported them. If you previously abandoned a tool, "
