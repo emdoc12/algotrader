@@ -9,6 +9,36 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.34.3] — 2026-08-17
+
+### Added — marking a dev request done now notifies EVERY desk
+Closing a request used to be silent. The row's status changed and it simply
+disappeared from the filing desk's next snapshot — so a desk could not tell
+"shipped" from "rejected" from "lost", and, expensively, a desk that had written
+a capability off had no signal that it now worked and should be retried. The
+other six desks were never told at all.
+
+A fix is almost never useful only to whoever reported it. When the option-chain
+fetch was broken, one desk filed it while the other six had equally abandoned
+premium-selling; delivering that fix to one inbox would have left six desks
+avoiding a lane that works.
+
+So a resolution is now **broadcast to every desk's journal** — their durable
+memory, which outlives any snapshot window — attributed to the desk that filed
+it, and surfaced in each desk's snapshot as `platform_updates`. A closed request
+carries an explicit instruction to re-test anything previously abandoned;
+`wont_fix` reads as "WILL NOT BE BUILT — stop planning around it". The mission
+now tells all three roles that platform updates are not optional reading, since
+carrying a workaround for a bug fixed last week is how a desk quietly excludes
+itself from a whole strategy lane.
+
+The dashboard's "Mark done" button now opens an inline note field, because
+"closed" tells a desk nothing while "fixed in v6.34.2, retry get_option_chain"
+tells it exactly what to do. There is a **Won't fix** button beside it. Leaving
+the note blank still produces a useful default rather than a bare status.
+Verified: closing one request wrote the update to all seven desks' journals and
+reached the snapshot of a desk that never filed it.
+
 ## [6.34.2] — 2026-08-17
 
 ### Fixed — get_option_chain returned "no_chain" for SPY on every call

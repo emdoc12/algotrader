@@ -426,6 +426,31 @@ class LiveDB:
         )
         return [dict(r) for r in cur.fetchall()]
 
+    def recently_resolved_dev_requests(self, days: int = 4, limit: int = 12) -> list[dict]:
+        """Requests the OWNER closed recently, so the desk learns it was delivered.
+
+        A closed request used to simply vanish from the snapshot, which told the
+        desk nothing: it could not tell "shipped" from "rejected" from "lost",
+        and — the expensive case — a desk that had written a capability off had
+        no signal that it now works and should be retried.
+        """
+        cur = self.conn.execute(
+            "SELECT * FROM dev_requests WHERE status!='open' AND resolved_ts IS NOT NULL "
+            "ORDER BY resolved_ts DESC LIMIT ?", (int(limit),))
+        rows = [dict(r) for r in cur.fetchall()]
+        if days <= 0:
+            return rows
+        from datetime import datetime, timedelta
+        cutoff = datetime.now() - timedelta(days=int(days))
+        out = []
+        for r in rows:
+            try:
+                if datetime.fromisoformat(str(r["resolved_ts"])[:19]) >= cutoff:
+                    out.append(r)
+            except Exception:  # noqa: BLE001
+                out.append(r)      # unparseable stamp: show it rather than hide it
+        return out
+
     def all_dev_requests(self, limit: int = 200) -> list[dict]:
         cur = self.conn.execute(
             "SELECT * FROM dev_requests ORDER BY id DESC LIMIT ?", (limit,)

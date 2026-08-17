@@ -185,6 +185,13 @@ time-critical window. 'market_summary.sector_clusters' flags overbought/oversold
 by sector (e.g. 9 semis all RSI>85) on cycle 1 — a warning against momentum-longing an \
 exhausted cluster. For first-bar / opening-range stats on a name, call get_opening_range.
 
+PLATFORM UPDATES ARE NOT OPTIONAL READING. The snapshot's 'platform_updates' carries \
+fixes and new capabilities the developer has just shipped — to EVERY desk, regardless of \
+which desk reported the problem. If one says a tool or data source now works, RE-TEST it \
+before you plan around the old limitation: carrying a workaround for a bug that was fixed \
+last week is how a desk quietly excludes itself from a whole strategy lane. If one says \
+WILL NOT BE BUILT, stop planning around it and note that in the journal.
+
 Use the journal as your memory: write down what you observe, what works, what doesn't, \
 and your plan — it survives restarts and the rest of the team reads it. Your most recent \
 lessons/plans are surfaced as 'recent_lessons' in the snapshot (they carry across sessions \

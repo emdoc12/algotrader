@@ -819,6 +819,25 @@ def with_account(market_snap: dict, broker) -> dict:
             pass
         try:
             out["open_dev_requests"] = db.open_dev_requests()
+            resolved = db.recently_resolved_dev_requests()
+            if resolved:
+                out["resolved_dev_requests"] = [
+                    {"id": r.get("id"), "title": r.get("title"),
+                     "status": r.get("status"), "resolved_ts": r.get("resolved_ts"),
+                     "resolution": r.get("resolution")} for r in resolved]
+            # Fixes are broadcast to every desk, not just whoever filed them — a
+            # repaired tool changes what ALL desks can run, and six desks
+            # silently avoiding a working lane is the expensive failure.
+            updates = db.recent_journal_by_topics(("dev_resolved",), limit=8)
+            if updates:
+                out["platform_updates"] = [
+                    {"ts": u.get("ts"), "note": u.get("note")} for u in updates]
+                out["platform_updates_note"] = (
+                    "Fixes and capability changes the owner shipped recently — these apply to "
+                    "EVERY desk, whoever reported them. If you previously abandoned a tool, "
+                    "data source or strategy lane because it failed, RE-TEST it before "
+                    "planning around the old limitation. 'WILL NOT BE BUILT' means stop "
+                    "planning around it entirely.")
         except Exception:  # noqa: BLE001
             pass
         # This session's exits + realized P&L, so the on-cycle trader SEES when a

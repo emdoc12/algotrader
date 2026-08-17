@@ -162,7 +162,18 @@ def _mark_positions(positions: list[dict]) -> None:
 
 def close_dev_request(team: str, req_id, status: str = "closed",
                        resolution: str = "") -> dict:
-    """Owner-side close/update of a dev request from the dashboard."""
+    """Owner-side close of a dev request — and tell EVERY desk about it.
+
+    A fix is almost never useful to only the desk that reported it. When the
+    option-chain fetch was broken, one desk filed it while the other six had
+    equally written premium-selling off; delivering the fix silently to one
+    inbox would leave six desks still avoiding a lane that now works.
+
+    So the resolution is broadcast to every desk's journal — their durable
+    memory, which outlives the snapshot window — attributed to whoever filed it.
+    The request row itself is only updated on the filing desk, since that is
+    where it lives.
+    """
     if team not in team_names():
         return {"ok": False, "error": f"unknown team {team!r}"}
     try:
@@ -175,12 +186,42 @@ def close_dev_request(team: str, req_id, status: str = "closed",
     if db is None:
         return {"ok": False, "error": "team db unavailable"}
     try:
+        existing = db.get_dev_request(rid) or {}
         changed = db.update_dev_request(rid, status=status, resolution=resolution)
-        return {"ok": bool(changed), "id": rid, "status": status}
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "error": repr(e)}
-    finally:
         db.close()
+        return {"ok": False, "error": repr(e)}
+    title = existing.get("title") or "untitled"
+    db.close()
+
+    notified = []
+    if changed and status != "open":
+        verb = "DELIVERED" if status == "closed" else "WILL NOT BE BUILT"
+        filer = LABELS_PY.get(team, team)
+        note = (f"PLATFORM UPDATE — dev request #{rid} \"{title}\" ({filer}'s) is {verb}. "
+                f"{resolution}").strip()
+        if status == "closed":
+            note += (" This affects EVERY desk: if you previously avoided a tool, data "
+                     "source or strategy lane because it was broken, RE-TEST it now "
+                     "rather than carrying the old workaround.")
+        for other in team_names():
+            odb = _team_db(other)
+            if odb is None:
+                continue
+            try:
+                odb.add_journal("owner", "dev_resolved", note[:2000])
+                notified.append(other)
+            except Exception:  # noqa: BLE001
+                pass
+            finally:
+                odb.close()
+    return {"ok": bool(changed), "id": rid, "status": status,
+            "title": title, "notified_desks": notified}
+
+
+# Display names, mirrored from the dashboard JS so broadcast notes read naturally.
+LABELS_PY = {"claude": "Claude", "openai": "OpenAI", "grok": "Grok", "qwen": "Qwen",
+             "deepseek": "DeepSeek", "glm": "GLM", "kimi": "Kimi"}
 
 
 def research_payload() -> dict:
@@ -949,12 +990,29 @@ function devRequestCard(devs, onChange, forcedTeam){
     if(d.ts) left.appendChild(el("span",{class:"gray", style:"font-size:11px"}, fmtWhen(d.ts)));
     meta.appendChild(left);
     const btn = el("button",{class:"btn-ghost", style:"padding:4px 10px;font-size:11px"}, "Mark done");
-    btn.addEventListener("click", async () => {
-      btn.disabled = true; btn.textContent = "…";
-      await closeDevReq(team, d.id, onChange);
-    });
     meta.appendChild(btn);
     item.appendChild(meta);
+    // A note is worth prompting for: "closed" tells the desk nothing, while
+    // "fixed in v6.34.2, get_option_chain works again" tells it to re-test the
+    // lane it had written off.
+    const noteRow = el("div", {style:"display:none;gap:6px;margin:6px 0;align-items:center"});
+    const noteIn = el("input", {type:"text", style:"flex:1;font-size:12px;padding:5px 8px",
+      placeholder:"what changed? the desk reads this — e.g. 'fixed in v6.34.2, retry get_option_chain'"});
+    const okBtn = el("button", {class:"btn-ghost", style:"padding:4px 10px;font-size:11px"}, "Confirm");
+    const noBtn = el("button", {class:"btn-ghost", style:"padding:4px 10px;font-size:11px"}, "Won\u0027t fix");
+    const send = async (status) => {
+      okBtn.disabled = noBtn.disabled = true; okBtn.textContent = "…";
+      await closeDevReq(team, d.id, onChange, noteIn.value, status);
+    };
+    okBtn.addEventListener("click", () => send("closed"));
+    noBtn.addEventListener("click", () => send("wont_fix"));
+    noteIn.addEventListener("keydown", e => { if(e.key==="Enter") send("closed"); });
+    noteRow.appendChild(noteIn); noteRow.appendChild(okBtn); noteRow.appendChild(noBtn);
+    btn.addEventListener("click", () => {
+      noteRow.style.display = noteRow.style.display === "flex" ? "none" : "flex";
+      if(noteRow.style.display === "flex") noteIn.focus();
+    });
+    item.appendChild(noteRow);
     const title = el("div",{class:"body"});
     title.appendChild(document.createTextNode(d.title||"(untitled)"));
     if(safeUrl(d.url)){
@@ -1302,14 +1360,19 @@ async function sendChat(name){
   }
 }
 
-async function closeDevReq(team, id, onChange){
+async function closeDevReq(team, id, onChange, note, status){
   if(id == null) return;
+  const resolution = (note && note.trim())
+    ? note.trim()
+    : (status === "wont_fix"
+        ? "The owner will not build this. Stop planning around it."
+        : "The owner marked this delivered. RE-TEST the capability — it should work now.");
   try{
     await apiFetch("/api/devrequest/close", {
       method:"POST",
       headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({team: team, id: id, status: "closed",
-                            resolution: "marked done from dashboard"}),
+      body: JSON.stringify({team: team, id: id, status: status || "closed",
+                            resolution: resolution}),
     });
   }catch(e){ /* ignore; reload reflects truth */ }
   if(typeof onChange === "function"){ onChange(); return; }
