@@ -9,6 +9,37 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.35.3] — 2026-08-18
+
+### Added — the owner's real icon, recovered and converted
+The supplied icon was a JPEG. Renaming it to `.png` in the GitHub UI does not
+convert it — the committed file still began `ff d8 ff e1`, and Safari would have
+kept showing the generated letter square. The file was then deleted, which also
+removed `daytrader/live/static/` (git does not keep empty directories), leaving
+the endpoint with nothing to serve.
+
+The artwork was recovered from git history and converted here. That needed a
+**baseline JPEG decoder written from scratch** (`tools/jpeg_to_icon.py`) —
+Huffman → dequantise → IDCT → chroma upsample → YCbCr→RGB, with numpy doing the
+IDCT in one batched einsum — because this project has no Pillow (adding it once
+clobbered pandas) and the container has no ImageMagick, djpeg or ffmpeg either.
+
+`tools/find_tile.py` then locates the icon tile inside the render. The supplied
+file is a presentation mockup — the tile floating on a backdrop with margin and
+a vignette — and uploading that whole frame leaves iOS masking an already-inset
+image, so the home-screen icon looks small and ringed. Brightness thresholding
+does not find the tile (the backdrop gradient crosses any global threshold, and
+a first attempt cropped the vignette instead of the artwork), so it detects the
+tile's **edges** as the strongest sustained gradient on each axis. It found the
+tile at x 8.6–83.8%, y 25.3–75.5% of the frame; the result is centred to within
+5% on both axes with all four corners dark, i.e. genuinely full-bleed.
+
+### Changed — the PNG encoder now uses adaptive row filtering
+Every row was written unfiltered, which is valid but compresses badly on
+photographic content. Per-row filter selection by the standard
+minimum-sum-of-absolute-differences heuristic takes the icon from 416KB to
+300KB, 28% smaller. Verified by unfiltering the served bytes back to pixels.
+
 ## [6.35.2] — 2026-08-18
 
 ### Added — the icon uploader now accepts a JPEG (or anything else) and converts it

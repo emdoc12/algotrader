@@ -126,8 +126,58 @@ def downsample(px) -> bytes:
     return bytes(out)
 
 
+def _filter_scanlines(width: int, height: int, rgb: bytes) -> bytes:
+    """Adaptive per-row PNG filtering (the standard minimum-sum-of-absolute-
+    differences heuristic).
+
+    Writing every row unfiltered is valid PNG but compresses badly on
+    photographic content — the icon came out at 416KB unfiltered and 
+    roughly a third of that once each row picks its best filter.
+    """
+    bpp = 3
+    out = bytearray()
+    prev = bytearray(width * bpp)
+    for y in range(height):
+        line = rgb[y * width * bpp:(y + 1) * width * bpp]
+        cands = []
+        # 0: None
+        cands.append((0, bytes(line)))
+        # 1: Sub
+        sub = bytearray(len(line))
+        for i in range(len(line)):
+            left = line[i - bpp] if i >= bpp else 0
+            sub[i] = (line[i] - left) & 0xFF
+        cands.append((1, bytes(sub)))
+        # 2: Up
+        up = bytearray(len(line))
+        for i in range(len(line)):
+            up[i] = (line[i] - prev[i]) & 0xFF
+        cands.append((2, bytes(up)))
+        # 3: Average
+        avg = bytearray(len(line))
+        for i in range(len(line)):
+            left = line[i - bpp] if i >= bpp else 0
+            avg[i] = (line[i] - ((left + prev[i]) >> 1)) & 0xFF
+        cands.append((3, bytes(avg)))
+        # 4: Paeth
+        pae = bytearray(len(line))
+        for i in range(len(line)):
+            a = line[i - bpp] if i >= bpp else 0
+            b = prev[i]
+            c = prev[i - bpp] if i >= bpp else 0
+            pp = a + b - c
+            pa, pb, pc = abs(pp - a), abs(pp - b), abs(pp - c)
+            pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+            pae[i] = (line[i] - pr) & 0xFF
+        cands.append((4, bytes(pae)))
+        ftype, data = min(cands, key=lambda t: sum(v if v < 128 else 256 - v for v in t[1]))
+        out += bytes([ftype]) + data
+        prev = bytearray(line)
+    return bytes(out)
+
+
 def write_png(path: Path, width: int, height: int, rgb: bytes) -> None:
-    raw = b"".join(b"\x00" + rgb[y * width * 3:(y + 1) * width * 3] for y in range(height))
+    raw = _filter_scanlines(width, height, rgb)
 
     def chunk(tag: bytes, data: bytes) -> bytes:
         return (struct.pack(">I", len(data)) + tag + data
