@@ -230,6 +230,7 @@ def sync_github_resolutions() -> list[dict]:
     from daytrader.live.competition import team_names
 
     actions: list[dict] = []
+    actions.extend(_backfill_github_issues(token, team_names, _team_db))
     for team in team_names():
         db = _team_db(team)
         if db is None:
@@ -276,3 +277,54 @@ def _fetch_issue_state(html_url: str, token: str) -> dict | None:
         return out
     except Exception:  # noqa: BLE001 - the next sync pass retries
         return None
+
+
+# At most this many backfilled issues per sync pass. The stranded backlog can be
+# large, and each filed issue triggers an auto-fix workflow run — trickling them
+# out keeps the fix queue (and its spend) sane; the next pass takes the rest.
+_BACKFILL_PER_PASS = int(os.environ.get("DEV_REQUEST_BACKFILL_PER_PASS", "5"))
+
+
+def _backfill_github_issues(token: str, team_names, _team_db) -> list[dict]:
+    """Mirror stranded local-only dev requests to GitHub.
+
+    Requests filed while the GITHUB_TOKEN was broken exist only in the desks'
+    local databases — invisible to the auto-fix pipeline, which is exactly the
+    backlog the owner keeps having to relay by hand. Now that the token works,
+    each open request with no issue URL gets filed and linked, after which the
+    normal pipeline (fix → close → broadcast) takes over.
+    """
+    repo = os.environ.get("GITHUB_REPO") or DEFAULT_REPO
+    out: list[dict] = []
+    filed = 0
+    for team in team_names():
+        if filed >= _BACKFILL_PER_PASS:
+            break
+        db = _team_db(team)
+        if db is None:
+            continue
+        try:
+            rows = [r for r in db.open_dev_requests() if not str(r.get("url") or "").strip()]
+            for r in rows:
+                if filed >= _BACKFILL_PER_PASS:
+                    break
+                body = (str(r.get("body") or "") +
+                        f"\n\n---\n*Backfilled from the {team} desk's dashboard: originally "
+                        f"filed {r.get('ts')}, reported {int(r.get('report_count') or 1)}x. "
+                        "The GitHub mirror was down when this was first filed.*")
+                try:
+                    issue = _post_issue(repo, token,
+                                        {"title": r.get("title") or "(untitled)",
+                                         "body": body, "labels": list(DEFAULT_LABELS)})
+                except Exception:  # noqa: BLE001 - rate limit / outage: next pass retries
+                    return out
+                url = issue.get("html_url")
+                if url:
+                    db.update_dev_request(int(r["id"]), url=url)
+                    db.log_agent("runner", "dev_request_backfilled",
+                                 f"#{r['id']} -> {url}")
+                    out.append({"team": team, "id": r["id"], "backfilled": url})
+                    filed += 1
+        finally:
+            db.close()
+    return out

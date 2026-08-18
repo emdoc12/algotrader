@@ -9,6 +9,27 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.36.2] — 2026-08-18
+
+### Added — the stranded dev-request backlog backfills itself to GitHub
+Requests filed while the GITHUB_TOKEN was broken exist only in the desks' local
+databases — invisible to the auto-fix pipeline, which is exactly the backlog the
+owner kept relaying by hand. The resolution sync now also mirrors every open
+local request that has no issue URL: it files the issue (with provenance — which
+desk, when, how many times re-reported), links the local row to it, and the
+normal pipeline takes over from there. Capped at 5 per pass
+(`DEV_REQUEST_BACKFILL_PER_PASS`) so a large backlog trickles into the fix queue
+instead of flooding it; idempotent, so a filed request is never filed twice.
+
+Verified with a mocked GitHub: five stranded requests across three desks filed
+and linked in one pass, a second pass files nothing, and a backfilled issue that
+the Action later closes broadcasts to all seven desks exactly like any other.
+
+The auto-fix workflow also triggers on `reopened` now — a run that failed
+(missing secret, outage) does not re-fire on its own, but closing and reopening
+the issue does, which makes retries a two-click operation instead of a manual
+workflow dispatch.
+
 ## [6.36.1] — 2026-08-18
 
 ### Changed — the auto-fix workflows accept either billing credential

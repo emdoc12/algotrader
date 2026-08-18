@@ -20,7 +20,9 @@ name: Claude auto-fix dev requests
 
 on:
   issues:
-    types: [opened]
+    # `reopened` is the retry lever: a run that failed (missing secret, outage)
+    # does not re-fire on its own, but closing and reopening the issue does.
+    types: [opened, reopened]
 
 # One fix at a time. Two concurrent runs would race their pushes to main and
 # one would be rejected mid-work; queueing costs only latency.

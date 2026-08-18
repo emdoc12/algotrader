@@ -570,11 +570,14 @@ class LiveDB:
         return dict(row) if row is not None else None
 
     def update_dev_request(
-        self, req_id: int, status: Optional[str] = None, resolution: Optional[str] = None
+        self, req_id: int, status: Optional[str] = None, resolution: Optional[str] = None,
+        url: Optional[str] = None,
     ) -> bool:
-        """Update a dev request's status and/or resolution note. Stamps
-        ``resolved_ts`` when moved out of 'open'. Returns True if a row changed."""
+        """Update a dev request's status/resolution/url. Stamps ``resolved_ts``
+        when moved out of 'open'. Returns True if a row changed."""
         sets, params = [], []
+        if url is not None:
+            sets.append("url=?"); params.append(url)
         if status is not None:
             sets.append("status=?"); params.append(status)
             if status != "open":
