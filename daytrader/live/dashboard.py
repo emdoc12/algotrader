@@ -461,10 +461,13 @@ class _Handler(BaseHTTPRequestHandler):
         return self.rfile.read(min(length, cap))
 
     # -- low-level send helpers ----------------------------------------- #
-    def _send(self, code: int, body: bytes, ctype: str) -> None:
+    def _send(self, code: int, body: bytes, ctype: str,
+              extra_headers: dict | None = None) -> None:
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        for k, v in (extra_headers or {}).items():
+            self.send_header(k, v)
         self.end_headers()
         try:
             self.wfile.write(body)
@@ -478,12 +481,50 @@ class _Handler(BaseHTTPRequestHandler):
     def _html(self, html: str, code: int = 200) -> None:
         self._send(code, html.encode("utf-8"), "text/html; charset=utf-8")
 
+    def _icon(self) -> None:
+        """Serve the app icon from the image itself.
+
+        Read off local disk on every request rather than a CDN or GitHub: this
+        box is reachable on the LAN with no internet, and an icon that only
+        loads when WAN is up is an icon that intermittently disappears.
+        """
+        import os
+        from pathlib import Path
+        # APP_ICON_PATH lets the owner drop a different icon onto a mounted
+        # volume and have it served immediately — no image rebuild, which
+        # matters because redeploying this container is the slow step.
+        candidates = []
+        override = os.environ.get("APP_ICON_PATH", "").strip()
+        if override:
+            candidates.append(Path(override))
+        candidates.append(Path(__file__).resolve().parent / "static" / "apple-touch-icon.png")
+        data = None
+        for c in candidates:
+            try:
+                data = c.read_bytes()
+                break
+            except OSError:
+                continue
+        if data is None:
+            self._send(404, b"icon not found", "text/plain; charset=utf-8")
+            return
+        self._send(200, data, "image/png",
+                   extra_headers={"Cache-Control": "public, max-age=86400"})
+
     # -- routing -------------------------------------------------------- #
     def do_GET(self):  # noqa: N802
         try:
             path = urllib.parse.urlparse(self.path).path
             if path == "/":
                 self._html(_render_page())
+                return
+            # Static icon. Must sit ABOVE the /api/ auth gate and needs no token:
+            # iOS fetches the apple-touch-icon with a bare request, and a 401
+            # there is exactly what makes the home screen fall back to a
+            # generated white-letter square.
+            if path in ("/apple-touch-icon.png", "/apple-touch-icon-precomposed.png",
+                        "/favicon.png", "/favicon.ico"):
+                self._icon()
                 return
             if path.startswith("/api/") and not self._token_ok():
                 self._json({"error": "unauthorized"}, 401)
@@ -654,6 +695,12 @@ PAGE_HTML = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AI Trading Desk Competition</title>
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-title" content="AlgoTrader">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <style>
   :root{
     --bg:#0a0a0c; --card:#141417; --line:#23232a;
