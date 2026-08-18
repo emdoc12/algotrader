@@ -1129,6 +1129,39 @@ function activityCard(rows){
   return card;
 }
 
+// Convert ANY image the browser can decode into a square PNG. The browser
+// already contains a full JPEG/HEIC/WebP decoder, so doing this in the page
+// avoids adding an image library to the container just to accept a photo — and
+// it is the only way a JPEG can become a working apple-touch-icon, since Safari
+// refuses to render anything but PNG there.
+async function toSquarePng(file){
+  const url = URL.createObjectURL(file);
+  try{
+    const img = await new Promise((res, rej) => {
+      const i = new Image();
+      i.onload = () => res(i);
+      i.onerror = () => rej(new Error("could not decode that image"));
+      i.src = url;
+    });
+    const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+    if(!w || !h) throw new Error("image has no dimensions");
+    // Centre-crop to a square first, so a non-square source is cropped rather
+    // than squashed, then scale. 512 keeps it crisp on the Unraid tile; a
+    // smaller source is not upscaled past 180.
+    const side = Math.min(w, h);
+    const out = side >= 512 ? 512 : Math.max(180, side);
+    const c = document.createElement("canvas");
+    c.width = out; c.height = out;
+    const ctx = c.getContext("2d");
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(img, (w - side) / 2, (h - side) / 2, side, side, 0, 0, out, out);
+    const blob = await new Promise(r => c.toBlob(r, "image/png"));
+    if(!blob) throw new Error("PNG conversion failed");
+    return await blob.arrayBuffer();
+  } finally { URL.revokeObjectURL(url); }
+}
+
 function strategyCard(rows){
   const card = el("div", {class:"card"});
   card.appendChild(el("h2", null, "Who is running what"));
@@ -2080,26 +2113,29 @@ function renderSettings(main, status){
   iconCard.appendChild(el("h2", null, "Home screen icon"));
   iconCard.appendChild(el("div", {class:"muted", style:"font-size:12px;margin-bottom:12px"},
     "The icon iOS shows when this dashboard is added to a home screen. Upload a square "
-    + "PNG (180x180 or larger). It is stored on the data volume, so it survives container "
-    + "updates and needs no rebuild. PNG only \u2014 Safari will not render a JPEG or SVG here."));
+    + "square image. Stored on the data volume, so it survives container updates and needs "
+    + "no rebuild. Pick a JPEG, HEIC or anything else your browser can open \u2014 it is "
+    + "converted to PNG and cropped square here in the page, because Safari will only render "
+    + "a PNG as an apple-touch-icon."));
   const iconRow = el("div", {style:"display:flex;gap:12px;align-items:center;flex-wrap:wrap"});
   const preview = el("img", {src:"/apple-touch-icon.png?t=" + Date.now(),
     style:"width:60px;height:60px;border-radius:14px;border:1px solid var(--line);background:#000"});
-  const picker = el("input", {type:"file", accept:"image/png", id:"iconFile",
+  const picker = el("input", {type:"file", accept:"image/*", id:"iconFile",
                               style:"font-size:12px"});
   const upBtn = el("button", {class:"btn-ghost"}, "Upload icon");
   const iconMsg = el("div", {style:"font-size:12px;margin-top:8px"});
   upBtn.addEventListener("click", async () => {
     const f = picker.files && picker.files[0];
     if(!f){ iconMsg.className = "err"; iconMsg.textContent = "Choose a PNG first."; return; }
-    upBtn.disabled = true; upBtn.textContent = "Uploading\u2026";
+    upBtn.disabled = true; upBtn.textContent = "Converting\u2026";
     try{
-      const buf = await f.arrayBuffer();
+      const buf = await toSquarePng(f);
+      upBtn.textContent = "Uploading\u2026";
       const r = await (await apiFetch("/api/icon/upload", {
         method:"POST", headers:{"Content-Type":"image/png"}, body: buf })).json();
       if(r.ok){
         iconMsg.className = "green";
-        iconMsg.textContent = "Saved \u2014 " + r.width + "x" + r.height + ", "
+        iconMsg.textContent = "Saved as PNG \u2014 " + r.width + "x" + r.height + ", "
           + Math.round(r.bytes/1024) + "KB. " + (r.warning || "")
           + "  iOS caches home-screen icons: DELETE the shortcut and re-add it to see this.";
         preview.src = "/apple-touch-icon.png?t=" + Date.now();

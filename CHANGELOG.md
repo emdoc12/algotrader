@@ -9,6 +9,29 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.35.2] — 2026-08-18
+
+### Added — the icon uploader now accepts a JPEG (or anything else) and converts it
+Safari renders **only** a PNG as an apple-touch-icon, so a JPEG is exactly the
+input that leaves the home screen showing the generated letter square. v6.35.1
+refused non-PNG uploads with a clear message, which was honest but unhelpful:
+most people's icon is a JPEG.
+
+The Settings uploader now converts in the browser. The file picker accepts any
+image the browser can decode — JPEG, HEIC, WebP — draws it to a canvas and
+exports a PNG. Doing it client-side avoids adding an image library to the
+container purely to accept a photo (Pillow is deliberately absent here), and the
+browser's decoder handles formats a server-side library would not.
+
+It also **centre-crops to a square** rather than squashing a non-square source,
+and scales to 512x512 when the source allows, never upscaling a small image past
+180x180. Verified across six source shapes: a 1600x900 image crops a 900px square
+centred at x=350, a 3024x4032 phone photo crops centred vertically, a 120px
+source lands at 180x180, and an undecodable file is rejected.
+
+Server-side PNG validation is unchanged, so anything reaching disk is still a
+real PNG.
+
 ## [6.35.1] — 2026-08-18
 
 ### Added — upload the app icon from the Settings page
