@@ -9,6 +9,23 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.36.4] — 2026-08-18
+
+### Fixed — the GitHub sync only ran during trading hours
+`sync_github_resolutions` — the backfill of stranded requests AND the
+closed-issue broadcasts — was called from inside `trade_all()`, which runs only
+09:45–15:30 ET on market days. Consequences: the stranded backlog could not
+backfill after the close (observed live: a 15:40 deploy left it waiting for the
+next trading morning), a fix shipped in the evening or on a weekend would not
+reach the desks' journals until the next session, and a dev request whose direct
+GitHub post failed (e.g. filed during a container-restart window) stayed
+invisible for just as long.
+
+The sync now runs from the top of the always-on `run_forever` loop — every pass,
+year-round, weekends included — still internally throttled to ~15 minutes and
+never allowed to break the trading path. The market gates what trades; it has no
+business gating a conversation with GitHub.
+
 ## [6.36.3] — 2026-08-18
 
 ### Fixed — option chains timed out on every call (the real fix this time)

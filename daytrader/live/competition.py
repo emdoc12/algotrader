@@ -517,14 +517,6 @@ class Competition:
         return q, a, adx
 
     def trade_all(self):
-        # Return leg of the auto-fix pipeline: notice issues the GitHub
-        # workflow closed and broadcast the fix to every desk. Throttled
-        # internally (~15 min); never allowed to delay a trading cycle.
-        try:
-            from daytrader.live.dev_requests import sync_github_resolutions
-            sync_github_resolutions()
-        except Exception:  # noqa: BLE001
-            pass
         market = market_only()
         # Pin the snapshot's quote map onto each broker for this cycle so the
         # broker fills at the exact prices the agent reasoned over (no more
@@ -645,6 +637,17 @@ class Competition:
         while True:
             try:
                 self._sync_teams()
+                # The GitHub sync (stranded-request backfill + closed-issue
+                # broadcasts) belongs to the ALWAYS-ON loop, not the trading
+                # window. It first lived inside trade_all, which only runs
+                # 09:45-15:30 ET — so a fix shipped in the evening sat unseen
+                # until the next trading morning, and the backfill could not
+                # run after the close at all. Internally throttled (~15 min).
+                try:
+                    from daytrader.live.dev_requests import sync_github_resolutions
+                    sync_github_resolutions()
+                except Exception:  # noqa: BLE001 - never let GitHub break trading
+                    pass
                 now = datetime.now(ET)
                 if self._day != now.date():
                     self._new_day(now)
