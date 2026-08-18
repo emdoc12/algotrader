@@ -9,6 +9,34 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.35.1] — 2026-08-18
+
+### Added — upload the app icon from the Settings page
+Getting a new icon into the container previously meant editing the source tree
+and rebuilding the image. Settings now has a **Home screen icon** card: pick a
+PNG, upload, done. It is written to the **data volume**, so it survives container
+updates and needs no rebuild — which matters because redeploying is the slow
+step in this setup.
+
+Validation is by PNG magic bytes rather than by trusting the filename: Safari
+will not render a JPEG or SVG as an apple-touch-icon, so silently accepting one
+would reproduce the original bug with an icon that looks installed but still
+shows the generated letter square. Non-square and under-180px uploads are
+accepted with a warning about how iOS will treat them.
+
+Resolution order when serving `/apple-touch-icon.png` is `APP_ICON_PATH`, then
+the uploaded file, then the bundled default.
+
+### Added — Unraid picks the icon up automatically
+`net.unraid.docker.icon` and `net.unraid.docker.webui` labels on the image point
+at the same PNG the app serves, hosted from this repo's raw URL. So the Docker
+page, the browser tab and the iOS home screen all show one file, and the Docker
+page still resolves it when the container is down.
+
+Verified end to end over HTTP: the bundled 180x180 icon serves, a 512x512 upload
+replaces it in place, a JPEG is refused with an actionable message, and the good
+icon still serves afterwards.
+
 ## [6.35.0] — 2026-08-18
 
 ### Added — a real home-screen icon on iOS

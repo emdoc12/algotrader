@@ -266,6 +266,71 @@ def _mark_positions(positions: list[dict]) -> None:
             continue
 
 
+# Uploaded icons live on the DATA volume, not in the image, so replacing one
+# survives a container update and needs no rebuild.
+_MAX_ICON_BYTES = 2 * 1024 * 1024
+
+
+def uploaded_icon_path():
+    import os
+    from pathlib import Path
+    d = os.environ.get("DAYTRADER_DATA_DIR") or str(Path(team_db_path("claude")).parent)
+    return Path(d) / "app-icon.png"
+
+
+def _png_dims(data: bytes):
+    """(width, height) for a PNG, or None if it is not one."""
+    import struct
+    if len(data) < 26 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
+        return None
+    try:
+        w, h = struct.unpack(">II", data[16:24])
+        return int(w), int(h)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def save_uploaded_icon(data: bytes) -> dict:
+    """Store an uploaded PNG as the app icon.
+
+    PNG only, and validated by magic bytes rather than by trusting a filename:
+    Safari will not render a JPEG or SVG as an apple-touch-icon, and silently
+    accepting one would reproduce the original bug with an icon that looks
+    installed but still shows the generated letter square.
+    """
+    if not data:
+        return {"ok": False, "error": "no data received"}
+    if len(data) > _MAX_ICON_BYTES:
+        return {"ok": False,
+                "error": f"icon is {len(data) / 1024:.0f}KB; the limit is "
+                         f"{_MAX_ICON_BYTES // 1024}KB"}
+    dims = _png_dims(data)
+    if dims is None:
+        return {"ok": False, "error_code": "not_png",
+                "error": ("that file is not a PNG. Safari only renders a PNG as an "
+                          "apple-touch-icon — a JPEG or SVG here leaves the home screen "
+                          "showing the generated letter square. Export or convert to PNG "
+                          "and upload again.")}
+    w, h = dims
+    try:
+        p = uploaded_icon_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+    except OSError as e:
+        return {"ok": False, "error": f"could not write {uploaded_icon_path()}: {e}"}
+    out = {"ok": True, "path": str(p), "bytes": len(data), "width": w, "height": h,
+           "note": ("Saved to the data volume, so it survives container updates. "
+                    "iOS caches home-screen icons and will NOT refresh in place — "
+                    "delete the shortcut and re-add it to see this.")}
+    if w != h:
+        out["warning"] = (f"this image is {w}x{h}, not square — iOS will squash it. "
+                          "Crop to a square for a clean result.")
+    elif w < 180:
+        out["warning"] = (f"this image is {w}x{w}; iOS will upscale it to 180x180 and it "
+                          "will look soft. 180x180 or larger is better.")
+    return out
+
+
 def close_dev_request(team: str, req_id, status: str = "closed",
                        resolution: str = "") -> dict:
     """Owner-side close of a dev request — and tell EVERY desk about it.
@@ -497,6 +562,10 @@ class _Handler(BaseHTTPRequestHandler):
         override = os.environ.get("APP_ICON_PATH", "").strip()
         if override:
             candidates.append(Path(override))
+        try:
+            candidates.append(uploaded_icon_path())
+        except Exception:  # noqa: BLE001
+            pass
         candidates.append(Path(__file__).resolve().parent / "static" / "apple-touch-icon.png")
         data = None
         for c in candidates:
@@ -578,6 +647,9 @@ class _Handler(BaseHTTPRequestHandler):
                 if not isinstance(body, dict):
                     body = {}
                 self._json(settings.save(body))
+                return
+            if path == "/api/icon/upload":
+                self._json(save_uploaded_icon(self._read_body()))
                 return
             if path == "/api/devrequest/close":
                 try:
@@ -2002,6 +2074,49 @@ function renderSettings(main, status){
   dataCard.appendChild(settingsTextField(status, "ALPHAVANTAGE_DAILY_LIMIT", "ALPHAVANTAGE_DAILY_LIMIT",
     {def:"25", hint:"New historical-chain fetches allowed per day. Raise it to match a premium plan."}));
   main.appendChild(dataCard);
+
+  // App icon
+  const iconCard = el("div", {class:"card"});
+  iconCard.appendChild(el("h2", null, "Home screen icon"));
+  iconCard.appendChild(el("div", {class:"muted", style:"font-size:12px;margin-bottom:12px"},
+    "The icon iOS shows when this dashboard is added to a home screen. Upload a square "
+    + "PNG (180x180 or larger). It is stored on the data volume, so it survives container "
+    + "updates and needs no rebuild. PNG only \u2014 Safari will not render a JPEG or SVG here."));
+  const iconRow = el("div", {style:"display:flex;gap:12px;align-items:center;flex-wrap:wrap"});
+  const preview = el("img", {src:"/apple-touch-icon.png?t=" + Date.now(),
+    style:"width:60px;height:60px;border-radius:14px;border:1px solid var(--line);background:#000"});
+  const picker = el("input", {type:"file", accept:"image/png", id:"iconFile",
+                              style:"font-size:12px"});
+  const upBtn = el("button", {class:"btn-ghost"}, "Upload icon");
+  const iconMsg = el("div", {style:"font-size:12px;margin-top:8px"});
+  upBtn.addEventListener("click", async () => {
+    const f = picker.files && picker.files[0];
+    if(!f){ iconMsg.className = "err"; iconMsg.textContent = "Choose a PNG first."; return; }
+    upBtn.disabled = true; upBtn.textContent = "Uploading\u2026";
+    try{
+      const buf = await f.arrayBuffer();
+      const r = await (await apiFetch("/api/icon/upload", {
+        method:"POST", headers:{"Content-Type":"image/png"}, body: buf })).json();
+      if(r.ok){
+        iconMsg.className = "green";
+        iconMsg.textContent = "Saved \u2014 " + r.width + "x" + r.height + ", "
+          + Math.round(r.bytes/1024) + "KB. " + (r.warning || "")
+          + "  iOS caches home-screen icons: DELETE the shortcut and re-add it to see this.";
+        preview.src = "/apple-touch-icon.png?t=" + Date.now();
+      } else {
+        iconMsg.className = "err"; iconMsg.textContent = r.error || "upload failed";
+      }
+    }catch(e){ iconMsg.className = "err"; iconMsg.textContent = String(e); }
+    upBtn.disabled = false; upBtn.textContent = "Upload icon";
+  });
+  iconRow.appendChild(preview); iconRow.appendChild(picker); iconRow.appendChild(upBtn);
+  iconCard.appendChild(iconRow);
+  iconCard.appendChild(iconMsg);
+  iconCard.appendChild(el("div", {class:"muted", style:"font-size:11px;margin-top:10px"},
+    "Tip: upload the icon ARTWORK cropped edge to edge, not a mockup of it floating on a "
+    + "background. iOS applies its own rounded mask, so any margin or pre-rounded corner "
+    + "in the file shows up as a dark border inside that mask and the icon looks small."));
+  main.appendChild(iconCard);
 
   // Other
   const otherCard = el("div", {class:"card"});

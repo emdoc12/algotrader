@@ -32,6 +32,13 @@ FROM python:3.12-slim
 LABEL maintainer="emdoc12"
 LABEL org.opencontainers.image.title="AlgoTrader"
 LABEL org.opencontainers.image.description="Competing autonomous equity day-trading desks with a web dashboard"
+LABEL org.opencontainers.image.source="https://github.com/emdoc12/algotrader"
+# Unraid reads these off the image to populate the container's icon and WebUI
+# link. The icon URL points at the same PNG the app serves at
+# /apple-touch-icon.png, so the Docker page, the browser tab and the iOS home
+# screen all show one file — and it still resolves when the container is down.
+LABEL net.unraid.docker.icon="https://raw.githubusercontent.com/emdoc12/algotrader/main/daytrader/live/static/apple-touch-icon.png"
+LABEL net.unraid.docker.webui="http://[IP]:[PORT:3737]"
 
 WORKDIR /app
 
