@@ -61,6 +61,9 @@ jobs:
           # bills a Claude Pro/Max subscription instead.
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Diagnostic: the run dies in ~80ms with is_error:true and the real
+          # error text hidden. Surface it. Remove once the pipeline is green.
+          show_full_output: true
           # No --model pin: a subscription OAuth token can only use the models
           # its plan serves, and pinning one it cannot access fails the run in
           # milliseconds. The Claude Code default model tracks the best model

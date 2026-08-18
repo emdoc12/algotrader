@@ -9,6 +9,14 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.36.6] — 2026-08-18
+
+### Changed — surface the auto-fix workflow's real error text
+Runs die in ~80ms with `is_error: true` at zero cost, on two different models —
+so the failure is local and happens before any API work, and the action hides
+the underlying message by default. `show_full_output: true` is enabled on the
+dev-request workflow as a diagnostic; to be removed once the pipeline is green.
+
 ## [6.36.5] — 2026-08-18
 
 ### Fixed — the auto-fix run died instantly under a subscription token
