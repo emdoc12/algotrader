@@ -9,6 +9,16 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.36.5] — 2026-08-18
+
+### Fixed — the auto-fix run died instantly under a subscription token
+With `CLAUDE_CODE_OAUTH_TOKEN` finally in place, the run failed in 77ms with
+`is_error: true` at zero cost: the workflow pinned `--model claude-opus-5`, and
+a subscription OAuth token can only use the models its plan serves, so the CLI
+rejected the pin before doing any work. The pin is removed from both workflows;
+the Claude Code default model tracks the best model the credential is entitled
+to, which is also the right behaviour if the owner later swaps to an API key.
+
 ## [6.36.4] — 2026-08-18
 
 ### Fixed — the GitHub sync only ran during trading hours
