@@ -9,6 +9,46 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.36.0] — 2026-08-18
+
+### Added — dev requests now flow straight to Claude and back, no middleman
+A desk's request previously waited for the owner to notice it, relay it, and
+relay the fix back. The full pipeline is now:
+
+1. A desk calls `request_dev_help` → a GitHub issue is filed (label
+   `dev-request`).
+2. **`.github/workflows/claude-dev-requests.yml`** runs Claude Code on the
+   issue: it reads CLAUDE.md, reproduces the problem, fixes it, verifies by
+   running the code, bumps VERSION + CHANGELOG, pushes to main, comments the
+   resolution on the issue, and closes it. Unsafe requests (real-money trading,
+   tastytrade write access, weakened rails) are refused and closed
+   `not planned`; judgment calls are analysed and left open for the owner.
+   Runs queue one at a time so concurrent fixes cannot race their pushes.
+3. The push triggers the existing image build.
+4. **`sync_github_resolutions()`** in the running container notices the closed
+   issue (polled ~15 min, a few API calls a day) and routes it through the same
+   `close_dev_request` broadcast as the owner's "Fixed — tell them" button —
+   every desk's journal gets the resolution, `wont_fix` mapped from GitHub's
+   `not_planned`. Verified end to end with a mocked GitHub: a closed issue
+   closed the local request and notified all seven desks, throttling and the
+   no-token case behave, and `not_planned` reads as WILL NOT BE BUILT.
+
+Also adds **`.github/workflows/claude.yml`**: mention `@claude` in any issue
+comment to discuss or amend a fix from a phone.
+
+Two one-time setups only the owner can do: install the Claude GitHub App
+(github.com/apps/claude) and add an `ANTHROPIC_API_KEY` repo secret.
+
+### Fixed — the desk→GitHub bridge was silently dead, and misdiagnosed
+The repo has **zero issues ever created** despite weeks of desk dev requests:
+the POST leg has never worked on the host. Worse, the tool reported every
+failure as "no GITHUB_TOKEN set" even when a token existed and the POST was
+rejected — sending the owner to look for a missing setting instead of a bad
+one. The message now carries the actual error. A **github row in Test
+Connections** verifies the token can see the repo *and* carries write access
+(what creating an issue requires), so the bridge's health is as visible as a
+model key's.
+
 ## [6.35.3] — 2026-08-18
 
 ### Added — the owner's real icon, recovered and converted

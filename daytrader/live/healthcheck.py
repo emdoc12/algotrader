@@ -48,7 +48,53 @@ def check_providers() -> list[dict]:
             detail = "connected (no text — reasoning model on a 1-line ping)"
         rows.append({"team": name, "model": model, "configured": True,
                      "ok": ok, "latency_ms": ms, "detail": detail})
+    rows.append(_check_github_bridge())
     return rows
+
+
+def _check_github_bridge() -> dict:
+    """Prove the dev-request → GitHub bridge actually works.
+
+    The desks had been "filing" requests for weeks while the repo showed zero
+    issues ever created — the POST leg was silently failing on the host, and
+    nothing on the dashboard said so. This row makes the bridge's health as
+    visible as a model key: it verifies the token can SEE the repo and that it
+    carries write access (what creating an issue actually requires), without
+    creating one.
+    """
+    import json as _json
+    import os
+    import urllib.request
+
+    repo = os.environ.get("GITHUB_REPO") or "emdoc12/algotrader"
+    token = os.environ.get("GITHUB_TOKEN")
+    base = {"team": "github", "model": f"dev requests → {repo}"}
+    if not token:
+        return {**base, "configured": False, "ok": False, "latency_ms": 0,
+                "detail": ("no GITHUB_TOKEN — desk dev requests are recorded on the "
+                           "dashboard only and NEVER reach GitHub (or the auto-fix "
+                           "pipeline). Add a token with repo scope in Settings.")}
+    t0 = time.time()
+    try:
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{repo}",
+            headers={"Authorization": f"Bearer {token}",
+                     "Accept": "application/vnd.github+json",
+                     "User-Agent": "algotrader-healthcheck"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = _json.loads(resp.read().decode("utf-8", "replace"))
+        ms = int((time.time() - t0) * 1000)
+        push = bool((data.get("permissions") or {}).get("push"))
+        if not push:
+            return {**base, "configured": True, "ok": False, "latency_ms": ms,
+                    "detail": ("token can read the repo but has NO push/issue rights — "
+                               "issue creation will 403. Use a token with repo scope.")}
+        return {**base, "configured": True, "ok": True, "latency_ms": ms,
+                "detail": "token valid with write access — dev requests will reach GitHub"}
+    except Exception as e:  # noqa: BLE001
+        ms = int((time.time() - t0) * 1000)
+        return {**base, "configured": True, "ok": False, "latency_ms": ms,
+                "detail": f"GitHub rejected the token: {repr(e)[:120]}"}
 
 
 def _provider_health() -> dict:

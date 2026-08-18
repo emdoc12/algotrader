@@ -193,3 +193,86 @@ def list_open_requests(db=None) -> list[dict]:
         return list(rows)
     except Exception:
         return []
+
+
+# --------------------------------------------------------------------------- #
+# resolution sync: GitHub -> desks                                            #
+# --------------------------------------------------------------------------- #
+_SYNC_EVERY_SEC = float(os.environ.get("DEV_REQUEST_SYNC_MINUTES", "15")) * 60.0
+_last_sync = 0.0
+
+
+def sync_github_resolutions() -> list[dict]:
+    """Close local dev requests whose GitHub issue was closed, and broadcast.
+
+    This is the return leg of the automated pipeline: a desk files an issue,
+    the auto-fix workflow repairs it and closes the issue — and without this,
+    nothing running here would ever notice. The request would sit open on the
+    dashboard forever and no desk would be told to retry. Polling the handful
+    of open, mirrored requests every ~15 minutes closes that gap for a few
+    API calls a day.
+
+    Reuses ``close_dev_request`` from the dashboard so a GitHub-driven close
+    broadcasts to every desk's journal exactly like the owner's own
+    "Fixed — tell them" button.
+    """
+    global _last_sync
+    now = time.time()
+    if now - _last_sync < _SYNC_EVERY_SEC:
+        return []
+    _last_sync = now
+    token = os.environ.get("GITHUB_TOKEN")
+    if not token:
+        return []
+
+    # Lazy import: dashboard imports competition which reaches back here.
+    from daytrader.live.dashboard import _team_db, close_dev_request
+    from daytrader.live.competition import team_names
+
+    actions: list[dict] = []
+    for team in team_names():
+        db = _team_db(team)
+        if db is None:
+            continue
+        try:
+            rows = [r for r in db.open_dev_requests() if "/issues/" in str(r.get("url") or "")]
+        finally:
+            db.close()
+        for r in rows:
+            info = _fetch_issue_state(str(r["url"]), token)
+            if not info or info.get("state") != "closed":
+                continue
+            status = "wont_fix" if info.get("state_reason") == "not_planned" else "closed"
+            resolution = (info.get("resolution")
+                          or "Resolved on GitHub — the fix has shipped. Try it again.")
+            res = close_dev_request(team, r["id"], status, resolution[:1200])
+            actions.append({"team": team, "id": r["id"], "status": status,
+                            "notified": len(res.get("notified_desks") or [])})
+    return actions
+
+
+def _fetch_issue_state(html_url: str, token: str) -> dict | None:
+    """State + last comment for a mirrored issue. None on any failure."""
+    try:
+        # html_url: https://github.com/{owner}/{repo}/issues/{n}
+        parts = html_url.rstrip("/").split("/")
+        n = int(parts[-1])
+        repo = "/".join(parts[-4:-2])
+        api = f"https://api.github.com/repos/{repo}/issues/{n}"
+        headers = {"Authorization": f"Bearer {token}",
+                   "Accept": "application/vnd.github+json",
+                   "User-Agent": "algotrader-devsync"}
+        req = urllib.request.Request(api, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            issue = json.loads(resp.read().decode("utf-8", "replace"))
+        out = {"state": issue.get("state"), "state_reason": issue.get("state_reason"),
+               "resolution": None}
+        if out["state"] == "closed" and int(issue.get("comments") or 0) > 0:
+            req = urllib.request.Request(api + "/comments?per_page=100", headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                comments = json.loads(resp.read().decode("utf-8", "replace"))
+            if comments:
+                out["resolution"] = str(comments[-1].get("body") or "")
+        return out
+    except Exception:  # noqa: BLE001 - the next sync pass retries
+        return None

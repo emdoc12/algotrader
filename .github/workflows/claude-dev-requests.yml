@@ -1,0 +1,101 @@
+# Auto-fix desk dev requests.
+#
+# The pipeline this completes:
+#   desk hits a problem → request_dev_help files a GitHub issue (labelled
+#   dev-request) → this workflow runs Claude Code on it → Claude fixes, bumps
+#   VERSION + CHANGELOG, pushes to main → docker.yml builds the new image →
+#   Claude comments the resolution on the issue and closes it → the running
+#   container's resolution sync sees the closed issue and broadcasts
+#   "FIXED — try again" to every desk's journal.
+#
+# The owner is in the loop for exactly one thing: pulling the new image
+# (or nothing, if the container auto-updates).
+#
+# Requires two one-time repo setups the workflow cannot do for itself:
+#   1. Install the Claude GitHub App:  https://github.com/apps/claude
+#   2. Add repo secret ANTHROPIC_API_KEY (or swap the line below for
+#      claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+#      from `claude setup-token` on a Claude subscription).
+name: Claude auto-fix dev requests
+
+on:
+  issues:
+    types: [opened]
+
+# One fix at a time. Two concurrent runs would race their pushes to main and
+# one would be rejected mid-work; queueing costs only latency.
+concurrency:
+  group: claude-dev-fix
+  cancel-in-progress: false
+
+jobs:
+  fix:
+    # Only desk-filed requests — the label file_dev_request always applies.
+    if: contains(github.event.issue.labels.*.name, 'dev-request')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+      issues: write
+      id-token: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0   # full history: fixes read CHANGELOG/blame context
+
+      - uses: anthropics/claude-code-action@v1
+        env:
+          # gh CLI (preinstalled on the runner) for commenting on / closing the
+          # issue. Deliberately the default GITHUB_TOKEN: issue ops don't need
+          # to trigger workflows. The git PUSH goes through the Claude App
+          # token (github_token input omitted), which DOES trigger docker.yml,
+          # so the image rebuild still happens.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: |
+            --model claude-opus-5
+            --allowedTools "Bash,Read,Write,Edit,MultiEdit,Glob,Grep"
+          prompt: |
+            You are the developer for this autonomous-trading-desk repo. A desk
+            (an AI trading team) filed this dev request as issue #${{ github.event.issue.number }}:
+
+            TITLE: ${{ github.event.issue.title }}
+
+            BODY:
+            ${{ github.event.issue.body }}
+
+            Read CLAUDE.md first and follow it exactly — especially: paper
+            trading only (tastytrade stays READ-ONLY; never add order
+            placement), never change working interfaces (ports, paths, env var
+            names, tool names) as a side effect, and version-first commits.
+
+            Then:
+            1. Reproduce or verify the reported problem against the actual code.
+               Desks report symptoms honestly but diagnose imperfectly — trust
+               the symptom, verify the cause yourself.
+            2. If it is a real, fixable problem: fix it, and VERIFY the fix by
+               running the relevant code (python -c / small scripts), not by
+               reading it. Match the surrounding code style and comment density.
+            3. Bump VERSION (semver: PATCH for fixes, MINOR for new capability)
+               and add a CHANGELOG.md section at the top explaining what was
+               wrong and what changed, in the style of the existing entries.
+            4. Commit with a version-first title ("vX.Y.Z: ...") and push
+               DIRECTLY TO MAIN. Do not open a pull request — this repo does
+               not use them.
+            5. Comment on issue #${{ github.event.issue.number }} with what you
+               changed, how you verified it, and the version it ships in, then
+               close the issue:
+                 gh issue comment ${{ github.event.issue.number }} --body "..."
+                 gh issue close ${{ github.event.issue.number }}
+               (Closing it is what tells the running system to broadcast the
+               fix to every desk — do not skip it.)
+
+            If the request is NOT safely fixable — it asks for real-money
+            trading, tastytrade write access, weakened risk rails, or something
+            infeasible — do NOT implement it. Comment explaining why and close
+            with: gh issue close ${{ github.event.issue.number }} --reason "not planned".
+            If it genuinely needs the owner's judgment (spending money, changing
+            competition terms), comment your analysis and LEAVE THE ISSUE OPEN
+            for the owner rather than deciding yourself.

@@ -817,9 +817,14 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
         if res.get("ok"):
             note = "Filed as a GitHub issue and saved to the dev-requests page."
         elif recorded:
+            # Report the ACTUAL reason. Saying "no GITHUB_TOKEN set" when the
+            # token exists but the POST was rejected sends the owner looking for
+            # a missing setting instead of a bad one — which is how a silently
+            # broken GitHub bridge stays broken.
+            why = str(res.get("error") or "GitHub mirror unavailable")
             note = ("Saved to the dev-requests page (visible on the dashboard). "
-                    "GitHub mirror skipped — no GITHUB_TOKEN set — but your request "
-                    "IS persisted and the dev will see it.")
+                    f"GitHub mirror did NOT succeed: {why}. Your request IS "
+                    "persisted and the dev will see it on the dashboard.")
         else:
             note = "Could not record the request."
         return {

@@ -517,6 +517,14 @@ class Competition:
         return q, a, adx
 
     def trade_all(self):
+        # Return leg of the auto-fix pipeline: notice issues the GitHub
+        # workflow closed and broadcast the fix to every desk. Throttled
+        # internally (~15 min); never allowed to delay a trading cycle.
+        try:
+            from daytrader.live.dev_requests import sync_github_resolutions
+            sync_github_resolutions()
+        except Exception:  # noqa: BLE001
+            pass
         market = market_only()
         # Pin the snapshot's quote map onto each broker for this cycle so the
         # broker fills at the exact prices the agent reasoned over (no more

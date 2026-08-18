@@ -1,0 +1,29 @@
+# Interactive Claude: mention @claude in any issue or PR comment.
+# Companion to claude-dev-requests.yml — that one auto-fixes desk-filed issues;
+# this one lets the OWNER talk back ("@claude this fix didn't take", "@claude
+# also add X") and get changes without opening a terminal.
+name: Claude
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  claude:
+    if: contains(github.event.comment.body, '@claude')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: --model claude-opus-5
