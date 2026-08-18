@@ -9,6 +9,20 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.36.7] — 2026-08-18
+
+### Fixed — the auto-fix pipeline is verified live, end to end
+The failing credential turned out to be a line break at character 80 of the
+pasted OAuth token — the terminal wrapped it and the copy kept the wrap. With a
+cleanly pasted token, run #5 completed the whole loop against the real test
+issue: Claude read the repo, reported the VERSION, confirmed CLAUDE.md's hard
+constraints, deliberately changed nothing (as the test demanded), commented, and
+closed the issue as `claude[bot]`. Every link is now proven in production:
+desk files → GitHub issue → auto-fix run → push to main → image build →
+Watchtower pull → closed-issue broadcast to all desks.
+
+The `show_full_output` diagnostic that exposed the token error is removed again.
+
 ## [6.36.6] — 2026-08-18
 
 ### Changed — surface the auto-fix workflow's real error text
