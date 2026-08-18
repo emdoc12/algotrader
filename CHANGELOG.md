@@ -9,6 +9,17 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.36.1] — 2026-08-18
+
+### Changed — the auto-fix workflows accept either billing credential
+Both Claude workflows now pass `anthropic_api_key` and
+`claude_code_oauth_token`, so the owner sets exactly one repo secret —
+`ANTHROPIC_API_KEY` (API credit) or `CLAUDE_CODE_OAUTH_TOKEN` (a Claude
+Pro/Max subscription, from `claude setup-token`) — and the pipeline works
+without another workflow edit. The first live run confirmed everything up to
+authentication: trigger, label filter, actor checks, checkout, app token, and
+Claude Code install all passed, failing only on the absent key.
+
 ## [6.36.0] — 2026-08-18
 
 ### Added — dev requests now flow straight to Claude and back, no middleman
