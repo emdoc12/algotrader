@@ -253,7 +253,17 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                              "target_dte or strike_pct_window."),
             "no_quotes": ("the chain loaded but the market-data stream stayed quiet — usually "
                           "outside market hours. Retry during the session."),
-            "stream_timeout": "the fetch timed out; retry once, then report it if it persists.",
+            "rest_chain_timeout": ("the full chain download blew its budget BUT keeps "
+                                   "downloading in the background and is cached when done — "
+                                   "retry in 1-2 minutes and it should return instantly. "
+                                   "Persistent repeats mean the owner should raise "
+                                   "OPTION_CHAIN_FETCH_TIMEOUT."),
+            "chain_downloading": ("an earlier call's download is still running and caches on "
+                                  "completion — do NOT hammer this; retry next cycle."),
+            "stream_timeout": ("the fetch timed out; retry once — the chain is now cached, so "
+                               "a second attempt skips the slow phase. If ALPHAVANTAGE_API_KEY "
+                               "were configured you would receive a stale research chain "
+                               "instead of this error; ask the owner to add it."),
         }.get(str(code), "retry once; if it persists, file a dev request with this error_code.")
 
     def place_option_trade(inp: dict) -> dict:

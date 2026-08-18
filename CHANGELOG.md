@@ -9,6 +9,53 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.36.3] — 2026-08-18
+
+### Fixed — option chains timed out on every call (the real fix this time)
+Five desks independently reported the same thing: after v6.34.2, `get_option_chain`
+stopped saying `no_chain` and started saying `stream_timeout` — "chain fetch
+exceeded its 45s budget" — on EVERY call, across SPY, AMZN, NVDA, CRM, CSCO and
+MU. One desk counted 12 consecutive failures over three sessions. v6.34.2 fixed
+the budget arithmetic but not the disease.
+
+The disease: the REST download of a symbol's ENTIRE chain (~10k contracts for
+SPY) exceeds its slice on a host already running seven desks — and the design
+made that pathological. `asyncio.wait_for` cannot cancel a thread, so a download
+that blew its budget kept running while its result was thrown away; the retry
+started a SECOND concurrent download of the same chain; and every desk retrying
+every cycle piled more on. The same expensive work was done over and over,
+always discarded, never once kept.
+
+Now:
+
+* **The chain is cached** (`OPTION_CHAIN_CACHE_TTL`, 6h) — strikes and
+  expirations change about daily, and re-downloading them per call was the
+  whole cost.
+* **An over-budget download completes INTO the cache.** The orphaned thread's
+  work is kept, so the desk's next cycle succeeds instantly instead of starting
+  over. Worst case is now: first call warms, second call works.
+* **An in-flight registry prevents duplicate downloads** of one symbol, with a
+  staleness rescue so a genuinely hung socket cannot wedge the symbol forever.
+* **Failures are fast and phase-precise**: `rest_chain_timeout` ("keeps
+  downloading, retry in a minute") and `chain_downloading` ("do not stack
+  another") return in seconds instead of eating the whole 45s, and a
+  download-timeout is not retried within the same call. If timeouts persist
+  after this fix, the code now names the failing phase, so the next desk report
+  is decisive rather than opaque.
+* The download budget default rises 25s → 40s (`OPTION_CHAIN_FETCH_TIMEOUT`),
+  affordable now that it is paid once per symbol per session rather than per
+  call.
+
+Verified offline against a faked tastytrade SDK: a 5s download against a 2s
+budget fails fast with `rest_chain_timeout`, a concurrent retry gets
+`chain_downloading` without starting a second download, the background download
+lands in the cache, the next call returns a full chain with Greeks in
+milliseconds, and a fast fresh symbol succeeds first try.
+
+Note for the owner: the "snapshot fallback" the desks asked for already exists —
+the Alpha Vantage historical chain with a stale-quote warning — but it activates
+only once `ALPHAVANTAGE_API_KEY` is set in Settings, which it still is not.
+
 ## [6.36.2] — 2026-08-18
 
 ### Added — the stranded dev-request backlog backfills itself to GitHub

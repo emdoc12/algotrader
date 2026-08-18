@@ -29,6 +29,7 @@ import asyncio
 import logging
 import os
 import threading
+import time
 
 log = logging.getLogger("daytrader.tastytrade")
 
@@ -37,7 +38,19 @@ _MAX_OPTION_SYMBOLS = 3
 # The full-chain HTTP fetch is the slow phase for a big underlying (SPY has
 # thousands of listed contracts), so it gets its own budget instead of sharing
 # the streaming one.
-_CHAIN_FETCH_TIMEOUT = float(os.environ.get("OPTION_CHAIN_FETCH_TIMEOUT", "25"))
+_CHAIN_FETCH_TIMEOUT = float(os.environ.get("OPTION_CHAIN_FETCH_TIMEOUT", "40"))
+# The listed chain (strikes x expirations) changes about once a day, yet every
+# call was re-downloading SPY's ~10k contracts from scratch. Cache it.
+_CHAIN_CACHE_TTL = float(os.environ.get("OPTION_CHAIN_CACHE_TTL", "21600"))
+_CHAIN_CACHE: dict[str, tuple[float, object]] = {}
+# symbol -> download start ts. asyncio.wait_for cannot cancel a thread, so a
+# download that blows its budget KEEPS RUNNING — which we turn from a bug into
+# the mechanism: it completes into the cache and the next call is instant. The
+# in-flight registry stops a retry from launching a SECOND download of the same
+# chain alongside it, which is how five desks retrying every cycle turned one
+# slow fetch into a pile-up that never finished at all.
+_CHAIN_INFLIGHT: dict[str, float] = {}
+_chain_lock = threading.Lock()
 # Give up on a quiet stream after this long with no new event.
 _STREAM_QUIET_SEC = float(os.environ.get("OPTION_STREAM_QUIET_SEC", "4"))
 # Hard cap on contracts subscribed for Greeks/quotes in one call.
@@ -190,6 +203,34 @@ def get_quotes(symbols: list[str], timeout: float = 8.0) -> dict:
 # --------------------------------------------------------------------------- #
 # Option chain with streaming Greeks (near-the-money only)
 # --------------------------------------------------------------------------- #
+def _cached_chain(symbol: str):
+    with _chain_lock:
+        hit = _CHAIN_CACHE.get(symbol)
+    if hit and (time.time() - hit[0]) < _CHAIN_CACHE_TTL:
+        return hit[1]
+    return None
+
+
+def _download_chain(session, symbol: str):
+    """Blocking REST download, run in a worker thread.
+
+    Writes the cache even when the awaiting coroutine has already given up and
+    returned an error to the desk: the expensive work still pays off, because
+    the desk's next attempt (they retry every cycle) hits the cache. Clears the
+    in-flight flag on every exit so a failure never wedges the symbol.
+    """
+    from tastytrade.instruments import get_option_chain
+    try:
+        chain = get_option_chain(session, symbol)
+        if chain:
+            with _chain_lock:
+                _CHAIN_CACHE[symbol] = (time.time(), chain)
+        return chain
+    finally:
+        with _chain_lock:
+            _CHAIN_INFLIGHT.pop(symbol, None)
+
+
 async def _collect_option_chain(
     session, symbol: str, max_expirations: int, strikes_around_atr: int, timeout: float,
     min_dte: int | None = None, max_dte: int | None = None,
@@ -202,13 +243,43 @@ async def _collect_option_chain(
     from tastytrade.instruments import OptionType, get_option_chain  # read chain only
 
     # 12.x: get_option_chain(session, symbol) -> {expiration_date: [Option, ...]}
-    # This is a BLOCKING HTTP call that downloads and parses the symbol's entire
-    # option chain — thousands of contracts for an index ETF. Run it in a thread
-    # so it cannot stall the event loop the streamer also needs, and give it its
-    # own budget rather than letting it eat the streaming allowance.
-    chain = await asyncio.wait_for(
-        asyncio.to_thread(get_option_chain, session, symbol),
-        timeout=_CHAIN_FETCH_TIMEOUT)
+    # This blocking HTTP download of the symbol's ENTIRE chain is the phase that
+    # was silently eating the whole budget in production — ~10k contracts for
+    # SPY on a container already running seven desks. Serve it from cache when
+    # fresh; otherwise download in a thread with its own budget, and if that
+    # budget blows, keep the thread alive to finish INTO the cache so the next
+    # call succeeds instantly instead of starting over.
+    chain = _cached_chain(symbol)
+    if chain is None:
+        now = time.time()
+        with _chain_lock:
+            started = _CHAIN_INFLIGHT.get(symbol)
+            # A download stuck far past any sane budget is presumed dead
+            # (hung socket); allow a fresh attempt rather than pointing at it
+            # forever.
+            stale = started is not None and (now - started) > 10 * _CHAIN_FETCH_TIMEOUT
+            if started is None or stale:
+                _CHAIN_INFLIGHT[symbol] = now
+                owner = True
+            else:
+                owner = False
+        if not owner:
+            raise _ChainError(
+                "chain_downloading",
+                f"the {symbol} chain download started {now - started:.0f}s ago by an "
+                "earlier call and is still running; it is cached the moment it "
+                "completes — retry next cycle instead of stacking another download")
+        try:
+            chain = await asyncio.wait_for(
+                asyncio.to_thread(_download_chain, session, symbol),
+                timeout=_CHAIN_FETCH_TIMEOUT)
+        except (asyncio.TimeoutError, TimeoutError):
+            raise _ChainError(
+                "rest_chain_timeout",
+                f"downloading the full {symbol} chain exceeded its "
+                f"{_CHAIN_FETCH_TIMEOUT:.0f}s budget. The download CONTINUES in the "
+                "background and lands in the cache when done — retry in a minute "
+                "and it should return instantly") from None
     if not chain:
         raise _ChainError("empty_chain", f"{symbol} returned no option chain")
     expirations = sorted(chain.keys())
@@ -426,8 +497,9 @@ def fetch_option_chain(
                                       symbol)
             except _ChainError as e:
                 last = _chain_err(e.code, e.message, symbol)
-                if e.code in ("empty_chain", "no_contracts"):
-                    break        # deterministic: retrying changes nothing
+                if e.code in ("empty_chain", "no_contracts",
+                              "rest_chain_timeout", "chain_downloading"):
+                    break        # retrying inside this call changes nothing
             except Exception as e:  # noqa: BLE001
                 last = _chain_err("fetch_failed", repr(e)[:300], symbol)
     else:
