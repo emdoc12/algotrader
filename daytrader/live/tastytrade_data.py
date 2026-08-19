@@ -74,6 +74,11 @@ class _ChainError(Exception):
 # Cached session, guarded by a lock so concurrent cycles share one login.
 _session = None
 _session_lock = threading.Lock()
+# The exact exception from the last failed session build. _get_session returns
+# a bare None on failure, which left "why" trapped in a log.info nobody reads —
+# the owner rotated credentials and had NO way to test them until the next
+# trading cycle. The health check surfaces this verbatim instead.
+_last_session_error: str | None = None
 
 
 def is_configured() -> bool:
@@ -110,9 +115,12 @@ def _get_session():
             # OAuth session: provider_secret + refresh_token (refresh handled
             # automatically by the SDK). No password / no 2FA prompt.
             _session = Session(client_secret, refresh_token)
+            global _last_session_error
+            _last_session_error = None
             return _session
         except Exception as e:  # noqa: BLE001
             log.info("tastytrade: session unavailable (%s); using Yahoo only", e)
+            _last_session_error = repr(e)[:300]
             _session = None
             return None
 

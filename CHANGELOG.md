@@ -9,6 +9,20 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.38.8] — 2026-08-19
+
+### Added — a tastytrade row in Test Connections
+After rotating credentials, the owner had NO way to verify them: the desks can
+only exercise tastytrade during a trading cycle, chat has no tools, and the
+next cycle might be tomorrow. The check page now builds a real OAuth session on
+demand — green means the exchange succeeded and chains/margin are reachable;
+red carries tastytrade's own rejection verbatim (`invalid_grant` gets the
+plain-language hint: the stored secret and refresh token are not from the same
+grant — regenerate the secret, create a NEW grant under it, paste both
+together). The check forces a fresh session build so a rotation is tested
+immediately, and `_get_session` now records its last failure reason instead of
+burying it in a log nobody reads.
+
 ## [6.38.7] — 2026-08-19
 
 ### Fixed — the bot's fixes never shipped: its pushes don't trigger image builds

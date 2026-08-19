@@ -48,8 +48,46 @@ def check_providers() -> list[dict]:
             detail = "connected (no text — reasoning model on a 1-line ping)"
         rows.append({"team": name, "model": model, "configured": True,
                      "ok": ok, "latency_ms": ms, "detail": detail})
+    rows.append(_check_tastytrade())
     rows.append(_check_github_bridge())
     return rows
+
+
+def _check_tastytrade() -> dict:
+    """Live OAuth verdict for the tastytrade credentials, on demand.
+
+    The desks can only test these during a trading cycle, so after rotating
+    credentials the owner had no way to know whether the new pair worked until
+    the next market session. This row builds a REAL session right now: green
+    means the OAuth exchange succeeded; red carries tastytrade's own rejection
+    (e.g. invalid_grant / "Client secret mismatch" = the stored secret and
+    refresh token are not from the same grant).
+    """
+    from daytrader.live import tastytrade_data as tt
+    base = {"team": "tastytrade", "model": "OAuth session (read-only market data)"}
+    if not tt.is_configured():
+        return {**base, "configured": False, "ok": False, "latency_ms": 0,
+                "detail": ("TASTYTRADE_CLIENT_SECRET / TASTYTRADE_REFRESH_TOKEN not set — "
+                           "live option chains and margin mirroring are unavailable.")}
+    t0 = time.time()
+    # Force a FRESH build so a rotation is tested immediately: a cached dead
+    # session (None) would otherwise mask newly-saved credentials until retry,
+    # and a cached live one would mask newly-broken ones.
+    with tt._session_lock:
+        tt._session = None
+    sess = tt._get_session()
+    ms = int((time.time() - t0) * 1000)
+    if sess is not None:
+        return {**base, "configured": True, "ok": True, "latency_ms": ms,
+                "detail": "OAuth session established — chains and margin data are reachable"}
+    why = tt._last_session_error or "session build failed (no detail captured)"
+    hint = ""
+    if "invalid_grant" in why or "mismatch" in why.lower():
+        hint = (" — the stored client secret and refresh token are NOT from the same "
+                "grant. Regenerate the client secret in your tastytrade OAuth app, then "
+                "create a NEW grant under it and paste BOTH values together.")
+    return {**base, "configured": True, "ok": False, "latency_ms": ms,
+            "detail": f"tastytrade rejected the credentials: {why}{hint}"}
 
 
 def _check_github_bridge() -> dict:
