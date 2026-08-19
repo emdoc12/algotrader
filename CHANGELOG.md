@@ -9,6 +9,22 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.38.7] — 2026-08-19
+
+### Fixed — the bot's fixes never shipped: its pushes don't trigger image builds
+The owner caught the container reporting "up to date" at v6.38.2 while main sat
+at v6.38.6. The build history shows why: every Docker image build was triggered
+by a human push — pushes made by `claude[bot]` fired **zero** builds, so the
+auto-fix pipeline's releases (6.38.0, .1, .3, .4, .5) existed only as commits.
+A fix could land on main all day and never reach the running system unless a
+human happened to push something afterward, which is precisely the middleman
+this pipeline exists to remove.
+
+The auto-fix workflow now **dispatches the image build explicitly** as its final
+step (`workflow_dispatch` events fire even when raised from within a workflow,
+unlike bot pushes), and `docker.yml` accepts the dispatch. Harmlessly idempotent
+when a run pushed nothing: same commit, same image.
+
 ## [6.38.6] — 2026-08-19
 
 ### Fixed — stored settings sanitize themselves; no re-saving ritual

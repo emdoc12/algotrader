@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
     tags: ['v*']
+  # The auto-fix workflow dispatches this explicitly: pushes made by
+  # claude[bot] do NOT fire push-event workflows (observed: five bot releases,
+  # zero image builds), so without this the pipeline's fixes never shipped
+  # unless a human happened to push afterward.
+  workflow_dispatch:
 
 jobs:
   build:

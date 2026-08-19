@@ -40,7 +40,7 @@ jobs:
       contents: write
       issues: write
       id-token: write
-      actions: read
+      actions: write   # to dispatch the image build below
     steps:
       - uses: actions/checkout@v6
         with:
@@ -109,3 +109,14 @@ jobs:
             If it genuinely needs the owner's judgment (spending money, changing
             competition terms), comment your analysis and LEAVE THE ISSUE OPEN
             for the owner rather than deciding yourself.
+
+      # Pushes made by claude[bot] never fire the push-triggered image build
+      # (observed live: five bot releases, zero builds, a container four
+      # versions stale while "up to date"). Dispatch it explicitly so a fix
+      # that landed on main actually reaches the running system. Harmlessly
+      # idempotent when the run pushed nothing: same commit, same image.
+      - name: Ship the image (bot pushes don't trigger push workflows)
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run docker.yml --ref main -R ${{ github.repository }}
