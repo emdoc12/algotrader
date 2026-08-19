@@ -93,11 +93,35 @@ def load() -> dict:
 
 def apply_to_env() -> None:
     """Push stored settings into the process environment (does not overwrite
-    a value already set in the real environment, so explicit env vars win)."""
+    a value already set in the real environment, so explicit env vars win).
+
+    Also SANITIZES the store itself: v6.38.4 began stripping whitespace on
+    save, but values saved before it kept their invisible newlines forever —
+    the only cure was asking the owner to re-save settings that were already
+    saved, which is a workaround wearing an instruction's clothes. Cleaning
+    happens here instead, once, at startup, and the cleaned values are written
+    back so every later reader (status page, health checks) sees them too.
+    """
     data = load()
-    for k, v in data.items():
-        if k in MANAGED_KEYS and v not in (None, "") and not os.environ.get(k):
-            os.environ[k] = str(v)
+    dirty = False
+    for k, v in list(data.items()):
+        if k not in MANAGED_KEYS or v in (None, ""):
+            continue
+        cleaned = str(v).strip()
+        if cleaned != str(v):
+            dirty = True
+            if not cleaned:
+                data.pop(k, None)   # whitespace-only relic: drop it
+                continue
+            data[k] = cleaned
+        if cleaned and not os.environ.get(k):
+            os.environ[k] = cleaned
+    if dirty:
+        try:
+            SETTINGS_PATH.write_text(json.dumps(data, indent=2))
+            os.chmod(SETTINGS_PATH, 0o600)
+        except Exception:  # noqa: BLE001 - env is already clean; file cleanup is best-effort
+            pass
 
 
 def save(updates: dict) -> dict:

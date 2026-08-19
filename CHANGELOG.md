@@ -9,6 +9,23 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.38.6] — 2026-08-19
+
+### Fixed — stored settings sanitize themselves; no re-saving ritual
+v6.38.4 strips whitespace from secrets on SAVE, but values stored before it
+kept their invisible newlines forever — and the proposed remedy was asking the
+owner to re-save settings that were already saved, a workaround wearing an
+instruction's clothes. `apply_to_env()` now cleans the store itself at startup:
+stored values are stripped before export, whitespace-only relics dropped, and
+the cleaned file written back so every later reader sees the same values.
+Explicit environment variables still win. Verified against a store carrying
+pre-v6.38.4 dirt: env and file both come out clean with zero user action.
+
+If tastytrade's `invalid_grant` persists after this lands, whitespace was not
+the cause — the stored client secret and refresh token genuinely do not belong
+to the same OAuth grant, and one fresh grant from tastytrade (a one-time
+re-issue, not maintenance) is the remaining fix.
+
 ## [6.38.5] — 2026-08-19
 
 ### Fixed — chain_download_failed's advice claimed a cache hit that never happened
