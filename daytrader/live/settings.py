@@ -112,11 +112,23 @@ def save(updates: dict) -> dict:
             data.pop(k, None)
             os.environ.pop(k, None)
         elif v not in (None, ""):
+            # A pasted key/secret routinely carries a leading/trailing newline
+            # or space (copied from a portal page, a terminal, a password
+            # manager) that is invisible in a password-masked field. Stored
+            # verbatim, that whitespace becomes part of the credential and the
+            # provider does a byte-for-byte match — which is indistinguishable
+            # from an actually-wrong secret until someone diffs the raw bytes.
+            # Tastytrade's OAuth token endpoint rejecting a client secret this
+            # way is exactly what got reported as "credentials rejected" in
+            # dev request #25.
+            v = str(v).strip()
+            if not v:
+                continue  # whitespace-only paste; treat as no-op, not a clear
             if k.endswith("_BASE_URL") and not _base_url_allowed(v):
                 rejected.append(k)
                 continue
-            data[k] = str(v)
-            os.environ[k] = str(v)
+            data[k] = v
+            os.environ[k] = v
     Path(_DATA_DIR).mkdir(parents=True, exist_ok=True)
     SETTINGS_PATH.write_text(json.dumps(data, indent=2))
     try:

@@ -9,6 +9,44 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.38.4] — 2026-08-19
+
+### Fixed — a pasted secret's stray whitespace silently became part of the credential
+Dev request #25 reported the same `TastytradeError('invalid_grant', 'Client
+secret mismatch')` as dev request #24. #24 already read `tastytrade==13.2.3`'s
+`Session.refresh()` source and confirmed it POSTs exactly
+`TASTYTRADE_CLIENT_SECRET` / `TASTYTRADE_REFRESH_TOKEN` with nothing missing or
+malformed on this repo's side — re-verified that here against the same source
+and it still holds, so that finding stands.
+
+What #24 didn't check: the path those values take to get INTO the environment.
+`settings.save()` (`daytrader/live/settings.py`), which backs every secret
+field on the dashboard's Settings page including the tastytrade ones, stored
+whatever bytes the field submitted with no trimming. A secret copied from a
+portal page, a terminal, or a password manager routinely carries a trailing
+newline or a leading/trailing space — invisible in a password-masked input —
+and that whitespace becomes part of the literal string sent to Tastytrade's
+OAuth token endpoint. The provider does a byte-for-byte match, so a
+one-character whitespace difference is indistinguishable from an actually
+wrong secret: exactly `invalid_grant` / "Client secret mismatch", with the
+masked UI field showing what looks like the right value.
+
+`save()` now strips whitespace off every stored value before writing it to
+`settings.json` and `os.environ`; a whitespace-only submission is treated as
+a no-op (leave unchanged) rather than clearing the key, matching the existing
+empty-string behavior. Applies to all managed keys, not just tastytrade's —
+the same paste-corruption risk exists for every provider secret on that page.
+Verified with a throwaway settings store: saved `"  abc123SECRET\n"` for
+`TASTYTRADE_CLIENT_SECRET` and confirmed both the on-disk JSON and
+`os.environ` hold the trimmed `"abc123SECRET"`; confirmed a whitespace-only
+save leaves an existing value untouched; confirmed `__CLEAR__` still deletes.
+
+This does not rule out an actually-rotated secret on Tastytrade's side — dev
+request #24 remains open for that, since only the owner can confirm or
+re-issue it there. If re-saving the tastytrade fields through the dashboard on
+this version doesn't clear the `invalid_grant` error, the credential itself
+needs attention on Tastytrade's end, not this code.
+
 ## [6.38.3] — 2026-08-19
 
 ### Fixed — the chain-failure hint contradicted the error field in the SAME response
