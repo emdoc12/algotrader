@@ -254,7 +254,7 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
         # WAS configured and the fallback simply had no budget left — which is
         # exactly what desks hit and re-filed as dev request #16. Read the
         # real state instead of guessing it.
-        if str(code) in ("stream_timeout", "chain_download_failed"):
+        if str(code) in ("stream_timeout", "chain_download_failed", "no_session"):
             # fetch_option_chain already attempted the fallback for THIS call
             # and, if it failed, says exactly why in fallback_reason. That is
             # ground truth from seconds ago — a budget-remaining guess below
@@ -276,9 +276,9 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
             # rejection (invalid_grant / "Client secret mismatch"), which
             # reproduces identically on every retry — no cache, no luck,
             # cache or not, until the owner rotates the credential.
+            auth_markers = ("invalid_grant", "invalid_client", "unauthorized",
+                             "Client secret mismatch", "access_denied")
             if code == "chain_download_failed":
-                auth_markers = ("invalid_grant", "invalid_client", "unauthorized",
-                                 "Client secret mismatch", "access_denied")
                 if error and any(m in error for m in auth_markers):
                     retry_note = (
                         "do NOT just retry — the download RAISED rather than timing out, and "
@@ -292,6 +292,22 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                         "the download raised rather than timing out, so nothing landed in the "
                         "cache (only a chain that actually completes gets cached) — a retry "
                         "starts a fresh download rather than an instant cache hit")
+            elif code == "no_session":
+                # _get_session() now exchanges the refresh token for real before
+                # handing back a session (it used to just construct the SDK
+                # object, which always "succeeded"), so this code now means the
+                # OAuth exchange itself was rejected — caught a phase earlier
+                # than the old chain_download_failed path, with the same verdict.
+                if error and any(m in error for m in auth_markers):
+                    retry_note = (
+                        "do NOT retry — the tastytrade session itself could not be built, and "
+                        "the error looks like a rejected OAuth credential. This needs the owner "
+                        "to re-issue TASTYTRADE_CLIENT_SECRET / TASTYTRADE_REFRESH_TOKEN in "
+                        "Tastytrade's developer portal and update Settings with the new values")
+                else:
+                    retry_note = ("the tastytrade session could not be built for a reason that "
+                                  "does not look like a bad credential (see the error text) — "
+                                  "retry once")
             else:
                 retry_note = "retry once (the chain is now cached, so a second attempt skips the slow phase)"
             if fallback_reason:
@@ -321,9 +337,9 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
             except Exception:  # noqa: BLE001
                 pass
         return {
-            "not_configured": ("tastytrade is not configured. Set ALPHAVANTAGE_API_KEY to at "
-                               "least research options off historical chains."),
-            "no_session": "the tastytrade session failed — the owner must refresh credentials.",
+            "not_configured": ("tastytrade is not configured. Set POLYGON_API_KEY for a live "
+                               "chain fallback, or ALPHAVANTAGE_API_KEY to at least research "
+                               "options off historical chains."),
             "empty_chain": "this underlying appears to have no listed options; pick another.",
             "no_contracts": ("no contracts matched your expiration/strike window — widen "
                              "target_dte or strike_pct_window."),

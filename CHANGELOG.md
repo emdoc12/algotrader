@@ -9,6 +9,47 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.39.0] — 2026-08-19
+
+### Fixed — the tastytrade "OAuth session established" check was a false positive
+Dev request #28: three minutes after v6.38.9's Test Connections row went green
+for a freshly-rotated credential, the SAME desk's `get_option_chain` still hit
+`invalid_grant` / "Invalid JWT". Traced it to the SDK, not the credential:
+`tastytrade.Session.__init__` (13.x) never talks to the network — it just
+stores the two strings and a placeholder token. The actual OAuth exchange
+(`POST /oauth/token`) only fires lazily, inside `refresh()`, on the first real
+API call. `_get_session()` was treating "construction didn't raise" as
+"credentials are valid," which is true for ANY non-empty string, garbage
+included — so the health check (and every session build) could never go red
+for a bad credential unless it was literally empty. `_get_session()` now
+forces `refresh(force=True)` immediately after construction, so a rejected
+grant fails right there with the real reason instead of surfacing as a
+mystery three calls (and several code layers) downstream. Verified against
+the real `tastytrade` SDK with its OAuth endpoint mocked: a rejected
+credential now correctly fails `_get_session()` and the Test Connections row
+(previously always green regardless of validity); a valid one still succeeds.
+`get_option_chain`'s `no_session` error now carries the real rejection text
+and, when it looks like a rejected OAuth grant, the same "do NOT retry — the
+owner must re-issue the credential" guidance `chain_download_failed` already
+had, instead of a generic "check your credentials."
+
+### Added — Polygon.io as a second chain-data fallback, ahead of Alpha Vantage
+The other half of #28: with tastytrade's OAuth dead and Alpha Vantage's
+`HISTORICAL_OPTIONS` premium-gated, five of the eight strategy lanes (anything
+needing strikes/Greeks) couldn't be priced at all. Polygon was already
+configured on this desk but only wired for quotes/news/movers, not chains.
+`get_option_chain` now tries, in order: (1) tastytrade live, (2) Polygon's
+`/v3/snapshot/options/{underlying}` — a live snapshot with bid/ask, open
+interest, IV and Greeks already attached, filtered to the requested DTE/strike
+window, (3) Alpha Vantage's historical chain as the last resort. Polygon
+depends on neither tastytrade's OAuth session nor Alpha Vantage's paywall, so
+either one being down no longer takes every premium-selling lane down with it.
+Still flagged `stale` in the envelope — this code can't confirm the owner's
+Polygon plan carries real-time vs 15-minute-delayed options quotes, and
+overclaiming freshness it can't verify is worse than a conservative warning.
+Verified by parsing a realistic mocked Polygon snapshot response (fields
+checked against Polygon's live docs) through `get_option_chain` end-to-end.
+
 ## [6.38.9] — 2026-08-19
 
 ### Fixed — Test Connections detail text wraps instead of vanishing off-screen

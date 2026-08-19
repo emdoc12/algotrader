@@ -108,14 +108,30 @@ def _get_session():
             except Exception:  # noqa: BLE001
                 pass
             _session = None
+        global _last_session_error
         try:
             from tastytrade import Session  # read/auth only (OAuth)
             client_secret = os.environ.get("TASTYTRADE_CLIENT_SECRET") or ""
             refresh_token = os.environ.get("TASTYTRADE_REFRESH_TOKEN") or ""
             # OAuth session: provider_secret + refresh_token (refresh handled
             # automatically by the SDK). No password / no 2FA prompt.
-            _session = Session(client_secret, refresh_token)
-            global _last_session_error
+            candidate = Session(client_secret, refresh_token)
+            # tastytrade 13.x's Session.__init__ does NOT talk to the network —
+            # it just stores the two strings and sets a placeholder token, so
+            # construction "succeeds" for ANY non-empty credential, garbage
+            # included. The real OAuth exchange (POST /oauth/token) only fires
+            # inside refresh(), lazily, on the first actual API call. That made
+            # this function's "validated" docstring false: a bad client_secret
+            # or a refresh_token from a different grant sailed through here as
+            # a live session and only blew up minutes later, deep in a chain
+            # download, as an unexplained invalid_grant. Dev request #28 caught
+            # this directly — the Test Connections row (which forces exactly
+            # this call) went green seconds after a credential rotation, then
+            # the next real chain fetch still hit "Invalid JWT". Force the
+            # exchange now, so a rejected credential fails HERE with the real
+            # reason instead of surfacing as a mystery three calls downstream.
+            _sync(candidate.refresh(force=True))
+            _session = candidate
             _last_session_error = None
             return _session
         except Exception as e:  # noqa: BLE001
@@ -514,9 +530,17 @@ def fetch_option_chain(
             try:
                 session = _get_session()
                 if session is None:
+                    # _get_session() now exchanges the refresh token for real
+                    # (see its docstring) instead of only constructing the SDK
+                    # object, so an invalid_grant/mismatched-grant credential
+                    # is caught HERE rather than three phases deeper inside
+                    # _download_chain. Carry the real rejection text along —
+                    # without it this collapses back to the same generic
+                    # "check your credentials" a desk cannot act on.
+                    reason = _last_session_error or (
+                        "check TASTYTRADE_CLIENT_SECRET / TASTYTRADE_REFRESH_TOKEN")
                     last = _chain_err("no_session",
-                                      "tastytrade session could not be established — check "
-                                      "TASTYTRADE_CLIENT_SECRET / TASTYTRADE_REFRESH_TOKEN",
+                                      f"tastytrade session could not be established: {reason}",
                                       symbol)
                     break
                 # Budget must COVER its phases, not equal one of them: the old
@@ -557,24 +581,41 @@ def fetch_option_chain(
                           symbol)
 
     if allow_historical_fallback:
+        # Two independent fallbacks, tried in order of data quality. Polygon
+        # first: a live snapshot (current bid/ask/greeks/OI, not a dated
+        # chain) that depends on neither tastytrade's OAuth session nor
+        # Alpha Vantage's paywalled endpoint (dev request #28 — the desk had
+        # already traced both dead paths and asked for exactly this). Alpha
+        # Vantage's genuinely-historical chain stays as the last resort for
+        # when Polygon isn't configured either.
+        poly, poly_why = _polygon_chain_fallback(
+            symbol, min_dte, max_dte, strike_pct_window,
+            max_expirations, strikes_around_atr)
+        if poly:
+            poly["degraded_reason"] = (last or {}).get("error")
+            poly["live_error_code"] = (last or {}).get("error_code")
+            return poly
+
         hist, why_not = _historical_chain_fallback(
             symbol, min_dte, max_dte, strike_pct_window,
             max_expirations, strikes_around_atr)
         if hist:
             hist["degraded_reason"] = (last or {}).get("error")
             hist["live_error_code"] = (last or {}).get("error_code")
+            hist["polygon_fallback_reason"] = poly_why
             return hist
         # The desks spent a day concluding the fallback "is not wired in"
         # because a live failure returned with no word about WHY the fallback
         # did not step in. Say it, in the error and on the dashboard.
+        combined_reason = f"polygon: {poly_why} | alphavantage: {why_not}"
         if last is not None:
-            last["fallback_reason"] = why_not
-            last["error"] = f"{last['error']} | historical fallback unavailable: {why_not}"
+            last["fallback_reason"] = combined_reason
+            last["error"] = f"{last['error']} | fallbacks unavailable: {combined_reason}"
         try:
             from daytrader.data.feeds.base import record_named_error
-            record_named_error("alphavantage_fallback", "unavailable", str(why_not),
-                               hint=("With the live chain down, this fallback is the only "
-                                     "options data path — fix whatever this names."))
+            record_named_error("chain_fallbacks", "unavailable", combined_reason,
+                               hint=("With the live chain down, these fallbacks are the only "
+                                     "options data path — fix whichever this names."))
         except Exception:  # noqa: BLE001
             pass
     return last or _chain_err("unknown", "chain unavailable", symbol)
@@ -584,6 +625,39 @@ def _chain_err(code: str, message: str, symbol: str) -> dict:
     return {"ok": False, "chain": {}, "symbol": symbol, "source": None,
             "stale": False, "as_of": None, "n_contracts": 0,
             "error_code": code, "error": message}
+
+
+def _polygon_chain_fallback(symbol, min_dte, max_dte, strike_pct_window,
+                            max_expirations, max_strikes) -> tuple[dict | None, str]:
+    """Live chain from Polygon's options snapshot — the SECOND-tier fallback.
+
+    Tried before Alpha Vantage's historical chain because this is a current
+    snapshot (bid/ask/greeks/OI as of right now), not a dated one, and it
+    depends on neither tastytrade's OAuth session nor Alpha Vantage's paywall
+    — the exact independence dev request #28 asked for. Still labelled
+    ``stale`` in the envelope: this module cannot confirm the owner's Polygon
+    plan carries real-time (vs 15-minute delayed) options quotes, and
+    overclaiming freshness the code cannot verify is worse than a
+    conservative warning a desk can choose to act on anyway.
+    """
+    try:
+        from daytrader.data.feeds import polygon as poly
+        if not poly.is_configured():
+            return None, "POLYGON_API_KEY is not configured"
+        res = poly.chain(symbol, min_dte, max_dte, strike_pct_window,
+                         max_expirations, max_strikes)
+        if res.get("error"):
+            return None, f"polygon error: {str(res['error'])[:200]}"
+        if not res.get("chain"):
+            return None, f"polygon returned no usable contracts for {symbol}"
+        from datetime import datetime as _dt, timezone as _tz
+        as_of = _dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return {"ok": True, "chain": res["chain"], "source": "polygon",
+                "stale": True, "as_of": as_of, "n_contracts": res.get("n_contracts"),
+                "symbol": symbol}, ""
+    except Exception as e:  # noqa: BLE001
+        log.info("options: polygon fallback for %s failed (%s)", symbol, e)
+        return None, f"polygon fallback crashed: {repr(e)[:200]}"
 
 
 def _historical_chain_fallback(symbol, min_dte, max_dte, strike_pct_window,
