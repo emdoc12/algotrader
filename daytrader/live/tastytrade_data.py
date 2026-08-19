@@ -221,6 +221,14 @@ def _cached_chain(symbol: str):
 def _download_chain(session, symbol: str):
     """Blocking REST download, run in a worker thread.
 
+    13.x's ``get_option_chain`` is a coroutine function (the 12.x version this
+    was written against was plain sync HTTP) — calling it without awaiting
+    just builds a coroutine object and never sends the request. That object is
+    truthy, so it sailed past ``if chain:`` and got cached, then blew up two
+    frames later as ``AttributeError: 'coroutine' object has no attribute
+    'keys'`` on the first ``chain.keys()``. This runs it to completion with its
+    own event loop, since this function executes off-loop in a worker thread.
+
     Writes the cache even when the awaiting coroutine has already given up and
     returned an error to the desk: the expensive work still pays off, because
     the desk's next attempt (they retry every cycle) hits the cache. Clears the
@@ -228,7 +236,7 @@ def _download_chain(session, symbol: str):
     """
     from tastytrade.instruments import get_option_chain
     try:
-        chain = get_option_chain(session, symbol)
+        chain = asyncio.run(get_option_chain(session, symbol))
         if chain:
             with _chain_lock:
                 _CHAIN_CACHE[symbol] = (time.time(), chain)

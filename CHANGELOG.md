@@ -9,6 +9,38 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.38.1] — 2026-08-19
+
+### Fixed — get_option_chain: "'coroutine' object has no attribute 'keys'"
+v6.37.0 pinned `tastytrade` to 13.2.3 to stop the image floating on `>=12`, and
+that pin surfaced a real bug the float had been hiding: `13.2.3`'s
+`get_option_chain(session, symbol)` is `async def` (the 12.x version this
+codebase was written against was plain sync HTTP). `_download_chain()` called
+it without awaiting, which builds a coroutine object and never sends the
+request. That object is truthy, so it sailed past `if chain:`, got written into
+the chain cache, and blew up two frames later the first time anything called
+`.keys()` on it — reported as `error_code: fetch_failed`,
+`AttributeError("'coroutine' object has no attribute 'keys'")`. `_download_chain`
+now runs the coroutine to completion with `asyncio.run()` (safe here — it
+executes off-loop, in the `asyncio.to_thread` worker thread `_collect_option_chain`
+hands it to). Verified with a stand-in async `get_option_chain` swapped into
+`sys.modules['tastytrade.instruments']`: before the fix, calling it
+un-awaited reproduces the exact `AttributeError` from the report; after the
+fix, `_download_chain()` returns the real chain dict and it lands in
+`_CHAIN_CACHE`.
+
+Also looked at this dev request's second claim — that the Alpha Vantage
+historical-chain fallback needs a paid plan, not just an API key. A live key
+tested against `HISTORICAL_OPTIONS` came back with Alpha Vantage's
+premium-required response, which contradicts this codebase's free-tier
+assumption. That is not a code bug: `historical_chain()` already surfaces
+whatever error Alpha Vantage returns rather than masking it, so the fallback
+is not silently swallowing anything. What it needs is the owner to decide
+whether to pay for a premium plan or accept the fallback as unavailable — left
+open on issue #19 rather than decided here. Noted in
+`daytrader/data/feeds/alphavantage.py`'s module docstring so the next reader
+does not repeat the free-tier assumption.
+
 ## [6.38.0] — 2026-08-19
 
 ### Fixed — the AV fallback was already wired in; the error hint lied about it

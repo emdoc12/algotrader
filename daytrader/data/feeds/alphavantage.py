@@ -21,6 +21,17 @@ Two things shape this module:
 
 `REALTIME_OPTIONS` is deliberately not used: it is a premium endpoint, and
 tastytrade already covers live chains at no extra cost.
+
+UPDATE 2026-08-19 (issue #19): a live-tested key against `HISTORICAL_OPTIONS`
+came back with Alpha Vantage's premium-required response ("subscribe at
+alphavantage.co/premium"), not the free-tier quota message the paragraph above
+assumes. Whether that is a plan change on Alpha Vantage's side or specific to
+that key is unconfirmed here. Either way, no amount of code fixing unlocks a
+paid endpoint — `historical_chain()` below already surfaces whatever error
+Alpha Vantage actually returns rather than masking it, so the "fallback looks
+free but silently does nothing" failure mode is not present. Provisioning a
+premium plan (or accepting that this fallback is unavailable) is the owner's
+call, not this module's.
 """
 from __future__ import annotations
 
