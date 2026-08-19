@@ -9,6 +9,50 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.38.3] — 2026-08-19
+
+### Fixed — the chain-failure hint contradicted the error field in the SAME response
+Dev request #24: `get_option_chain(SPY)` returned `error_code: stream_timeout` with
+`error` correctly reporting that the Alpha Vantage historical fallback had just
+been tried and failed on a premium-endpoint rejection — but `what_to_do` in that
+identical response said "A stale-chain fallback is available (24 Alpha Vantage
+requests left today)", because `_chain_advice()` in `daytrader/live/tools.py`
+derived its guidance from `av.budget_state()` alone, ignoring what
+`fetch_option_chain` had *just* discovered moments earlier for this very call.
+A remaining-budget count is meaningless once the endpoint itself is
+premium-gated — no amount of quota fixes that.
+
+`_chain_advice()` now takes the envelope's `fallback_reason` (set whenever
+`fetch_option_chain` actually attempted and lost the fallback for the current
+call) and reports THAT — ground truth from seconds ago — instead of
+re-deriving a speculative, budget-only guess that can contradict it. Applies
+to any fallback failure reason, not just the premium case reported here.
+Verified with `build_tools()` wired to a stubbed `fetch_option_chain` returning
+the exact envelope from the report: `what_to_do` now names the premium
+rejection and says budget is not the blocker; a `no_contracts`-style failure
+(no fallback attempted) is unchanged.
+
+Also re-verified dev request #24's other two findings against the real code,
+not just the report:
+
+* **`TastytradeError(invalid_grant, "Client secret mismatch")`** — read
+  `tastytrade==13.2.3`'s `Session.refresh()` source directly. It POSTs exactly
+  `{"client_secret": provider_secret, "refresh_token": refresh_token}` to
+  `/oauth/token` — precisely what `_get_session()` supplies from
+  `TASTYTRADE_CLIENT_SECRET` / `TASTYTRADE_REFRESH_TOKEN`, with no missing
+  `client_id` or other field this codebase could be getting wrong. The
+  rejection is Tastytrade's OAuth server refusing those actual credential
+  values — a real credential-rotation problem outside this repo, not a code
+  bug. Left open (see issue comment) — only the owner can re-issue the secret
+  on Tastytrade's side and update the deployment's environment.
+* **Polygon as a third chain source** — not built this round. This box's
+  Polygon plan entitlements can't be confirmed from here (no live
+  `POLYGON_API_KEY` in this environment, no verified reference for whether the
+  configured plan includes the options-snapshot endpoint), and shipping an
+  unverified integration risks the exact failure this issue is about: a
+  fallback that *looks* wired in but dies on a plan restriction the code never
+  checked for. Left open for the owner to confirm entitlement first.
+
 ## [6.38.2] — 2026-08-19
 
 ### Fixed — the remaining tastytrade-v13 async call sites (margin + validate)

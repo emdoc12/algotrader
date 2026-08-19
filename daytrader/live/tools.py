@@ -198,13 +198,13 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                 record_named_error(
                     "tastytrade_options", str(env.get("error_code")),
                     f"{sym}: {env.get('error')}",
-                    hint=_chain_advice(env.get("error_code")))
+                    hint=_chain_advice(env.get("error_code"), env.get("fallback_reason")))
             except Exception:  # noqa: BLE001
                 pass
             return {"ok": False, "symbol": sym,
                     "error_code": env.get("error_code"),
                     "error": env.get("error"),
-                    "what_to_do": _chain_advice(env.get("error_code"))}
+                    "what_to_do": _chain_advice(env.get("error_code"), env.get("fallback_reason"))}
         spot = None
         try:
             spot = round(float(broker.latest_price(sym)), 2)
@@ -243,7 +243,7 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                            "actually trade at — BID on shorts, ASK on longs.")
         return out
 
-    def _chain_advice(code: str | None) -> str:
+    def _chain_advice(code: str | None, fallback_reason: str | None = None) -> str:
         # stream_timeout / chain_download_failed are the two codes where
         # fetch_option_chain already tried the Alpha Vantage historical
         # fallback and it did not rescue the call. The old copy here always
@@ -252,6 +252,22 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
         # exactly what desks hit and re-filed as dev request #16. Read the
         # real state instead of guessing it.
         if str(code) in ("stream_timeout", "chain_download_failed"):
+            # fetch_option_chain already attempted the fallback for THIS call
+            # and, if it failed, says exactly why in fallback_reason. That is
+            # ground truth from seconds ago — a budget-remaining guess below
+            # it must never contradict. Dev request #24: a desk got "24
+            # Alpha Vantage requests left today, a fallback IS available" in
+            # the same response whose `error` field said the fallback just
+            # failed on a premium-tier rejection — the remaining count was
+            # real but useless, because the endpoint can't succeed on this
+            # key regardless of budget.
+            if fallback_reason:
+                return (f"retry once (the chain is now cached, so a second attempt skips "
+                        f"the slow phase), but the Alpha Vantage stale-chain fallback was "
+                        f"tried for THIS call and did NOT rescue it: {fallback_reason} — "
+                        "that is the real blocker, not the remaining daily budget. If it "
+                        "mentions a premium/paid endpoint, no amount of retrying or budget "
+                        "will fix it; that needs the owner's call on a paid plan.")
             try:
                 from daytrader.data.feeds import alphavantage as av
                 if not av.is_configured():
