@@ -198,13 +198,15 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                 record_named_error(
                     "tastytrade_options", str(env.get("error_code")),
                     f"{sym}: {env.get('error')}",
-                    hint=_chain_advice(env.get("error_code"), env.get("fallback_reason")))
+                    hint=_chain_advice(env.get("error_code"), env.get("fallback_reason"),
+                                       env.get("error")))
             except Exception:  # noqa: BLE001
                 pass
             return {"ok": False, "symbol": sym,
                     "error_code": env.get("error_code"),
                     "error": env.get("error"),
-                    "what_to_do": _chain_advice(env.get("error_code"), env.get("fallback_reason"))}
+                    "what_to_do": _chain_advice(env.get("error_code"), env.get("fallback_reason"),
+                                                 env.get("error"))}
         spot = None
         try:
             spot = round(float(broker.latest_price(sym)), 2)
@@ -243,7 +245,8 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                            "actually trade at — BID on shorts, ASK on longs.")
         return out
 
-    def _chain_advice(code: str | None, fallback_reason: str | None = None) -> str:
+    def _chain_advice(code: str | None, fallback_reason: str | None = None,
+                       error: str | None = None) -> str:
         # stream_timeout / chain_download_failed are the two codes where
         # fetch_option_chain already tried the Alpha Vantage historical
         # fallback and it did not rescue the call. The old copy here always
@@ -261,29 +264,56 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
             # failed on a premium-tier rejection — the remaining count was
             # real but useless, because the endpoint can't succeed on this
             # key regardless of budget.
+            #
+            # The "retry, it's cached" opener below is only true for
+            # stream_timeout: that code means the REST download already
+            # finished and _download_chain wrote it to _CHAIN_CACHE before the
+            # streaming phase ran out the clock. chain_download_failed means
+            # the download RAISED — tastytrade_data._download_chain's except
+            # path never reaches the cache-write line, so there is nothing to
+            # hit on retry. Worse, dev request #26 re-quoted this exact opener
+            # back at us while the underlying error was an OAuth credential
+            # rejection (invalid_grant / "Client secret mismatch"), which
+            # reproduces identically on every retry — no cache, no luck,
+            # cache or not, until the owner rotates the credential.
+            if code == "chain_download_failed":
+                auth_markers = ("invalid_grant", "invalid_client", "unauthorized",
+                                 "Client secret mismatch", "access_denied")
+                if error and any(m in error for m in auth_markers):
+                    retry_note = (
+                        "do NOT just retry — the download RAISED rather than timing out, and "
+                        "the error looks like a rejected OAuth credential. Tastytrade's OAuth "
+                        "server refuses the same client_secret/refresh_token on every attempt, "
+                        "so a retry reproduces this identical failure. This needs the owner to "
+                        "re-issue TASTYTRADE_CLIENT_SECRET / TASTYTRADE_REFRESH_TOKEN in "
+                        "Tastytrade's developer portal and update Settings with the new values")
+                else:
+                    retry_note = (
+                        "the download raised rather than timing out, so nothing landed in the "
+                        "cache (only a chain that actually completes gets cached) — a retry "
+                        "starts a fresh download rather than an instant cache hit")
+            else:
+                retry_note = "retry once (the chain is now cached, so a second attempt skips the slow phase)"
             if fallback_reason:
-                return (f"retry once (the chain is now cached, so a second attempt skips "
-                        f"the slow phase), but the Alpha Vantage stale-chain fallback was "
-                        f"tried for THIS call and did NOT rescue it: {fallback_reason} — "
+                return (f"{retry_note}, and the Alpha Vantage stale-chain fallback was "
+                        f"tried for THIS call and did NOT rescue it either: {fallback_reason} — "
                         "that is the real blocker, not the remaining daily budget. If it "
                         "mentions a premium/paid endpoint, no amount of retrying or budget "
                         "will fix it; that needs the owner's call on a paid plan.")
             try:
                 from daytrader.data.feeds import alphavantage as av
                 if not av.is_configured():
-                    return ("retry once (the chain is now cached, so a second attempt skips "
-                            "the slow phase). No ALPHAVANTAGE_API_KEY is configured, so there "
+                    return (f"{retry_note}. No ALPHAVANTAGE_API_KEY is configured, so there "
                             "is no stale-chain fallback available — ask the owner to add one "
                             "in Settings.")
                 budget = av.budget_state()
                 if budget["remaining"] <= 0:
-                    return (f"retry once. The Alpha Vantage stale-chain fallback IS wired in, "
+                    return (f"{retry_note}. The Alpha Vantage stale-chain fallback IS wired in, "
                             f"but its shared daily budget is exhausted "
                             f"({budget['used']}/{budget['limit']} requests used today across "
                             "all desks) — it resets tomorrow, or the owner can raise "
                             "ALPHAVANTAGE_DAILY_LIMIT on a paid plan.")
-                return ("retry once — the chain is now cached, so a second attempt skips the "
-                        f"slow phase. A stale-chain fallback is available "
+                return (f"{retry_note}. A stale-chain fallback is available "
                         f"({budget['remaining']} Alpha Vantage requests left today); check "
                         "this response's 'historical fallback unavailable' reason if it still "
                         "did not rescue the call, and file a dev request with that reason if "

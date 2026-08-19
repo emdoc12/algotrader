@@ -9,6 +9,51 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.38.5] — 2026-08-19
+
+### Fixed — chain_download_failed's advice claimed a cache hit that never happened
+Dev request #26 re-verified #24/#25's `invalid_grant` finding against the
+current code and quoted `_chain_advice()`'s own copy back at us: "retry once
+(the chain is now cached, so a second attempt skips the slow phase)" — shown
+for a `chain_download_failed` whose real cause was Tastytrade's OAuth server
+rejecting the client secret. That claim was true for `stream_timeout` (the
+REST download had already finished and `_download_chain` wrote it to
+`_CHAIN_CACHE` before the streaming phase ran out the clock) but false for
+`chain_download_failed`: `_download_chain`'s `except` path raises before ever
+reaching the cache-write line, so there is nothing for a retry to hit — and
+when the raise is a credential rejection, a retry reproduces the identical
+`invalid_grant` failure every time, since `_get_session()` rebuilds the same
+`Session(client_secret, refresh_token)` from the same (rejected) environment
+values.
+
+`_chain_advice()` (`daytrader/live/tools.py`) now tells `chain_download_failed`
+apart from `stream_timeout` and stops promising a cache hit that path never
+produces. When the underlying error text carries an OAuth-rejection marker
+(`invalid_grant`, `invalid_client`, `unauthorized`, "Client secret mismatch",
+`access_denied`) it says plainly that retrying will not help and names the
+fix: the owner re-issuing `TASTYTRADE_CLIENT_SECRET` / `TASTYTRADE_REFRESH_TOKEN`
+in Tastytrade's developer portal. That is unchanged from #24/#25's conclusion
+— read `tastytrade==13.2.3`'s `Session.refresh()` source again here and it
+still POSTs exactly those two values with nothing malformed on this repo's
+side, and #24's whitespace-corruption theory was already closed by v6.38.4
+stripping pasted secrets on save. This is a real, external credential-rotation
+problem; nothing in this repo can fix it, only describe it accurately.
+Verified with `build_tools()` wired to three stubbed `fetch_option_chain`
+envelopes: the exact `invalid_grant` + AV-premium envelope from #26's report
+(now names the credential problem and skips the false cache claim), a
+non-auth `chain_download_failed` (states nothing was cached, no auth-specific
+claim), and a `stream_timeout` (unchanged "chain is now cached" advice, since
+that path's claim is actually true).
+
+Also re-confirmed dev request #26's second ask — an AV free-tier endpoint for
+option chains — does not exist: `HISTORICAL_OPTIONS` is the only chain
+endpoint Alpha Vantage exposes and it is premium-gated (documented in
+`daytrader/data/feeds/alphavantage.py` since #19); `REALTIME_OPTIONS` is also
+premium. The distinct-reporting half of that ask already shipped (v6.37.0's
+`fallback_reason`, v6.38.3's advice fix) — issue #26 itself says as much
+("it now does print the reason — good"). What remains is the owner's paid-plan
+decision already tracked on issue #19; not re-decided here.
+
 ## [6.38.4] — 2026-08-19
 
 ### Fixed — a pasted secret's stray whitespace silently became part of the credential
