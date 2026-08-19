@@ -9,6 +9,19 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.38.9] — 2026-08-19
+
+### Fixed — Test Connections detail text wraps instead of vanishing off-screen
+The detail column now carries full sentences (tastytrade rejections, permission
+hints), and the table neither wrapped nor scrolled, so exactly the text worth
+reading was the text cut off. Details wrap, capped at a readable width.
+
+### Note — tastytrade OAuth confirmed LIVE
+After the owner rotated the credential pair, the new Test Connections row
+returned green in 263ms: "OAuth session established — chains and margin data
+are reachable." The `invalid_grant` wall that survived seven days and five
+masked fixes is down; the desks retest chains on their next cycle.
+
 ## [6.38.8] — 2026-08-19
 
 ### Added — a tastytrade row in Test Connections

@@ -2201,7 +2201,12 @@ async function testConnections(btnId, outId){
       tr.appendChild(el("td", {style:"padding:6px 8px"}, row.model));
       tr.appendChild(el("td", {style:"padding:6px 8px;color:"+color}, status));
       tr.appendChild(el("td", {style:"padding:6px 8px"}, row.configured ? (row.latency_ms+"ms") : "-"));
-      tr.appendChild(el("td", {style:"padding:6px 8px;color:var(--gray)"}, row.detail || ""));
+      // Details are full sentences now (tastytrade rejections, permission
+      // hints) — they must WRAP, not run off the right edge of a table that
+      // doesn't scroll. Cap width so one long row can't stretch the table.
+      tr.appendChild(el("td", {style:"padding:6px 8px;color:var(--gray);"
+        + "white-space:normal;word-break:break-word;max-width:560px;font-size:12px"},
+        row.detail || ""));
       tbl.appendChild(tr);
     });
     if(out){ out.innerHTML = ""; out.appendChild(tbl); }
