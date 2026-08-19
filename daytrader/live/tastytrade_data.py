@@ -98,7 +98,7 @@ def _get_session():
         if _session is not None:
             # Best-effort token refresh; if it fails we rebuild below.
             try:
-                if _session.validate():
+                if _sync(_session.validate()):
                     return _session
             except Exception:  # noqa: BLE001
                 pass
@@ -115,6 +115,24 @@ def _get_session():
             log.info("tastytrade: session unavailable (%s); using Yahoo only", e)
             _session = None
             return None
+
+
+def _sync(value):
+    """Bridge SDK calls that went async in tastytrade v13 back into sync code.
+
+    The chain download got this treatment in v6.38.1 (the auto-fix pipeline's
+    own commit, from a desk's coroutine-bug report); this helper covers the
+    REMAINING v13 async surfaces — ``Session.validate`` and the margin module's
+    ``Account.get`` / ``get_balances`` / ``get_margin_requirements`` /
+    ``Future.get`` — which were failing the same silent way: a coroutine is
+    truthy, so the un-awaited call "succeeded" and downstream access crashed
+    into a swallowing except. Plain values pass through, so v12-style sync
+    SDKs keep working unchanged.
+    """
+    import inspect
+    if inspect.iscoroutine(value):
+        return asyncio.run(value)
+    return value
 
 
 def _run(coro, timeout: float):

@@ -56,18 +56,18 @@ def _f(v, default=None):
 
 def _fetch() -> dict:
     """Pull the live margin profile. Returns {} on any failure."""
-    from daytrader.live.tastytrade_data import _get_session
+    from daytrader.live.tastytrade_data import _get_session, _sync
     session = _get_session()
     if session is None:
         return {}
     out: dict = {}
     try:
         from tastytrade.account import Account
-        accounts = Account.get(session)
+        accounts = _sync(Account.get(session))
         if not accounts:
             return {}
         acct = accounts[0]
-        bal = acct.get_balances(session)
+        bal = _sync(acct.get_balances(session))
 
         equity = _f(getattr(bal, "margin_equity", None)) or _f(getattr(bal, "net_liquidating_value", None))
         ebp = _f(getattr(bal, "equity_buying_power", None))
@@ -86,7 +86,7 @@ def _fetch() -> dict:
             out["futures_intraday_ratio"] = round(fut_intra / fut_over, 3)
 
         try:
-            rep = acct.get_margin_requirements(session)
+            rep = _sync(acct.get_margin_requirements(session))
             mct = getattr(rep, "margin_calculation_type", None)
             if mct:
                 out["margin_calculation_type"] = str(mct)
@@ -104,7 +104,7 @@ def _fetch() -> dict:
         from daytrader.core.contracts import supported_symbols
         from tastytrade.instruments import Future
         roots = [s.replace("=F", "") for s in supported_symbols()]
-        futs = Future.get(session, product_codes=roots) or []
+        futs = _sync(Future.get(session, product_codes=roots)) or []
         specs: dict = {}
         for f in futs:
             code = str(getattr(f, "product_code", "") or "").upper()

@@ -9,6 +9,20 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.38.2] — 2026-08-19
+
+### Fixed — the remaining tastytrade-v13 async call sites (margin + validate)
+v6.38.1 — notably, the auto-fix pipeline's own commit, produced from a desk's
+coroutine-bug report — fixed the chain download's un-awaited coroutine. This
+covers the rest of the v13 async surface the same disease had reached:
+``Session.validate()`` (silently skipping validation, since a coroutine is
+truthy), and the margin-mirroring module's ``Account.get`` / ``get_balances`` /
+``get_margin_requirements`` / ``Future.get``, which had been failing into their
+defensive defaults — mirrored buying power and futures margins quietly reverted
+to built-ins under v13. A ``_sync()`` helper bridges both SDK generations:
+plain values pass through, coroutines run on their own event loop. Verified
+against faked async v13 Account/Future objects.
+
 ## [6.38.1] — 2026-08-19
 
 ### Fixed — get_option_chain: "'coroutine' object has no attribute 'keys'"
