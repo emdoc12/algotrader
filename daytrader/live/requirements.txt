@@ -2,5 +2,5 @@ anthropic
 openai
 pandas
 numpy
-tastytrade>=12
+tastytrade==13.2.3
 youtube-transcript-api

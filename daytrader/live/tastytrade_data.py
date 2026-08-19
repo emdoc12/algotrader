@@ -131,9 +131,16 @@ def _run(coro, timeout: float):
         # would relabel "this symbol has no listed options" as a timeout — the
         # exact loss of information that had a desk chasing a phantom SPY bug.
         raise
-    except Exception as e:  # noqa: BLE001 - timeout, cancellation, network, etc.
-        log.info("tastytrade: async op failed/timed out (%s)", e)
+    except (asyncio.TimeoutError, TimeoutError, asyncio.CancelledError) as e:
+        log.info("tastytrade: async op timed out (%s)", e)
         return None
+    except Exception:
+        # Every other exception is REAL INFORMATION and must reach the caller.
+        # This except used to swallow all of them into None, which the caller
+        # then labelled "stream_timeout" — six desks spent seven days reporting
+        # a timeout that may never have been one, because the true exception
+        # (an SDK raise inside the chain download or streamer) died right here.
+        raise
     finally:
         try:
             loop.close()
@@ -273,6 +280,8 @@ async def _collect_option_chain(
             chain = await asyncio.wait_for(
                 asyncio.to_thread(_download_chain, session, symbol),
                 timeout=_CHAIN_FETCH_TIMEOUT)
+        except _ChainError:
+            raise
         except (asyncio.TimeoutError, TimeoutError):
             raise _ChainError(
                 "rest_chain_timeout",
@@ -280,6 +289,12 @@ async def _collect_option_chain(
                 f"{_CHAIN_FETCH_TIMEOUT:.0f}s budget. The download CONTINUES in the "
                 "background and lands in the cache when done — retry in a minute "
                 "and it should return instantly") from None
+        except Exception as e:  # noqa: BLE001
+            raise _ChainError(
+                "chain_download_failed",
+                f"the {symbol} chain download RAISED rather than timing out: "
+                f"{repr(e)[:300]}. This is the true error the old code masked as "
+                "stream_timeout.") from e
     if not chain:
         raise _ChainError("empty_chain", f"{symbol} returned no option chain")
     expirations = sorted(chain.keys())
@@ -508,12 +523,26 @@ def fetch_option_chain(
                           symbol)
 
     if allow_historical_fallback:
-        hist = _historical_chain_fallback(symbol, min_dte, max_dte, strike_pct_window,
-                                         max_expirations, strikes_around_atr)
+        hist, why_not = _historical_chain_fallback(
+            symbol, min_dte, max_dte, strike_pct_window,
+            max_expirations, strikes_around_atr)
         if hist:
             hist["degraded_reason"] = (last or {}).get("error")
             hist["live_error_code"] = (last or {}).get("error_code")
             return hist
+        # The desks spent a day concluding the fallback "is not wired in"
+        # because a live failure returned with no word about WHY the fallback
+        # did not step in. Say it, in the error and on the dashboard.
+        if last is not None:
+            last["fallback_reason"] = why_not
+            last["error"] = f"{last['error']} | historical fallback unavailable: {why_not}"
+        try:
+            from daytrader.data.feeds.base import record_named_error
+            record_named_error("alphavantage_fallback", "unavailable", str(why_not),
+                               hint=("With the live chain down, this fallback is the only "
+                                     "options data path — fix whatever this names."))
+        except Exception:  # noqa: BLE001
+            pass
     return last or _chain_err("unknown", "chain unavailable", symbol)
 
 
@@ -524,22 +553,26 @@ def _chain_err(code: str, message: str, symbol: str) -> dict:
 
 
 def _historical_chain_fallback(symbol, min_dte, max_dte, strike_pct_window,
-                               max_expirations, max_strikes) -> dict | None:
+                               max_expirations, max_strikes) -> tuple[dict | None, str]:
     """Build a chain from the most recent HISTORICAL data, shaped like a live one.
 
-    Explicitly stale, and labelled so. A desk choosing strikes by delta for a
-    30-45 DTE credit spread can do that off yesterday's chain; what it must not
-    do is believe those premiums are executable prices today.
+    Explicitly stale, and labelled so. Returns ``(chain_env, reason)`` — the
+    reason says why no chain came back, because "the fallback silently did
+    nothing" cost the desks a day of guessing.
     """
     try:
         from daytrader.data.feeds import alphavantage as av
         if not av.is_configured():
-            return None
+            return None, ("ALPHAVANTAGE_API_KEY is not visible in this process — set it in "
+                          "Settings (and note settings apply on save; a container update "
+                          "re-applies them at startup)")
         cached = av.cached_dates(symbol)
         res = av.historical_chain(symbol, cached[-1] if cached else None)
+        if res.get("error"):
+            return None, f"alphavantage error: {str(res['error'])[:200]}"
         rows = (res or {}).get("contracts") or []
         if not rows:
-            return None
+            return None, f"alphavantage returned no contracts for {symbol}"
         from datetime import date as _d
         today = _d.today()
 
@@ -571,7 +604,9 @@ def _historical_chain_fallback(symbol, min_dte, max_dte, strike_pct_window,
                     continue
             exps.setdefault(str(r["expiration"]), []).append(r)
         if not exps:
-            return None
+            return None, (f"no {symbol} contracts matched the requested window "
+                          f"(dte {min_dte}-{max_dte}, strikes within "
+                          f"{strike_pct_window}% of spot) in the historical chain")
 
         chain: dict = {}
         for exp in sorted(exps)[: max(1, int(max_expirations))]:
@@ -596,14 +631,14 @@ def _historical_chain_fallback(symbol, min_dte, max_dte, strike_pct_window,
             if block["strikes"]:
                 chain[exp] = block
         if not chain:
-            return None
+            return None, f"historical rows for {symbol} produced no usable strikes"
         n = sum(len(b["strikes"]) for b in chain.values())
         return {"ok": True, "chain": chain, "source": "alphavantage_historical",
                 "stale": True, "as_of": res.get("date"), "n_contracts": n,
-                "symbol": symbol}
+                "symbol": symbol}, ""
     except Exception as e:  # noqa: BLE001
         log.info("options: historical fallback for %s failed (%s)", symbol, e)
-        return None
+        return None, f"fallback crashed: {repr(e)[:200]}"
 
 
 def get_option_chain(

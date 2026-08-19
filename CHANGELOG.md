@@ -9,6 +9,45 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.37.0] — 2026-08-19
+
+### Fixed — the week-long "stream_timeout" was a mask, not a diagnosis
+Six desks reported `get_option_chain` failing with `stream_timeout` for seven
+straight days (8/13–8/19), through five delivered fixes. Every one of those
+fixes attacked timeouts — and the evidence now says the failure may never have
+been one: `_run()` flattened EVERY exception into `None`, and the caller
+labelled `None` as a budget timeout. An SDK raise inside the chain download —
+an auth-scope rejection, an API change, anything — wore a timeout's face the
+entire week.
+
+Three changes:
+
+* `_run()` converts only genuine timeouts/cancellations to `None`; every other
+  exception now reaches the caller and is returned to the desk as
+  `chain_download_failed` with the true repr. Whatever has actually been
+  failing all week prints its real name on the next desk retry.
+* The **Alpha Vantage fallback explains itself**. Desks concluded it "was not
+  wired in" because a live failure returned with no word about why the fallback
+  did not step in. It now returns a reason (key not visible / provider error /
+  nothing in the requested window / crash), appended to the desk's error and
+  registered in the degraded panel. Verified: a raising download returns
+  `chain_download_failed` with the fallback reason attached, and with Alpha
+  Vantage working the fallback rescues the call and carries the live failure's
+  name in `live_error_code`.
+* **`tastytrade` is pinned to 13.2.3** — it was `>=12`, so ~20 image rebuilds in
+  two days each took whatever was latest. 13.2.3's layout was verified
+  symbol-by-symbol against every import this codebase makes.
+
+### Fixed — the github health row demanded a permission the token doesn't need
+For fine-grained tokens, the repo API's `permissions` object reflects the
+OWNER's relationship (push: true even for a read-only token), so requiring push
+proved nothing — and the owner's token turned out to be in "Public repositories"
+(read-only) mode, which also passes an issues READ probe on a public repo. The
+check no longer demands push (dev requests never push), and its green message
+states plainly that issue CREATION cannot be proven without creating one,
+pointing at the degraded panel where v6.36.8 records the exact HTTP error of
+any failed filing.
+
 ## [6.36.8] — 2026-08-18
 
 ### Fixed — dev requests failing to reach GitHub were invisible, again
