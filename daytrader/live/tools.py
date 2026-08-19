@@ -832,6 +832,15 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
             # a missing setting instead of a bad one — which is how a silently
             # broken GitHub bridge stays broken.
             why = str(res.get("error") or "GitHub mirror unavailable")
+            try:
+                from daytrader.data.feeds.base import record_named_error
+                record_named_error(
+                    "github_issues", "post_failed", why[:300],
+                    hint=("Dev requests are NOT reaching GitHub — the auto-fix "
+                          "pipeline never sees them. 403 with a green github row "
+                          "means the token lacks the ISSUES permission."))
+            except Exception:  # noqa: BLE001
+                pass
             note = ("Saved to the dev-requests page (visible on the dashboard). "
                     f"GitHub mirror did NOT succeed: {why}. Your request IS "
                     "persisted and the dev will see it on the dashboard.")

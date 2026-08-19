@@ -9,6 +9,24 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.36.8] — 2026-08-18
+
+### Fixed — dev requests failing to reach GitHub were invisible, again
+Six requests sat open on the dashboard for hours while the repo showed zero
+issues: the filing leg (direct posts AND the backfill) was failing on the host,
+and the backfill's `except: return` discarded the reason — the same
+silent-failure pattern this codebase keeps paying for. Every filing failure now
+lands in the desk's agent log and the dashboard's degraded-providers panel with
+the HTTP status and body.
+
+The Test Connections github row also had a blind spot that made this worse: it
+verified the token could see the repo with push rights but never touched the
+ISSUES endpoint. A fine-grained token with Contents-but-not-Issues passes that
+check green and then 403s on every issue it files — which matches the observed
+symptoms exactly. The check now probes the issues endpoint explicitly and, on
+failure, names the missing permission ("Issues: Read and write" for fine-grained
+tokens, the full `repo` scope for classic ones).
+
 ## [6.36.7] — 2026-08-18
 
 ### Fixed — the auto-fix pipeline is verified live, end to end

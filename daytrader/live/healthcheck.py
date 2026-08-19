@@ -83,14 +83,35 @@ def _check_github_bridge() -> dict:
                      "User-Agent": "algotrader-healthcheck"})
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = _json.loads(resp.read().decode("utf-8", "replace"))
-        ms = int((time.time() - t0) * 1000)
         push = bool((data.get("permissions") or {}).get("push"))
         if not push:
+            ms = int((time.time() - t0) * 1000)
             return {**base, "configured": True, "ok": False, "latency_ms": ms,
                     "detail": ("token can read the repo but has NO push/issue rights — "
                                "issue creation will 403. Use a token with repo scope.")}
+        # The repo-level permissions object does NOT prove Issues access: a
+        # fine-grained token with Contents-but-not-Issues shows push=true here
+        # and then 403s on every issue it files — which is precisely how six
+        # dev requests sat on the dashboard while the repo showed zero issues
+        # and this check glowed green. Probe the issues endpoint explicitly.
+        try:
+            req2 = urllib.request.Request(
+                f"https://api.github.com/repos/{repo}/issues?per_page=1&state=all",
+                headers={"Authorization": f"Bearer {token}",
+                         "Accept": "application/vnd.github+json",
+                         "User-Agent": "algotrader-healthcheck"})
+            with urllib.request.urlopen(req2, timeout=10):
+                pass
+        except Exception as e:  # noqa: BLE001
+            ms = int((time.time() - t0) * 1000)
+            return {**base, "configured": True, "ok": False, "latency_ms": ms,
+                    "detail": ("token can push but CANNOT access ISSUES "
+                               f"({repr(e)[:80]}) — dev requests will never reach "
+                               "GitHub. Fine-grained token: grant 'Issues: Read and "
+                               "write'. Classic token: tick the full 'repo' scope.")}
+        ms = int((time.time() - t0) * 1000)
         return {**base, "configured": True, "ok": True, "latency_ms": ms,
-                "detail": "token valid with write access — dev requests will reach GitHub"}
+                "detail": "token valid: repo write + issues access — dev requests will reach GitHub"}
     except Exception as e:  # noqa: BLE001
         ms = int((time.time() - t0) * 1000)
         return {**base, "configured": True, "ok": False, "latency_ms": ms,

@@ -279,6 +279,36 @@ def _fetch_issue_state(html_url: str, token: str) -> dict | None:
         return None
 
 
+def _report_bridge_failure(db, exc) -> None:
+    """Put a desk→GitHub filing failure where the owner will actually see it:
+    the desk's agent log and the dashboard's degraded-providers panel."""
+    detail = repr(exc)[:300]
+    try:
+        import urllib.error as _ue
+        if isinstance(exc, _ue.HTTPError):
+            try:
+                detail = f"HTTP {exc.code}: {exc.read().decode('utf-8', 'replace')[:250]}"
+            except Exception:  # noqa: BLE001
+                detail = f"HTTP {exc.code}: {exc.reason}"
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        db.log_agent("runner", "github_issue_post_failed", detail)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from daytrader.data.feeds.base import record_named_error
+        record_named_error(
+            "github_issues", "post_failed", detail,
+            hint=("Dev requests are NOT reaching GitHub, so the auto-fix pipeline "
+                  "never sees them. An HTTP 403 here with a green github health row "
+                  "means the token lacks the ISSUES permission: fine-grained tokens "
+                  "need 'Issues: Read and write'; classic tokens need the full "
+                  "'repo' scope."))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # At most this many backfilled issues per sync pass. The stranded backlog can be
 # large, and each filed issue triggers an auto-fix workflow run — trickling them
 # out keeps the fix queue (and its spend) sane; the next pass takes the rest.
@@ -316,7 +346,11 @@ def _backfill_github_issues(token: str, team_names, _team_db) -> list[dict]:
                     issue = _post_issue(repo, token,
                                         {"title": r.get("title") or "(untitled)",
                                          "body": body, "labels": list(DEFAULT_LABELS)})
-                except Exception:  # noqa: BLE001 - rate limit / outage: next pass retries
+                except Exception as exc:  # noqa: BLE001
+                    # Next pass retries — but the failure must be VISIBLE. Six
+                    # requests sat on the dashboard for hours while this except
+                    # silently discarded the reason nothing reached GitHub.
+                    _report_bridge_failure(db, exc)
                     return out
                 url = issue.get("html_url")
                 if url:
