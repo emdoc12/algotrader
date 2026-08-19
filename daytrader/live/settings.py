@@ -129,12 +129,15 @@ def save(updates: dict) -> dict:
     secret means 'leave unchanged'; the literal '__CLEAR__' deletes a key."""
     data = load()
     rejected = []
+    tastytrade_changed = False
     for k, v in updates.items():
         if k not in MANAGED_KEYS:
             continue
         if v == "__CLEAR__":
             data.pop(k, None)
             os.environ.pop(k, None)
+            if k in ("TASTYTRADE_CLIENT_SECRET", "TASTYTRADE_REFRESH_TOKEN"):
+                tastytrade_changed = True
         elif v not in (None, ""):
             # A pasted key/secret routinely carries a leading/trailing newline
             # or space (copied from a portal page, a terminal, a password
@@ -153,12 +156,27 @@ def save(updates: dict) -> dict:
                 continue
             data[k] = v
             os.environ[k] = v
+            if k in ("TASTYTRADE_CLIENT_SECRET", "TASTYTRADE_REFRESH_TOKEN"):
+                tastytrade_changed = True
     Path(_DATA_DIR).mkdir(parents=True, exist_ok=True)
     SETTINGS_PATH.write_text(json.dumps(data, indent=2))
     try:
         os.chmod(SETTINGS_PATH, 0o600)
     except OSError:
         pass
+    if tastytrade_changed:
+        # os.environ is updated above, but a cached, already-validated Session
+        # built from the OLD credential pair keeps being handed to every
+        # caller (dashboard health check AND desk trading cycles alike) for as
+        # long as its local validate() keeps passing — which does not detect
+        # that tastytrade would now reject the credentials it came from. Drop
+        # it so the very next call, from anywhere, rebuilds against what was
+        # just saved instead of racing a stale cache. Dev request #33.
+        try:
+            from daytrader.live.tastytrade_data import invalidate_session
+            invalidate_session()
+        except Exception:  # noqa: BLE001 - never let this block a settings save
+            pass
     status = masked_status()
     if rejected:
         status = dict(status)

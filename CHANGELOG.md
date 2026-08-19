@@ -9,6 +9,77 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.39.3] — 2026-08-19
+
+### Fixed — credential rotation left desks stuck on the pre-rotation tastytrade session
+Dev request #33, filed minutes after v6.39.0 shipped: the owner re-issued
+TASTYTRADE_CLIENT_SECRET / TASTYTRADE_REFRESH_TOKEN, the dashboard's Test
+Connections row went green against the new pair, and a desk's very next
+`get_option_chain` STILL hit `invalid_grant` / "Invalid JWT" — Polygon also
+403'd and Alpha Vantage stayed premium-gated, so options lanes were still
+dead despite the "resolved" credential. Confirmed the dashboard and the
+competition threads run in one process (`daytrader.agent serve` starts both
+in `dashboard.py`), sharing one `os.environ` — so this was never a
+worker-vs-dashboard environment split. The real cause: `tastytrade_data.py`
+caches a built `Session` in a module-level `_session` and keeps handing it
+back to every caller as long as its `validate()` returns true, which checks
+the cached access token's local state, not whether tastytrade would still
+accept the credential pair it was built from. `settings.save()` updated
+`os.environ` on a rotation but had no idea `tastytrade_data` existed, so it
+never dropped that cache — only the Test Connections button's own
+hand-rolled reset (added for a different reason, v6.39.1) happened to force
+a rebuild, and only for ITS OWN call. A desk's call right after was still
+racing to reuse the pre-rotation session. Added `tastytrade_data.
+invalidate_session()` and call it from `settings.save()` whenever
+TASTYTRADE_CLIENT_SECRET / TASTYTRADE_REFRESH_TOKEN change (set or cleared),
+so the credential-owning module itself guarantees every caller rebuilds
+after a rotation; Test Connections now calls the same function instead of
+reaching into `tastytrade_data`'s private state. Verified against a fake
+tastytrade SDK whose `Session.refresh()` only accepts the CURRENT (post-
+rotation) credential pair and whose `validate()` always returns true locally
+(matching the real SDK, per this module's own docs): before the fix, a
+session cached before a `settings.save()` rotation is confirmed to keep
+being handed back afterward (same object, would hit invalid_grant on next
+real use); after the fix, the same rotation produces a rebuilt session with
+the new credentials on the very next call, an unrelated settings save leaves
+the cache untouched (no spurious re-auth), and clearing a credential also
+invalidates it. Polygon's 403-with-a-key-present and Alpha Vantage's
+premium-only response were both re-checked and are already correctly
+surfaced as `auth_or_plan` / paywall errors rather than silent failures
+(`base.py`'s `diagnose_http`, `alphavantage.py`'s premium note) — those need
+the owner's call on upgrading the respective plans, not a code fix.
+
+## [6.39.2] — 2026-08-19
+
+### Fixed — VERSION regressed below the already-shipped 6.39.0
+Dev request #31 asked for a re-test of `get_option_chain`'s `invalid_grant` /
+"Invalid JWT" failure. Reproducing it against a throwaway bad credential
+(real network call to tastytrade's OAuth endpoint, not a mock) confirms
+6.39.0's `_get_session()` fix already resolves it end to end: a rejected
+grant now fails at session-build time with tastytrade's literal rejection
+text, both in `get_option_chain`'s `no_session` response and in the Test
+Connections row — no code change needed here, #31 is a duplicate of #28.
+
+What *did* need fixing: the commit below this one shipped as "6.38.10", a
+version LOWER than the 6.39.0 it was built on top of (confirmed: `b955145`
+is its own ancestor). That's the exact failure CLAUDE.md calls out by
+name — a stale/wrong VERSION misreporting the running system to the owner —
+so the entry is renumbered 6.39.1 to restore a monotonic history; its content
+is unchanged, nothing about that fix was wrong.
+
+## [6.39.1] — 2026-08-19
+
+### Changed — the tastytrade health row now tests the CHAIN, not just the handshake
+OAuth-green proved insufficient once already: a session can build while the
+chain download fails one layer deeper, and the only way to find out was waiting
+for a trading cycle. The Test Connections row now pulls a real (tiny) SPY chain
+end-to-end, with four honest verdicts: CHAIN VERIFIED (strikes with live
+quotes/Greeks — lanes fully operational), chain DOWNLOADED but stream quiet
+(auth + SDK + parsing proven; normal outside listed-options hours), download
+still running (click again in a minute — it caches), or the fetch's actual
+error. The owner can now answer "do options work?" with one click at any hour,
+instead of waiting for the next market session.
+
 ## [6.39.0] — 2026-08-19
 
 ### Fixed — the tastytrade "OAuth session established" check was a false positive
@@ -49,37 +120,6 @@ Polygon plan carries real-time vs 15-minute-delayed options quotes, and
 overclaiming freshness it can't verify is worse than a conservative warning.
 Verified by parsing a realistic mocked Polygon snapshot response (fields
 checked against Polygon's live docs) through `get_option_chain` end-to-end.
-
-## [6.39.2] — 2026-08-19
-
-### Fixed — VERSION regressed below the already-shipped 6.39.0
-Dev request #31 asked for a re-test of `get_option_chain`'s `invalid_grant` /
-"Invalid JWT" failure. Reproducing it against a throwaway bad credential
-(real network call to tastytrade's OAuth endpoint, not a mock) confirms
-6.39.0's `_get_session()` fix already resolves it end to end: a rejected
-grant now fails at session-build time with tastytrade's literal rejection
-text, both in `get_option_chain`'s `no_session` response and in the Test
-Connections row — no code change needed here, #31 is a duplicate of #28.
-
-What *did* need fixing: the commit below this one shipped as "6.38.10", a
-version LOWER than the 6.39.0 it was built on top of (confirmed: `b955145`
-is its own ancestor). That's the exact failure CLAUDE.md calls out by
-name — a stale/wrong VERSION misreporting the running system to the owner —
-so the entry is renumbered 6.39.1 to restore a monotonic history; its content
-is unchanged, nothing about that fix was wrong.
-
-## [6.39.1] — 2026-08-19
-
-### Changed — the tastytrade health row now tests the CHAIN, not just the handshake
-OAuth-green proved insufficient once already: a session can build while the
-chain download fails one layer deeper, and the only way to find out was waiting
-for a trading cycle. The Test Connections row now pulls a real (tiny) SPY chain
-end-to-end, with four honest verdicts: CHAIN VERIFIED (strikes with live
-quotes/Greeks — lanes fully operational), chain DOWNLOADED but stream quiet
-(auth + SDK + parsing proven; normal outside listed-options hours), download
-still running (click again in a minute — it caches), or the fetch's actual
-error. The owner can now answer "do options work?" with one click at any hour,
-instead of waiting for the next market session.
 
 ## [6.38.9] — 2026-08-19
 

@@ -141,6 +141,29 @@ def _get_session():
             return None
 
 
+def invalidate_session() -> None:
+    """Drop the cached Session so the very next call rebuilds from current env.
+
+    A rotated TASTYTRADE_CLIENT_SECRET / TASTYTRADE_REFRESH_TOKEN does not, by
+    itself, make ``_get_session()`` rebuild: the cached ``_session`` from
+    BEFORE the rotation keeps being handed back to every caller for as long as
+    its ``validate()`` keeps returning true, which checks the cached access
+    token's local state, not whether tastytrade would still honor the
+    credential pair it came from. Dev request #33: the dashboard's Test
+    Connections row forced its OWN fresh rebuild (see healthcheck.py) and went
+    green, but a desk's very next ``get_option_chain`` call — same process,
+    same os.environ, same freshly-saved credentials — kept hitting
+    invalid_grant, because it was still reusing the pre-rotation session
+    object rather than rebuilding. Call this the moment credentials might have
+    changed (a Settings save, a Test Connections click) so EVERY caller after
+    that point rebuilds against the current environment instead of racing to
+    be the one whose stale cache survives.
+    """
+    global _session
+    with _session_lock:
+        _session = None
+
+
 def _sync(value):
     """Bridge SDK calls that went async in tastytrade v13 back into sync code.
 

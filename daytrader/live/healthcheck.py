@@ -72,9 +72,12 @@ def _check_tastytrade() -> dict:
     t0 = time.time()
     # Force a FRESH build so a rotation is tested immediately: a cached dead
     # session (None) would otherwise mask newly-saved credentials until retry,
-    # and a cached live one would mask newly-broken ones.
-    with tt._session_lock:
-        tt._session = None
+    # and a cached live one would mask newly-broken ones. settings.save() now
+    # does this same invalidation on every credential rotation (dev request
+    # #33), so this call is normally a no-op by the time a rotation reaches
+    # here — kept as a second guarantee for whoever/whatever else touches
+    # os.environ directly.
+    tt.invalidate_session()
     sess = tt._get_session()
     if sess is not None:
         # OAuth alone proved insufficient once already: the session can build
