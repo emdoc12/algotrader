@@ -9,6 +9,32 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.39.4] — 2026-08-19
+
+### Fixed — chain download died with "Event loop is closed" the moment the credentials finally worked
+The owner rotated to a matched OAuth pair and the end-to-end Test Connections
+row immediately surfaced the NEXT real bug: OAuth exchange fine, then
+`RuntimeError('Event loop is closed')` inside the SPY chain download. Cause:
+tastytrade 13.x's `Session.__init__` creates ONE persistent
+`httpx.AsyncClient`, and its keep-alive connections are bound to the event
+loop they were opened on — but every async bridge in `tastytrade_data`
+(`_sync`, `_run`, `_download_chain`) was spinning up a throwaway loop per
+call. `refresh(force=True)` opened a pooled connection on loop A and closed
+the loop; the chain download on loop B reused that dead-loop connection and
+raised. This could never surface before v6.39.0 because a rejected credential
+failed first, and never before v6.38.10's honest `_run` because the raise was
+swallowed into `stream_timeout`. All async SDK work now runs on ONE long-lived
+event loop on a daemon thread (`asyncio.run_coroutine_threadsafe` from any
+caller thread), so the session's connection pool stays valid across calls —
+including the margin module, which borrows `_sync`. Verified three ways
+against real keep-alive HTTP: the old per-call-loop pattern reproduces the
+exact `Event loop is closed` on the second request; the shared loop survives
+repeated requests on one client; and a full `_get_session` →
+`fetch_option_chain` → retry replay through the real module code returns
+`ok: true` with contracts. `_run`'s semantics are unchanged (timeout → None,
+real exceptions and `_ChainError` still reach the caller), and a timed-out
+coroutine is now cancelled on the shared loop instead of leaking.
+
 ## [6.39.3] — 2026-08-19
 
 ### Fixed — credential rotation left desks stuck on the pre-rotation tastytrade session
@@ -79,6 +105,7 @@ quotes/Greeks — lanes fully operational), chain DOWNLOADED but stream quiet
 still running (click again in a minute — it caches), or the fetch's actual
 error. The owner can now answer "do options work?" with one click at any hour,
 instead of waiting for the next market session.
+
 
 ## [6.39.0] — 2026-08-19
 

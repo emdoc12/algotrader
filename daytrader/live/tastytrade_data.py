@@ -30,6 +30,7 @@ import logging
 import os
 import threading
 import time
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 
 log = logging.getLogger("daytrader.tastytrade")
 
@@ -55,6 +56,47 @@ _chain_lock = threading.Lock()
 _STREAM_QUIET_SEC = float(os.environ.get("OPTION_STREAM_QUIET_SEC", "4"))
 # Hard cap on contracts subscribed for Greeks/quotes in one call.
 _MAX_STREAM_SYMBOLS = int(os.environ.get("OPTION_MAX_STREAM_SYMBOLS", "80"))
+
+# ONE long-lived event loop, on its own daemon thread, for EVERY async SDK
+# call in this module (and tastytrade_margin, which borrows _sync). This is
+# load-bearing, not style: the v13 Session keeps an httpx AsyncClient whose
+# keep-alive connections are bound to the event loop they were opened on.
+# When each call got a throwaway loop (asyncio.run / new_event_loop), the
+# OAuth exchange in _get_session opened a pooled connection on loop A and
+# closed the loop; the very next chain download on loop B reused that pooled
+# connection and died with RuntimeError('Event loop is closed') — the failure
+# the FIRST honest end-to-end health check surfaced the moment the owner's
+# credentials finally worked. Everything on one loop = one pool, always valid.
+_ASYNC_LOOP: asyncio.AbstractEventLoop | None = None
+_async_loop_lock = threading.Lock()
+
+
+def _loop() -> asyncio.AbstractEventLoop:
+    global _ASYNC_LOOP
+    with _async_loop_lock:
+        if _ASYNC_LOOP is None or _ASYNC_LOOP.is_closed():
+            loop = asyncio.new_event_loop()
+            threading.Thread(
+                target=loop.run_forever, name="tastytrade-async", daemon=True
+            ).start()
+            _ASYNC_LOOP = loop
+        return _ASYNC_LOOP
+
+
+def _await(coro, timeout: float | None = None):
+    """Run a coroutine on the shared loop from any (sync) thread, block for it.
+
+    timeout=None blocks until done — used for the chain download, whose
+    over-budget completion is deliberately allowed to finish into the cache.
+    """
+    future = asyncio.run_coroutine_threadsafe(coro, _loop())
+    try:
+        return future.result(timeout)
+    except FuturesTimeoutError:
+        # Stop the coroutine too — otherwise it keeps running on the shared
+        # loop, holding sockets, long after the caller has moved on.
+        future.cancel()
+        raise TimeoutError(f"async op exceeded {timeout}s") from None
 
 
 class _ChainError(Exception):
@@ -174,23 +216,25 @@ def _sync(value):
     ``Future.get`` — which were failing the same silent way: a coroutine is
     truthy, so the un-awaited call "succeeded" and downstream access crashed
     into a swallowing except. Plain values pass through, so v12-style sync
-    SDKs keep working unchanged.
+    SDKs keep working unchanged. Runs on the module's shared loop (see _loop),
+    NOT asyncio.run — a per-call loop strands the Session's connection pool.
     """
     import inspect
     if inspect.iscoroutine(value):
-        return asyncio.run(value)
+        return _await(value)
     return value
 
 
 def _run(coro, timeout: float):
     """Run an async coroutine to completion from sync code, bounded by timeout.
 
-    Uses a private event loop so it works even if called off the main thread.
-    Returns None on timeout or any error.
+    Submits to the shared loop (works from any thread), returns None on a real
+    timeout, re-raises everything else.
     """
-    loop = asyncio.new_event_loop()
     try:
-        return loop.run_until_complete(asyncio.wait_for(coro, timeout=timeout))
+        # wait_for cancels the coroutine cleanly on the loop at the deadline;
+        # the outer _await timeout is only a backstop against a wedged loop.
+        return _await(asyncio.wait_for(coro, timeout=timeout), timeout=timeout + 5.0)
     except _ChainError:
         # A diagnosed failure must reach the caller. Folding it into None here
         # would relabel "this symbol has no listed options" as a timeout — the
@@ -206,11 +250,6 @@ def _run(coro, timeout: float):
         # a timeout that may never have been one, because the true exception
         # (an SDK raise inside the chain download or streamer) died right here.
         raise
-    finally:
-        try:
-            loop.close()
-        except Exception:  # noqa: BLE001
-            pass
 
 
 def _q_num(v):
@@ -291,8 +330,11 @@ def _download_chain(session, symbol: str):
     just builds a coroutine object and never sends the request. That object is
     truthy, so it sailed past ``if chain:`` and got cached, then blew up two
     frames later as ``AttributeError: 'coroutine' object has no attribute
-    'keys'`` on the first ``chain.keys()``. This runs it to completion with its
-    own event loop, since this function executes off-loop in a worker thread.
+    'keys'`` on the first ``chain.keys()``. This submits it to the module's
+    SHARED loop (this function executes off-loop in a worker thread) — its
+    first fix used asyncio.run, whose throwaway loop stranded the session's
+    pooled HTTP connection and made the next request raise "Event loop is
+    closed"; see _loop.
 
     Writes the cache even when the awaiting coroutine has already given up and
     returned an error to the desk: the expensive work still pays off, because
@@ -301,7 +343,10 @@ def _download_chain(session, symbol: str):
     """
     from tastytrade.instruments import get_option_chain
     try:
-        chain = asyncio.run(get_option_chain(session, symbol))
+        # No timeout: the whole point of running here is to outlive the
+        # caller's budget and finish into the cache. The in-flight staleness
+        # guard is what handles a truly hung download.
+        chain = _await(get_option_chain(session, symbol))
         if chain:
             with _chain_lock:
                 _CHAIN_CACHE[symbol] = (time.time(), chain)
