@@ -50,6 +50,19 @@ overclaiming freshness it can't verify is worse than a conservative warning.
 Verified by parsing a realistic mocked Polygon snapshot response (fields
 checked against Polygon's live docs) through `get_option_chain` end-to-end.
 
+## [6.38.10] — 2026-08-19
+
+### Changed — the tastytrade health row now tests the CHAIN, not just the handshake
+OAuth-green proved insufficient once already: a session can build while the
+chain download fails one layer deeper, and the only way to find out was waiting
+for a trading cycle. The Test Connections row now pulls a real (tiny) SPY chain
+end-to-end, with four honest verdicts: CHAIN VERIFIED (strikes with live
+quotes/Greeks — lanes fully operational), chain DOWNLOADED but stream quiet
+(auth + SDK + parsing proven; normal outside listed-options hours), download
+still running (click again in a minute — it caches), or the fetch's actual
+error. The owner can now answer "do options work?" with one click at any hour,
+instead of waiting for the next market session.
+
 ## [6.38.9] — 2026-08-19
 
 ### Fixed — Test Connections detail text wraps instead of vanishing off-screen

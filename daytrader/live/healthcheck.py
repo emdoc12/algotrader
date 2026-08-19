@@ -76,10 +76,36 @@ def _check_tastytrade() -> dict:
     with tt._session_lock:
         tt._session = None
     sess = tt._get_session()
-    ms = int((time.time() - t0) * 1000)
     if sess is not None:
-        return {**base, "configured": True, "ok": True, "latency_ms": ms,
-                "detail": "OAuth session established — chains and margin data are reachable"}
+        # OAuth alone proved insufficient once already: the session can build
+        # while the chain download still fails one layer deeper. Pull a REAL
+        # (tiny) SPY chain so this row is the end-to-end verdict — and works
+        # after hours too: a downloaded chain with a quiet quote stream still
+        # proves credentials, SDK and parsing, which is everything the desks
+        # were blocked on. The download caches, so only the first click is slow.
+        env = tt.fetch_option_chain("SPY", max_expirations=1, strikes_around_atr=4,
+                                    strike_pct_window=3.0, timeout=6.0, attempts=1,
+                                    allow_historical_fallback=False)
+        ms = int((time.time() - t0) * 1000)
+        if env.get("ok"):
+            return {**base, "configured": True, "ok": True, "latency_ms": ms,
+                    "detail": (f"CHAIN VERIFIED end-to-end: SPY returned "
+                               f"{env.get('n_contracts')} strikes with live quotes/Greeks. "
+                               "Options lanes are fully operational.")}
+        code = env.get("error_code")
+        if code == "no_quotes":
+            return {**base, "configured": True, "ok": True, "latency_ms": ms,
+                    "detail": ("chain DOWNLOADED (auth + SDK + parsing all good); the "
+                               "quote stream was quiet, which is normal outside market "
+                               "hours. Re-run during the session for the full verdict.")}
+        if code in ("rest_chain_timeout", "chain_downloading"):
+            return {**base, "configured": True, "ok": True, "latency_ms": ms,
+                    "detail": ("OAuth good; the SPY chain download is still running and "
+                               "caches on completion — click Test connections again in "
+                               "about a minute for the end-to-end verdict.")}
+        return {**base, "configured": True, "ok": False, "latency_ms": ms,
+                "detail": f"OAuth good but the chain fetch failed: [{code}] {env.get('error')}"}
+    ms = int((time.time() - t0) * 1000)
     why = tt._last_session_error or "session build failed (no detail captured)"
     hint = ""
     if "invalid_grant" in why or "mismatch" in why.lower():
