@@ -50,7 +50,25 @@ overclaiming freshness it can't verify is worse than a conservative warning.
 Verified by parsing a realistic mocked Polygon snapshot response (fields
 checked against Polygon's live docs) through `get_option_chain` end-to-end.
 
-## [6.38.10] — 2026-08-19
+## [6.39.2] — 2026-08-19
+
+### Fixed — VERSION regressed below the already-shipped 6.39.0
+Dev request #31 asked for a re-test of `get_option_chain`'s `invalid_grant` /
+"Invalid JWT" failure. Reproducing it against a throwaway bad credential
+(real network call to tastytrade's OAuth endpoint, not a mock) confirms
+6.39.0's `_get_session()` fix already resolves it end to end: a rejected
+grant now fails at session-build time with tastytrade's literal rejection
+text, both in `get_option_chain`'s `no_session` response and in the Test
+Connections row — no code change needed here, #31 is a duplicate of #28.
+
+What *did* need fixing: the commit below this one shipped as "6.38.10", a
+version LOWER than the 6.39.0 it was built on top of (confirmed: `b955145`
+is its own ancestor). That's the exact failure CLAUDE.md calls out by
+name — a stale/wrong VERSION misreporting the running system to the owner —
+so the entry is renumbered 6.39.1 to restore a monotonic history; its content
+is unchanged, nothing about that fix was wrong.
+
+## [6.39.1] — 2026-08-19
 
 ### Changed — the tastytrade health row now tests the CHAIN, not just the handshake
 OAuth-green proved insufficient once already: a session can build while the
