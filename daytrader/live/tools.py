@@ -244,6 +244,36 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
         return out
 
     def _chain_advice(code: str | None) -> str:
+        # stream_timeout / chain_download_failed are the two codes where
+        # fetch_option_chain already tried the Alpha Vantage historical
+        # fallback and it did not rescue the call. The old copy here always
+        # said "if ALPHAVANTAGE_API_KEY were configured..." even when a key
+        # WAS configured and the fallback simply had no budget left — which is
+        # exactly what desks hit and re-filed as dev request #16. Read the
+        # real state instead of guessing it.
+        if str(code) in ("stream_timeout", "chain_download_failed"):
+            try:
+                from daytrader.data.feeds import alphavantage as av
+                if not av.is_configured():
+                    return ("retry once (the chain is now cached, so a second attempt skips "
+                            "the slow phase). No ALPHAVANTAGE_API_KEY is configured, so there "
+                            "is no stale-chain fallback available — ask the owner to add one "
+                            "in Settings.")
+                budget = av.budget_state()
+                if budget["remaining"] <= 0:
+                    return (f"retry once. The Alpha Vantage stale-chain fallback IS wired in, "
+                            f"but its shared daily budget is exhausted "
+                            f"({budget['used']}/{budget['limit']} requests used today across "
+                            "all desks) — it resets tomorrow, or the owner can raise "
+                            "ALPHAVANTAGE_DAILY_LIMIT on a paid plan.")
+                return ("retry once — the chain is now cached, so a second attempt skips the "
+                        f"slow phase. A stale-chain fallback is available "
+                        f"({budget['remaining']} Alpha Vantage requests left today); check "
+                        "this response's 'historical fallback unavailable' reason if it still "
+                        "did not rescue the call, and file a dev request with that reason if "
+                        "it looks wrong.")
+            except Exception:  # noqa: BLE001
+                pass
         return {
             "not_configured": ("tastytrade is not configured. Set ALPHAVANTAGE_API_KEY to at "
                                "least research options off historical chains."),
@@ -260,10 +290,6 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                                    "OPTION_CHAIN_FETCH_TIMEOUT."),
             "chain_downloading": ("an earlier call's download is still running and caches on "
                                   "completion — do NOT hammer this; retry next cycle."),
-            "stream_timeout": ("the fetch timed out; retry once — the chain is now cached, so "
-                               "a second attempt skips the slow phase. If ALPHAVANTAGE_API_KEY "
-                               "were configured you would receive a stale research chain "
-                               "instead of this error; ask the owner to add it."),
         }.get(str(code), "retry once; if it persists, file a dev request with this error_code.")
 
     def place_option_trade(inp: dict) -> dict:

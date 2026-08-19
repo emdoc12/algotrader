@@ -2106,6 +2106,10 @@ function renderSettings(main, status){
     + "free tier's 25/day."));
   dataCard.appendChild(settingsTextField(status, "ALPHAVANTAGE_DAILY_LIMIT", "ALPHAVANTAGE_DAILY_LIMIT",
     {def:"25", hint:"New historical-chain fetches allowed per day. Raise it to match a premium plan."}));
+  dataCard.appendChild(settingsTextField(status, "ALPHAVANTAGE_FALLBACK_RESERVE", "ALPHAVANTAGE_FALLBACK_RESERVE",
+    {def:"5", hint:"Slice of the daily limit off-limits to manual av_historical_option_chain research, held back "
+      + "for get_option_chain's automatic stale-chain fallback so busy research mornings can't leave it with zero "
+      + "budget when a live stream times out mid-session."}));
   main.appendChild(dataCard);
 
   // App icon

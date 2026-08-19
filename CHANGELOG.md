@@ -9,6 +9,38 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.38.0] — 2026-08-19
+
+### Fixed — the AV fallback was already wired in; the error hint lied about it
+Dev request #16: SPY and GLD both hit `stream_timeout` (failures #25/#26 across
+8 sessions) with the response advising "if ALPHAVANTAGE_API_KEY were configured
+you would receive a stale chain instead" — but the key WAS configured, and
+`fetch_option_chain` has called the Alpha Vantage historical fallback on every
+live failure since v6.36.3. The real cause: the shared 25/day free-tier budget
+was 25/25 used by 11:40 ET, so the fallback tried, failed on an exhausted
+budget, and the desk got the one canned hint that assumed "no key" — the one
+explanation that was actually false.
+
+* `get_option_chain`'s advice for `stream_timeout` / `chain_download_failed`
+  now reads the real Alpha Vantage state (configured? budget remaining?)
+  instead of a static guess, so a desk is told the true reason — exhausted
+  shared budget, no key at all, or "the fallback should have worked, check the
+  reason in this response" — not a message that contradicts what the desk
+  just observed.
+* **A slice of the daily budget is now reserved for the fallback.** Eight
+  desks doing manual research via `av_historical_option_chain` could (and did)
+  burn the whole 25/day before lunch, leaving nothing for the ONE consumer
+  that actually needs it mid-session: `get_option_chain` falling back to a
+  stale chain when tastytrade times out. `ALPHAVANTAGE_FALLBACK_RESERVE`
+  (default 5, dashboard-editable) is now off-limits to manual research but
+  still spendable by the automatic fallback — verified: a manual call with 4
+  of 25 remaining is refused with the reserve explained, while the fallback
+  path spends the same budget down to zero.
+* True capacity is bounded by Alpha Vantage's actual plan; raising it beyond
+  what the account is paid for just trades one failure for another
+  (`ALPHAVANTAGE_DAILY_LIMIT` was already dashboard-editable for exactly that
+  case — an owner decision to move to a paid tier, not a code fix).
+
 ## [6.37.0] — 2026-08-19
 
 ### Fixed — the week-long "stream_timeout" was a mask, not a diagnosis

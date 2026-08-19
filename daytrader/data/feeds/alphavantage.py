@@ -38,6 +38,15 @@ _BASE = "https://www.alphavantage.co/query"
 # Free tier allowance. Premium plans lift this; override to match your plan.
 _DAILY_LIMIT = int(os.environ.get("ALPHAVANTAGE_DAILY_LIMIT", "25"))
 
+# Eight desks doing manual research (av_historical_option_chain) can burn the
+# whole daily budget before lunch, which leaves nothing for the ONE thing that
+# actually needs this data mid-session: get_option_chain falling back to a
+# stale chain when tastytrade's stream times out (dev request #16 — SPY and
+# GLD both hit stream_timeout with the fallback unavailable because the budget
+# was already 25/25 by 11:40 ET). This slice is off-limits to manual research
+# and reserved for that automatic fallback path only.
+_FALLBACK_RESERVE = int(os.environ.get("ALPHAVANTAGE_FALLBACK_RESERVE", "5"))
+
 
 def _key() -> str | None:
     return env("ALPHAVANTAGE_API_KEY", "ALPHA_VANTAGE_API_KEY", "ALPHAVANTAGE_KEY")
@@ -84,8 +93,10 @@ def _spend(n: int = 1) -> None:
 def budget_state() -> dict:
     b = _budget()
     used = int(b.get("used", 0))
+    remaining = max(0, _DAILY_LIMIT - used)
     return {"date": b.get("date"), "used": used, "limit": _DAILY_LIMIT,
-            "remaining": max(0, _DAILY_LIMIT - used)}
+            "remaining": remaining, "reserved_for_fallback": _FALLBACK_RESERVE,
+            "remaining_for_research": max(0, remaining - _FALLBACK_RESERVE)}
 
 
 # --------------------------------------------------------------------------- #
@@ -96,7 +107,7 @@ def _cache_file(symbol: str, date: str) -> Path:
 
 
 def historical_chain(symbol: str, date: str | None = None,
-                     use_cache: bool = True) -> dict:
+                     use_cache: bool = True, reserve: int = 0) -> dict:
     """Full option chain for ``symbol`` as of ``date`` (YYYY-MM-DD).
 
     Returns ``{"symbol", "date", "contracts": [...], "source": "cache"|"api"}``
@@ -104,6 +115,12 @@ def historical_chain(symbol: str, date: str | None = None,
 
     Each contract carries: ``expiration, strike, type, bid, ask, mark, last,
     volume, open_interest, implied_volatility, delta, gamma, theta, vega, rho``.
+
+    ``reserve`` refuses a NEW (uncached) fetch once fewer than that many
+    requests remain today — the live-chain fallback calls this with
+    ``reserve=0`` so it can spend all the way down to zero, while the
+    desk-facing ``av_historical_option_chain`` tool passes
+    ``_FALLBACK_RESERVE`` so manual research cannot starve the fallback.
     """
     symbol = str(symbol or "").upper().strip()
     if not symbol:
@@ -133,6 +150,15 @@ def historical_chain(symbol: str, date: str | None = None,
                           "already fetched stay available from cache; new dates "
                           "resume tomorrow, or raise ALPHAVANTAGE_DAILY_LIMIT to "
                           "match a premium plan."),
+                "budget": state}
+    if state["remaining"] <= reserve:
+        return {"error": (f"alphavantage budget has {state['remaining']} request(s) left "
+                          f"({state['used']}/{state['limit']} used today) — the last "
+                          f"{reserve} are reserved for get_option_chain's automatic "
+                          "fallback when a live stream times out, not manual research. "
+                          "Use a cached date (av_options_budget lists cached symbols), "
+                          "wait for tomorrow's reset, or raise ALPHAVANTAGE_DAILY_LIMIT / "
+                          "ALPHAVANTAGE_FALLBACK_RESERVE."),
                 "budget": state}
 
     params = {"function": "HISTORICAL_OPTIONS", "symbol": symbol, "apikey": key}
@@ -220,7 +246,7 @@ def cached_dates(symbol: str) -> list[str]:
 # --------------------------------------------------------------------------- #
 def _t_historical(inp: dict) -> dict:
     inp = inp or {}
-    res = historical_chain(inp.get("symbol", ""), inp.get("date"))
+    res = historical_chain(inp.get("symbol", ""), inp.get("date"), reserve=_FALLBACK_RESERVE)
     if res.get("error"):
         return res
     contracts = res.get("contracts") or []
