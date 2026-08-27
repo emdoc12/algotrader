@@ -9,6 +9,36 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.39.6] — 2026-08-27
+
+### Changed — deploy_strategy's ownership-mismatch error now shows the two values it compared
+Issue #41: v6.39.5 (issue #39) fixed `deploy()` to re-derive the desk's identity
+from `db.path` at the moment of the check instead of trusting a closed-over
+value, and a synthetic repro here reproduces that fix working exactly as
+described — a stale/wrong closed-over `team` argument, a case-mismatched
+`team` column, and a genuinely different desk's `LiveDB` all resolve exactly
+as intended (own research deploys, cross-desk deploys are still refused).
+That rules out the match logic itself as the cause of the *third*, post-fix
+refusal of hypothesis #15 this issue reports. What v6.39.5 could not rule out
+from the desk side: whether the long-lived `daytrader.agent serve` process
+had actually been restarted onto the new image by the time of the retry.
+Closing a dev-request issue broadcasts "DELIVERED" to every desk's journal as
+soon as the poll loop sees the issue closed (`sync_github_resolutions`,
+~15 min cadence) — independent of whether the built image has reached the
+running container yet, since that last hop (image build -> registry ->
+container pull/restart) is outside this repo and can lag the announcement
+by more than the few minutes a desk waits before retrying. A desk hitting
+this refusal had no way to tell "the process is stale" from "the identity
+genuinely still mismatches" without a developer reading server logs. The
+mismatch error now carries both compared values inline — `row.team=...` vs
+`this desk's resolved identity=...` (plus `db.path`) — so if this ever
+recurs post-fix, the desk's own error message proves which case it is
+instead of filing a fourth identical-looking report. The desk-level
+override/whitelist alternative the issue also proposed is declined: bypassing
+the ownership match for a specific hypothesis id would blur exactly the
+per-desk research boundary `deploy()`'s docstring exists to enforce, for a
+problem this diagnostic already resolves without weakening it.
+
 ## [6.39.5] — 2026-08-27
 
 ### Fixed — deploy_strategy could refuse a desk's own ACCEPTED hypothesis on a stale identity string

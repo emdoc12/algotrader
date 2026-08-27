@@ -80,9 +80,15 @@ def deploy(db, hypothesis_id: int, team: str) -> dict:
     # owns), case/whitespace-insensitively — not the possibly-stale `team` arg.
     row_team = (row["team"] or "").strip()
     if row_team.casefold() != resolved_team.strip().casefold():
+        # Issue #41: three refusals of a desk's OWN accepted hypothesis, post-fix,
+        # with no way to tell from the desk side whether the running process was
+        # simply stale (image built but not yet pulled/restarted) or the identity
+        # genuinely still mismatches. Put both compared values straight in the
+        # error so a recurrence is self-diagnosing from the journal alone.
         return {"ok": False, "error": (
             f"#{hypothesis_id} was proposed by '{row['team']}'. A desk deploys only its "
-            "own validated research.")}
+            f"own validated research (row.team={row_team!r} vs this desk's resolved "
+            f"identity={resolved_team!r}, from db.path={getattr(db, 'path', None)!r}).")}
 
     canon = json.loads(row["spec"])
     evidence = json.loads(row["result"]) if row["result"] else {}
