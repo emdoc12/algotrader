@@ -9,6 +9,34 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.39.5] — 2026-08-27
+
+### Fixed — deploy_strategy could refuse a desk's own ACCEPTED hypothesis on a stale identity string
+Issue #39: the claude desk's first-ever ACCEPTED hypothesis (#15,
+`hourly_stack_wide_stop_swing_long_10d`) was refused with "#15 was proposed
+by 'claude'" from BOTH the Reviewer and Trader seats, on two separate days.
+Issue #38's investigation traced every construction site and confirmed the
+matching logic was correct in isolation — a synthetic repro (fresh
+`build_tools` on a fresh `LiveDB(team_db_path('claude'))`) deployed every
+time. The gap: `deploy_strategy` compared the hypothesis row against
+`team_name`, a string `build_tools()` computed ONCE from `db.path` and then
+carried through a closure for the lifetime of that tool call — correct at
+construction, but never re-verified against the db it was actually about to
+act on. `deploy()` now re-derives the desk's identity straight from
+`db.path` (via the new shared `daytrader.live.db.team_from_db`, the same
+function `_team_from_db` in `tools.py` now delegates to) at the moment of
+the match, instead of trusting the value threaded in — removing the closure
+as a possible source of drift entirely rather than chasing where it drifted.
+The match is also now case/whitespace-insensitive on both sides. Any time
+the closed-over value and the freshly-resolved one disagree, it's now logged
+via `db.log_agent` (`deploy_identity_mismatch`) and printed server-side, so
+a recurrence is visible on the dashboard instead of inferred from a desk
+report. Cross-desk deploys remain refused — verified a desk's OWN db still
+deploys its own accepted research (including with an intentionally-wrong
+closed-over team argument, and with a case-mismatched `team` column), while
+a genuinely different desk's `LiveDB` deploying the same hypothesis id is
+still rejected.
+
 ## [6.39.4] — 2026-08-19
 
 ### Fixed — chain download died with "Event loop is closed" the moment the credentials finally worked

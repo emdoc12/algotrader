@@ -8,20 +8,8 @@ auditable is what makes an autonomous trader safe to run unattended.
 from __future__ import annotations
 
 from daytrader.core.types import Side
+from daytrader.live.db import team_from_db as _team_from_db
 from daytrader.live.dev_requests import file_dev_request
-
-
-def _team_from_db(db) -> str:
-    """Desk name from the DB filename (``team_<name>.db``) — used to attribute
-    research hypotheses without threading a team arg through every call site."""
-    try:
-        import os
-        base = os.path.basename(getattr(db, "path", "") or "")
-        if base.startswith("team_") and base.endswith(".db"):
-            return base[5:-3]
-    except Exception:  # noqa: BLE001
-        pass
-    return "unknown"
 
 
 def unsupported_instrument(symbol) -> str | None:

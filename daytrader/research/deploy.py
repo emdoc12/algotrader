@@ -39,8 +39,27 @@ def ensure_table(db) -> None:
 
 def deploy(db, hypothesis_id: int, team: str) -> dict:
     """Promote one of this desk's ACCEPTED hypotheses to live signal generation."""
-    from daytrader.live.db import _now_iso
+    from daytrader.live.db import _now_iso, team_from_db
     from daytrader.research.registry import ResearchDB
+
+    # `team` is the identity build_tools() closed over when it built this
+    # desk's tool handlers. Re-derive it straight from db.path here too — the
+    # same source that decided it in the first place — instead of trusting a
+    # value that was computed earlier and carried through a closure. A desk's
+    # own accepted research must never be blocked by that value having drifted
+    # (issue #39: a desk's first-ever ACCEPTED hypothesis was refused with a
+    # mismatch that never reproduced outside the live runtime — this removes
+    # the closure as a possible source of it, and logs any recurrence so it's
+    # visible rather than inferred).
+    resolved_team = team_from_db(db)
+    if resolved_team != team:
+        msg = (f"deploy #{hypothesis_id}: build_tools closed over team={team!r} but "
+               f"db.path ({getattr(db, 'path', None)!r}) resolves to {resolved_team!r}")
+        print(f"[deploy] {msg}")
+        try:
+            db.log_agent("research", "deploy_identity_mismatch", msg)
+        except Exception:  # noqa: BLE001
+            pass
 
     rdb = None
     try:
@@ -57,7 +76,10 @@ def deploy(db, hypothesis_id: int, team: str) -> dict:
             f"#{hypothesis_id} is {row['status']}, not accepted. Only a hypothesis that "
             "cleared out-of-sample validation and the corrected significance bar can be "
             "deployed — that gate is the whole point.")}
-    if (row["team"] or "") != team:
+    # Match against the freshly-resolved identity (the db this desk actually
+    # owns), case/whitespace-insensitively — not the possibly-stale `team` arg.
+    row_team = (row["team"] or "").strip()
+    if row_team.casefold() != resolved_team.strip().casefold():
         return {"ok": False, "error": (
             f"#{hypothesis_id} was proposed by '{row['team']}'. A desk deploys only its "
             "own validated research.")}

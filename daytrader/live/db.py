@@ -27,6 +27,21 @@ def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
 
 
+def team_from_db(db) -> str:
+    """Desk name from the DB filename (``team_<name>.db``) — the one source of
+    truth for "whose db is this", used both to attribute research hypotheses
+    and to gate deployment. Kept here (not captured once and passed around)
+    so any caller can re-derive it fresh from the db object it actually has,
+    rather than trust a value computed earlier and threaded through closures."""
+    try:
+        base = os.path.basename(getattr(db, "path", "") or "")
+        if base.startswith("team_") and base.endswith(".db"):
+            return base[5:-3]
+    except Exception:  # noqa: BLE001
+        pass
+    return "unknown"
+
+
 class LiveDB:
     """Thin SQLite wrapper. Safe to use from a single-threaded event loop."""
 
