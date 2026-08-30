@@ -811,6 +811,9 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .pill{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;
         background:#23232a;color:var(--gray)}
   canvas{width:100%;height:340px;display:block}
+  /* pan-y (not none): a horizontal drag pans the chart, but a vertical swipe
+     still scrolls the PAGE — a phone must not get stuck on the chart. */
+  #equityChart{touch-action:pan-y;cursor:crosshair}
   .stats{display:flex;gap:24px;flex-wrap:wrap}
   .stat{min-width:96px}
   .stat .k{font-size:11px;color:var(--gray);text-transform:uppercase;letter-spacing:.5px}
@@ -1057,6 +1060,8 @@ async function loadOverview(){
   }
   legend.appendChild(el("div",{class:"li"},
     el("span",{class:"sw", style:"background:var(--gray)"}), "break-even"));
+  legend.appendChild(el("div",{class:"li", style:"margin-left:auto"},
+    "scroll to zoom · drag to pan · hover for values · double-click resets"));
   chartCard.appendChild(legend);
   main.appendChild(chartCard);
   requestAnimationFrame(() => drawEquityChart(cv, data));
@@ -1349,7 +1354,23 @@ function devRequestCard(devs, onChange, forcedTeam){
   return card;
 }
 
+// The chart's zoom/pan window, as fractions of the series length (0..1).
+// Module-level ON PURPOSE: the overview rebuilds its whole DOM (new canvas
+// included) every 15s refresh, so state stored on the canvas would silently
+// reset the user's zoom mid-inspection. Fraction-of-length rather than
+// timestamps because the chart plots every desk across the full width
+// regardless of series length (see drawEquityChart) — the window has to live
+// in the same domain the x-axis does.
+let eqView = {a: 0, b: 1};
+
 function drawEquityChart(canvas, data){
+  canvas._eqData = data;
+  if(!canvas._eqWired){ wireEquityChart(canvas); canvas._eqWired = true; }
+  renderEquityChart(canvas, null);
+}
+
+function renderEquityChart(canvas, hover){
+  const data = canvas._eqData || {};
   const dpr = window.devicePixelRatio || 1;
   const W = canvas.clientWidth || 800, H = canvas.clientHeight || 340;
   canvas.width = W * dpr; canvas.height = H * dpr;
@@ -1359,6 +1380,8 @@ function drawEquityChart(canvas, data){
 
   const padL = 64, padR = 14, padT = 14, padB = 28;
   const plotW = W - padL - padR, plotH = H - padT - padB;
+  const viewA = eqView.a, viewSpan = Math.max(eqView.b - eqView.a, 1e-6);
+  const zoomed = viewSpan < 0.999;
 
   const curves = data.curves || {};
   const start = Number(data.start_cash || START);
@@ -1374,19 +1397,27 @@ function drawEquityChart(canvas, data){
   // equity, which is exactly start_cash.
   const pnlOf = (p) => Number(p.equity_adj != null ? p.equity_adj : p.equity) - start;
 
-  // gather min/max P&L + max length. Zero is always in range: a chart of profit
-  // that does not show break-even hides whether a desk is up or down at all.
-  let lo = 0, hi = 0, maxLen = 0, anyPoints = false;
+  // gather min/max P&L + max length. At full view zero is always in range: a
+  // chart of profit that does not show break-even hides whether a desk is up
+  // or down at all. When ZOOMED the y-axis fits the visible points instead —
+  // forcing zero into a window the user deliberately narrowed to a $30 band
+  // three hundred dollars up would undo the zoom they just asked for.
+  let lo = zoomed ? Infinity : 0, hi = zoomed ? -Infinity : 0;
+  let maxLen = 0, anyPoints = false;
+  const fracOf = (i, n) => n <= 1 ? 0.5 : i/(n-1);
   const tsFirst = {}, tsLast = {};
   for(const tm of TEAMS){
     const c = curves[tm] || [];
     if(c.length){ anyPoints = true; tsFirst[tm] = c[0].ts; tsLast[tm] = c[c.length-1].ts; }
     maxLen = Math.max(maxLen, c.length);
-    for(const p of c){
-      const e = pnlOf(p);
+    for(let i = 0; i < c.length; i++){
+      const f = fracOf(i, c.length);
+      if(zoomed && (f < viewA || f > viewA + viewSpan)) continue;
+      const e = pnlOf(c[i]);
       if(isFinite(e)){ lo = Math.min(lo,e); hi = Math.max(hi,e); }
     }
   }
+  if(!isFinite(lo)){ lo = 0; hi = 0; }   // zoomed window with no points in it
   // pad range a little
   if(hi === lo){ hi = lo + 1; }
   const range = hi - lo;
@@ -1394,7 +1425,7 @@ function drawEquityChart(canvas, data){
   const fmtPnl = v => (v < 0 ? "-$" : "+$") + Math.abs(Math.round(v)).toLocaleString();
 
   const yFor = v => padT + plotH - ((v - lo)/(hi - lo)) * plotH;
-  const xFor = (i, n) => padL + (n <= 1 ? plotW/2 : (i/(n-1)) * plotW);
+  const xFor = (i, n) => padL + ((fracOf(i, n) - viewA)/viewSpan) * plotW;
 
   // grid + axis
   ctx.strokeStyle = "#23232a"; ctx.lineWidth = 1;
@@ -1409,7 +1440,8 @@ function drawEquityChart(canvas, data){
   }
 
   // break-even line at zero — the reference the whole chart is about.
-  {
+  // (When zoomed, only if zero is inside the fitted range.)
+  if(lo <= 0 && 0 <= hi){
     const y = yFor(0);
     ctx.save();
     ctx.strokeStyle = "#8b8b96"; ctx.setLineDash([5,4]); ctx.lineWidth = 1.2;
@@ -1424,7 +1456,10 @@ function drawEquityChart(canvas, data){
     return;
   }
 
-  // each team's line, plotted across the full width regardless of length
+  // each team's line, plotted across the full width regardless of length.
+  // Clipped to the plot rect: when zoomed, most of every line is off-screen.
+  ctx.save();
+  ctx.beginPath(); ctx.rect(padL, padT, plotW, plotH); ctx.clip();
   for(const tm of TEAMS){
     const c = curves[tm] || [];
     if(c.length === 0) continue;
@@ -1443,8 +1478,10 @@ function drawEquityChart(canvas, data){
     ctx.stroke();
     // Current P&L at the end of the line. With seven desks bunched inside a few
     // hundred dollars, the legend colour alone does not tell you who is ahead.
+    // Only while the line's end is on screen — pinning "now" to the right edge
+    // of a window scrolled into last week would caption the wrong point.
     const last = pnlOf(c[c.length-1]);
-    if(isFinite(last)){
+    if(isFinite(last) && xFor(c.length-1, c.length) <= W - padR + 1){
       ctx.save();
       ctx.fillStyle = COLORS[tm]; ctx.font = "10px sans-serif";
       ctx.textAlign = "right"; ctx.textBaseline = "bottom";
@@ -1452,15 +1489,159 @@ function drawEquityChart(canvas, data){
       ctx.restore();
     }
   }
+  ctx.restore();
 
-  // time axis labels (first/last) using the longest available series
-  let labelTm = TEAMS.find(t => (curves[t]||[]).length) || TEAMS[0];
+  // time axis labels at the view edges, from the longest available series —
+  // at full view these are simply the first/last timestamps.
+  let labelTm = TEAMS[0], labelLen = 0;
+  for(const t of TEAMS){
+    const n = (curves[t]||[]).length;
+    if(n > labelLen){ labelTm = t; labelLen = n; }
+  }
+  const labelC = curves[labelTm] || [];
+  const tsAtFrac = f => {
+    if(!labelC.length) return "";
+    const i = Math.max(0, Math.min(labelC.length-1, Math.round(f*(labelC.length-1))));
+    return labelC[i].ts;
+  };
   const fmtTs = s => { if(!s) return ""; return String(s).replace("T"," ").slice(5,16); };
   ctx.fillStyle = "#8b8b96"; ctx.textBaseline = "top"; ctx.font = "11px sans-serif";
   ctx.textAlign = "left";
-  ctx.fillText(fmtTs(tsFirst[labelTm]), padL, H-padB+8);
+  ctx.fillText(fmtTs(zoomed ? tsAtFrac(viewA) : tsFirst[labelTm]), padL, H-padB+8);
   ctx.textAlign = "right";
-  ctx.fillText(fmtTs(tsLast[labelTm]), W-padR, H-padB+8);
+  ctx.fillText(fmtTs(zoomed ? tsAtFrac(viewA+viewSpan) : tsLast[labelTm]), W-padR, H-padB+8);
+  if(zoomed){
+    ctx.textAlign = "center";
+    ctx.fillText("zoomed — double-click to reset", padL + plotW/2, H-padB+8);
+  }
+
+  // hover: crosshair + a readout of every desk's P&L at the cursor's position.
+  if(hover && hover.x >= padL && hover.x <= W-padR && hover.y >= padT && hover.y <= padT+plotH){
+    const f = viewA + ((hover.x - padL)/plotW) * viewSpan;
+    ctx.save();
+    ctx.strokeStyle = "#8b8b96"; ctx.globalAlpha = 0.5; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(hover.x, padT); ctx.lineTo(hover.x, padT+plotH); ctx.stroke();
+    ctx.restore();
+    const rows = [];
+    for(const tm of TEAMS){
+      const c = curves[tm] || [];
+      if(!c.length) continue;
+      const i = Math.max(0, Math.min(c.length-1, Math.round(f*(c.length-1))));
+      const v = pnlOf(c[i]);
+      if(!isFinite(v)) continue;
+      ctx.beginPath();
+      ctx.arc(xFor(i, c.length), yFor(v), 3, 0, Math.PI*2);
+      ctx.fillStyle = COLORS[tm]; ctx.fill();
+      rows.push([tm, v]);
+    }
+    if(rows.length){
+      rows.sort((p,q) => q[1]-p[1]);   // best desk first, like the leaderboard
+      ctx.font = "11px sans-serif";
+      let bw = 0;
+      const lines = rows.map(([tm,v]) => LABELS[tm] + "  " + fmtPnl(v));
+      const head = fmtTs(tsAtFrac(f));
+      for(const t of lines.concat([head])) bw = Math.max(bw, ctx.measureText(t).width);
+      bw += 26;
+      const bh = 18 + rows.length*15 + 6;
+      // flip the box to whichever side of the crosshair has room
+      let bx = hover.x + 12;
+      if(bx + bw > W - padR) bx = hover.x - 12 - bw;
+      let by = Math.max(padT, Math.min(hover.y - bh/2, padT + plotH - bh));
+      ctx.fillStyle = "rgba(20,20,26,0.92)";
+      ctx.strokeStyle = "#33333c"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.rect(bx, by, bw, bh); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = "#8b8b96"; ctx.textAlign = "left"; ctx.textBaseline = "top";
+      ctx.fillText(head, bx+8, by+6);
+      rows.forEach(([tm,v], k) => {
+        const y = by + 20 + k*15;
+        ctx.fillStyle = COLORS[tm];
+        ctx.beginPath(); ctx.rect(bx+8, y+3, 8, 8); ctx.fill();
+        ctx.fillText(LABELS[tm], bx+20, y);
+        ctx.textAlign = "right";
+        ctx.fillText(fmtPnl(v), bx+bw-8, y);
+        ctx.textAlign = "left";
+      });
+    }
+  }
+}
+
+// Mouse/touch interaction for the P&L chart: wheel zooms around the cursor,
+// drag pans, hover reads out values, double-click resets. Wired once per
+// canvas element (the overview rebuilds its DOM each refresh, so each new
+// canvas comes back through here; the view itself lives in eqView above).
+function wireEquityChart(canvas){
+  const padL = 64, padR = 14;
+  const plotWOf = () => (canvas.clientWidth || 800) - padL - padR;
+  // Never zoom past ~4 intervals of the longest series: below that every
+  // desk collapses to a single point and the chart is just confusing.
+  const minSpan = () => {
+    let n = 1;
+    const curves = (canvas._eqData || {}).curves || {};
+    for(const tm in curves) n = Math.max(n, (curves[tm]||[]).length);
+    return n > 5 ? 4/(n-1) : 1;
+  };
+  const clampView = (a, span) => {
+    span = Math.max(minSpan(), Math.min(1, span));
+    a = Math.max(0, Math.min(1 - span, a));
+    eqView = {a: a, b: a + span};
+  };
+
+  canvas.addEventListener("wheel", (e) => {
+    const span = eqView.b - eqView.a;
+    // Zooming out at full view is a no-op — let the page scroll instead of
+    // trapping the wheel over a chart that cannot zoom out any further.
+    if(span >= 1 && e.deltaY > 0) return;
+    e.preventDefault();
+    const f = Math.max(0, Math.min(1, (e.offsetX - padL)/plotWOf()));
+    const centre = eqView.a + f*span;
+    const factor = e.deltaY > 0 ? 1.3 : 1/1.3;
+    clampView(centre - f*span*factor, span*factor);
+    renderEquityChart(canvas, {x: e.offsetX, y: e.offsetY});
+  }, {passive: false});
+
+  // Pointer events cover mouse AND touch: one pointer pans (or hovers, when
+  // no button is down), two pinch-zoom where the browser lets them through
+  // (touch-action: pan-y keeps vertical page scrolling alive on a phone).
+  const ptrs = new Map();
+  let pan = null, pinch = null;
+  canvas.addEventListener("pointerdown", (e) => {
+    canvas.setPointerCapture(e.pointerId);
+    ptrs.set(e.pointerId, {x: e.offsetX, y: e.offsetY});
+    if(ptrs.size === 1){
+      pan = {x: e.offsetX, a: eqView.a, span: eqView.b - eqView.a};
+    }else if(ptrs.size === 2){
+      pan = null;
+      const [p1, p2] = [...ptrs.values()];
+      const span = eqView.b - eqView.a;
+      const mid = (p1.x + p2.x)/2;
+      pinch = {dist: Math.max(1, Math.abs(p1.x - p2.x)), span: span,
+               centre: eqView.a + Math.max(0, Math.min(1, (mid - padL)/plotWOf()))*span};
+    }
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    if(ptrs.has(e.pointerId)) ptrs.set(e.pointerId, {x: e.offsetX, y: e.offsetY});
+    if(pinch && ptrs.size === 2){
+      const [p1, p2] = [...ptrs.values()];
+      const span = pinch.span * pinch.dist / Math.max(1, Math.abs(p1.x - p2.x));
+      clampView(pinch.centre - span/2, span);
+      renderEquityChart(canvas, null);
+    }else if(pan){
+      const shift = ((pan.x - e.offsetX)/plotWOf()) * pan.span;
+      clampView(pan.a + shift, pan.span);
+      renderEquityChart(canvas, null);
+    }else{
+      renderEquityChart(canvas, {x: e.offsetX, y: e.offsetY});
+    }
+  });
+  const drop = (e) => {
+    ptrs.delete(e.pointerId);
+    if(ptrs.size < 2) pinch = null;
+    if(ptrs.size < 1) pan = null;
+  };
+  canvas.addEventListener("pointerup", drop);
+  canvas.addEventListener("pointercancel", drop);
+  canvas.addEventListener("pointerleave", (e) => { drop(e); renderEquityChart(canvas, null); });
+  canvas.addEventListener("dblclick", () => { eqView = {a:0, b:1}; renderEquityChart(canvas, null); });
 }
 
 // ---- a team tab --------------------------------------------------------- //

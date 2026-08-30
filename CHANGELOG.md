@@ -9,6 +9,30 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.40.0] — 2026-08-30
+
+### Added — the P&L chart is now interactive: zoom, pan, hover readout
+Owner request. The overview's Profit / Loss chart was a static picture; with
+seven desks bunched within a few hundred dollars, the interesting part was
+often a stripe a few pixels tall. The chart now supports: **scroll-wheel
+zoom** centred on the cursor (zooming out past the full view hands the wheel
+back to the page instead of trapping it), **drag to pan**, **hover** for a
+crosshair with every desk's P&L at that moment (sorted best-first, like the
+leaderboard, with the timestamp), and **double-click to reset**. On a phone,
+a horizontal drag pans while a vertical swipe still scrolls the page
+(touch-action: pan-y), and pinch zooms where the browser allows it. When
+zoomed, the y-axis fits the visible points (break-even's dashed line appears
+only when it is actually in range), the x-axis labels show the window's
+real time span, and each line's current-P&L caption only draws while the
+line's end is on screen. The zoom window survives the 15-second auto-refresh
+(it lives outside the rebuilt DOM) and never narrows below four intervals.
+All hand-rolled on the existing canvas — the dashboard stays fully
+self-contained on the LAN, no chart library, no CDN. Verified by driving the
+real page in headless Chromium: wheel×3 zooms to a 0.455 window centred
+inside (0,1); a 200px drag pans later-in-time with the span held exactly;
+hover provably changes the rendered pixels; double-click restores (0,1); 40
+aggressive wheel-ups stop at the 4-interval floor; zero page errors.
+
 ## [6.39.6] — 2026-08-27
 
 ### Changed — deploy_strategy's ownership-mismatch error now shows the two values it compared
