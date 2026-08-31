@@ -231,6 +231,14 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
         else:
             out["note"] = ("Live bid/ask with streaming Greeks. Pass the leg prices you would "
                            "actually trade at — BID on shorts, ASK on longs.")
+        # Selection-time analytics (issue #43): IV rank, expected move per
+        # expiration, next earnings date. Additive and best-effort — never
+        # lets an analytics bug take down an otherwise-good chain response.
+        try:
+            from daytrader.live import options_analytics as oa
+            out.update(oa.enrich_chain(sym, spot, env.get("chain") or {}))
+        except Exception:  # noqa: BLE001
+            pass
         return out
 
     def _chain_advice(code: str | None, fallback_reason: str | None = None,
@@ -1050,7 +1058,14 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                 "theta, vega, IV) for a symbol. Ask for the DTE window your strategy needs "
                 "(target_dte 35 for a 30-45 DTE credit spread) and read the deltas to pick "
                 "strikes — a 20-30 delta short strike is what the premium-selling playbook "
-                "means. Then pass those exact leg prices to place_option_trade."),
+                "means. Then pass those exact leg prices to place_option_trade. Also carries "
+                "the premium-selling gates: atm_iv_30d plus iv_rank_252d/iv_pct_252d (a real "
+                "52-week rank built for free from ATM IV seen on past chain fetches — "
+                "iv_sample_days says how many days deep it is; 'IV Rank > 40' needs it to "
+                "have accumulated real history, not just be nonzero), expected_move per "
+                "expiration (ATM straddle mid, for placing short strikes outside 1.2x it), "
+                "and next_earnings_date/earnings_confirmed (Polygon Benzinga, best-effort) "
+                "so you can filter a name out of a 30-45 DTE condor before it prints."),
             "input_schema": {
                 "type": "object",
                 "properties": {

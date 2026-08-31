@@ -864,12 +864,29 @@ def enrich_snapshot(snapshot: dict, options_for: list[str] | None = None) -> dic
         opt_symbols = options_for if options_for is not None else universe
         opt_symbols = list(opt_symbols)[:_MAX_OPTION_SYMBOLS]
         options: dict[str, dict] = {}
+        analytics: dict[str, dict] = {}
         for sym in opt_symbols:
             chain = get_option_chain(sym)
             if chain:
                 options[sym] = chain
+                # IV rank, expected move, next earnings (issue #43) — a NEW key
+                # alongside "options", never folded into it: snapshot["options"][sym]
+                # is the chain shape callers already rely on, and CLAUDE.md is
+                # explicit that a working interface does not change shape as a
+                # side effect of an unrelated feature.
+                try:
+                    from daytrader.live import options_analytics as oa
+                    spot = None
+                    mkt_sym = (market.get(sym) or {}) if isinstance(market.get(sym), dict) else {}
+                    q = mkt_sym.get("quote") or {}
+                    spot = q.get("mid") or q.get("last")
+                    analytics[sym] = oa.enrich_chain(sym, spot, chain)
+                except Exception:  # noqa: BLE001
+                    pass
         if options:
             snapshot["options"] = options
+        if analytics:
+            snapshot["options_analytics"] = analytics
 
         snapshot["data_source"] = "tastytrade"
         return snapshot

@@ -179,6 +179,46 @@ def chain(symbol: str, min_dte: int | None = None, max_dte: int | None = None,
     return {"symbol": sym, "chain": chain_out, "n_contracts": n, "spot": spot}
 
 
+def next_earnings(symbol: str) -> dict:
+    """Best-effort next earnings date for ``symbol`` from Polygon's Benzinga
+    earnings add-on (polygon.io/docs -> Benzinga -> Earnings; verify against
+    current docs if this stops returning data, same as the ``chain()``
+    disclaimer above). This is a separate, OPTIONAL add-on on top of the base
+    plan the options-chain fallback uses — a 403/plan error here means "this
+    plan doesn't include Benzinga," not "Polygon is broken," and is reported
+    as such rather than raised.
+
+    Returns ``{"symbol", "next_earnings_date", "confirmed", "time",
+    "fiscal_period", "source"}`` (``next_earnings_date`` is None with a
+    ``note``/``error`` when nothing is available) — never raises.
+    """
+    sym = str(symbol or "").upper().strip()
+    if not sym:
+        return {"error": "symbol required"}
+    from datetime import date as _date
+    data = _get("/benzinga/v1/earnings", {
+        "ticker": sym, "date.gte": _date.today().isoformat(),
+        "order": "asc", "sort": "date", "limit": 1,
+    })
+    if isinstance(data, dict) and data.get("error"):
+        return {"symbol": sym, "next_earnings_date": None, "confirmed": False,
+                "source": "polygon_benzinga", "error": data.get("error"),
+                "error_code": data.get("error_code"), "hint": data.get("hint")}
+    results = (data or {}).get("results") or []
+    if not results:
+        return {"symbol": sym, "next_earnings_date": None, "confirmed": False,
+                "source": "polygon_benzinga",
+                "note": "no upcoming earnings date returned for this symbol"}
+    r = results[0]
+    return {"symbol": sym, "next_earnings_date": r.get("date"),
+            "confirmed": bool(r.get("date_confirmed")), "time": r.get("time"),
+            "fiscal_period": r.get("fiscal_period"), "source": "polygon_benzinga"}
+
+
+def _next_earnings(inp: dict) -> dict:
+    return next_earnings((inp or {}).get("symbol", ""))
+
+
 def _movers(inp: dict) -> dict:
     direction = str((inp or {}).get("direction", "gainers")).lower()
     if direction not in ("gainers", "losers"):
@@ -202,8 +242,17 @@ def get_tools() -> list[dict]:
          "input_schema": {"type": "object", "properties": {"symbol": {"type": "string"}, "limit": {"type": "integer"}}}},
         {"name": "poly_movers", "description": "Market movers (gainers/losers) from Polygon.io.",
          "input_schema": {"type": "object", "properties": {"direction": {"type": "string", "enum": ["gainers", "losers"]}}}},
+        {"name": "poly_next_earnings",
+         "description": ("Best-effort next earnings date for a ticker (Polygon's Benzinga "
+                         "add-on), with a confirmed/estimated flag. get_option_chain already "
+                         "attaches this for the symbol you're pricing; use this tool directly "
+                         "to screen a name BEFORE spending a chain fetch on it — the single "
+                         "largest tail risk in a 30-45 DTE premium-selling trade is an "
+                         "earnings print inside the window."),
+         "input_schema": {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]}},
     ]
 
 
 def get_handlers() -> dict:
-    return {"poly_quote": _quote, "poly_news": _news, "poly_movers": _movers}
+    return {"poly_quote": _quote, "poly_news": _news, "poly_movers": _movers,
+            "poly_next_earnings": _next_earnings}

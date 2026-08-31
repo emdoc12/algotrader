@@ -9,6 +9,53 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.42.0] — 2026-08-31
+
+### Added — IV rank, expected move, and next-earnings date on get_option_chain
+Issue #43. A desk that switched to iron_condor found the execution tools
+solid (live bid/ask, streaming Greeks) but every premium-selling gate on the
+mandate — "IV Rank > 40" for the wheel, ">30" for credit spreads, short
+strikes "outside 1.2x expected move," no condor into an earnings print — had
+no data behind it, so desks were eyeballing all three. `get_option_chain`
+now attaches, per symbol:
+
+* **`atm_iv_30d` / `iv_rank_252d` / `iv_pct_252d`** — a real 52-week IV rank,
+  not a fabricated one. Rebuilding a year of ATM IV from Alpha Vantage's
+  `HISTORICAL_OPTIONS` would cost one request per historical date against
+  the 25/day budget already reserved for the live-chain fallback — the exact
+  cost problem the issue named as the reason this didn't exist yet. Instead,
+  `options_analytics.py` records the ATM IV that every live/fallback chain
+  fetch already computes to pick near-the-money strikes — one free sample
+  per symbol per day — and ranks today's value against whatever has
+  accumulated. `iv_sample_days` says how deep that history actually is (1 on
+  day one, climbing toward 252) with a note attached below full history, so
+  a desk can't mistake week-one noise for a real rank.
+* **`expected_move`** per expiration — ATM straddle mid (what the market is
+  actually pricing) falling back to spot·IV·√(DTE/365) when a leg's
+  bid/ask is missing (thin quote, or a stale/historical fallback chain).
+* **`next_earnings_date` / `earnings_confirmed`** — Polygon's Benzinga
+  earnings add-on, with the same degrade-and-explain handling as every other
+  provider here: a 403 means "plan doesn't include Benzinga," reported as
+  such, `next_earnings_date: null` rather than blocking a plan. Also exposed
+  standalone as `poly_next_earnings` for screening a name before spending a
+  chain fetch on it. Everything is additive: `snapshot["options"][sym]`
+  keeps its existing chain shape (nothing reads it as anything else, but
+  CLAUDE.md is explicit that working shapes don't move as a side effect) —
+  the same analytics land in the live snapshot under a new
+  `snapshot["options_analytics"][sym]` key instead.
+
+Verified with `python -c` scripts, no live credentials available in this
+environment: expected-move straddle math against hand-built quotes, the IV
+rank/percentile formulas across a 10-day synthetic series (checked against
+manually-computed min/max/percentile, including that a same-day re-fetch
+overwrites rather than double-counts), `enrich_chain`/`enrich_snapshot`
+end-to-end through `tools.py` and `tastytrade_data.py` with the tastytrade
+and Polygon calls mocked, and Polygon's earnings response parsing against
+three mocked shapes (a real result, an empty result, and a 403/plan error).
+Confirmed `enrich_snapshot` is still a byte-for-byte no-op when tastytrade
+isn't configured, and that `snapshot["options"][sym]` is bit-for-bit the
+same value it always was.
+
 ## [6.41.0] — 2026-08-31
 
 ### Added — stuck dev requests now retry themselves; the owner babysits nothing
