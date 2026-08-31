@@ -9,6 +9,30 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.41.0] — 2026-08-31
+
+### Added — stuck dev requests now retry themselves; the owner babysits nothing
+v6.40.1 made a do-nothing auto-fix run fail visibly — but a red X still
+needed the owner to see it and close-and-reopen the issue by hand. Now the
+running system does that itself. The resolution sync (already polling every
+~15 minutes) watches each mirrored request that is OPEN with ZERO comments:
+past 100 minutes of silence — longer than the fix job's own 90-minute
+timeout, so a legitimately long run is never interrupted — the request is
+provably dead (green no-op, failed run, or a workflow that never fired),
+and the system closes-and-reopens the issue with the owner's token, which
+re-fires the workflow (Actions' own token is deliberately blocked by GitHub
+from doing this; the owner's is not). Three retries max, ~100 minutes
+apart, each logged to the desk's journal; exhaustion surfaces in the
+dashboard's degraded-providers panel pointing at the run logs. Safety
+rails: an issue with ANY comment is never kicked (someone engaged — the
+run, or the owner deliberating); a kick whose reopen half fails is flagged
+and finished next pass rather than being mistaken for a shipped fix and
+broadcast to the desks. Verified against a fake GitHub API: kick fires
+exactly once per pass and only past the age gate, commented issues are
+never touched, the cap holds at three, a wedged kick is never broadcast
+and gets reopened on the next pass, and genuine resolutions still
+broadcast the issue's closing comment unchanged.
+
 ## [6.40.1] — 2026-08-31
 
 ### Fixed — the auto-fix pipeline could no-op silently behind a green check

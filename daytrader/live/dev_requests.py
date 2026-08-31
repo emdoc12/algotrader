@@ -240,8 +240,28 @@ def sync_github_resolutions() -> list[dict]:
         finally:
             db.close()
         for r in rows:
-            info = _fetch_issue_state(str(r["url"]), token)
-            if not info or info.get("state") != "closed":
+            url = str(r["url"])
+            info = _fetch_issue_state(url, token)
+            if not info:
+                continue
+            if info.get("state") == "open":
+                # Open with zero comments long past the fix job's timeout means
+                # the run died or no-opped — kick it back through the workflow.
+                if int(info.get("comments") or 0) == 0:
+                    kdb = _team_db(team)
+                    if kdb is not None:
+                        try:
+                            act = _kick_stuck_request(kdb, team, url, token, info)
+                        finally:
+                            kdb.close()
+                        if act:
+                            actions.append(act)
+                continue
+            if _retry_ledger.get(url, {}).get("wedged"):
+                # OUR half-done kick (closed, reopen failed) — not a fix. Finish
+                # the reopen instead of broadcasting a resolution that isn't one.
+                if _patch_issue_state(url, token, "open"):
+                    _retry_ledger[url]["wedged"] = False
                 continue
             status = "wont_fix" if info.get("state_reason") == "not_planned" else "closed"
             resolution = (info.get("resolution")
@@ -252,23 +272,34 @@ def sync_github_resolutions() -> list[dict]:
     return actions
 
 
+def _issue_api(html_url: str) -> str:
+    """API URL for an issue's html_url. Raises on a malformed URL."""
+    # html_url: https://github.com/{owner}/{repo}/issues/{n}
+    parts = html_url.rstrip("/").split("/")
+    n = int(parts[-1])
+    repo = "/".join(parts[-4:-2])
+    return f"https://api.github.com/repos/{repo}/issues/{n}"
+
+
+def _gh_headers(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "algotrader-devsync"}
+
+
 def _fetch_issue_state(html_url: str, token: str) -> dict | None:
-    """State + last comment for a mirrored issue. None on any failure."""
+    """State, last comment, comment count and last activity. None on failure."""
     try:
-        # html_url: https://github.com/{owner}/{repo}/issues/{n}
-        parts = html_url.rstrip("/").split("/")
-        n = int(parts[-1])
-        repo = "/".join(parts[-4:-2])
-        api = f"https://api.github.com/repos/{repo}/issues/{n}"
-        headers = {"Authorization": f"Bearer {token}",
-                   "Accept": "application/vnd.github+json",
-                   "User-Agent": "algotrader-devsync"}
+        api = _issue_api(html_url)
+        headers = _gh_headers(token)
         req = urllib.request.Request(api, headers=headers)
         with urllib.request.urlopen(req, timeout=10) as resp:
             issue = json.loads(resp.read().decode("utf-8", "replace"))
         out = {"state": issue.get("state"), "state_reason": issue.get("state_reason"),
+               "comments": int(issue.get("comments") or 0),
+               "updated_at": str(issue.get("updated_at") or ""),
                "resolution": None}
-        if out["state"] == "closed" and int(issue.get("comments") or 0) > 0:
+        if out["state"] == "closed" and out["comments"] > 0:
             req = urllib.request.Request(api + "/comments?per_page=100", headers=headers)
             with urllib.request.urlopen(req, timeout=10) as resp:
                 comments = json.loads(resp.read().decode("utf-8", "replace"))
@@ -277,6 +308,104 @@ def _fetch_issue_state(html_url: str, token: str) -> dict | None:
         return out
     except Exception:  # noqa: BLE001 - the next sync pass retries
         return None
+
+
+# --------------------------------------------------------------------------- #
+# auto-retry: re-fire the workflow on requests nothing ever answered          #
+# --------------------------------------------------------------------------- #
+# The auto-fix run can die without a trace: a green no-op (observed on issue
+# #43 — Claude's whole conclusion went into a discarded text reply), a failed
+# run, or a workflow that never fired at all. In every one of those cases the
+# issue sits OPEN with ZERO comments while the desk waits. The workflow's
+# documented retry lever is close-and-reopen, and — unlike Actions' own
+# GITHUB_TOKEN, which GitHub deliberately blocks from re-triggering workflows —
+# the owner's token used here DOES fire the `reopened` event. So the running
+# system kicks its own stuck requests instead of the owner babysitting them.
+#
+# 100 minutes, not 45: the fix job's timeout is 90 minutes, and a reopen
+# during a legitimate long run would queue a duplicate run behind it (the
+# concurrency group queues, never cancels). Past 100 minutes with zero
+# comments, the run is provably dead, not slow.
+_RETRY_AFTER_SEC = float(os.environ.get("DEV_REQUEST_RETRY_MINUTES", "100")) * 60.0
+_RETRY_MAX = int(os.environ.get("DEV_REQUEST_RETRY_MAX", "3"))
+# issue url -> {"count": kicks so far, "wedged": closed-but-reopen-failed}.
+# In-memory: a restart forgets old kicks, but the updated_at age gate still
+# spaces retries ~100 minutes apart, so the worst case is a few extra kicks
+# across restarts, not a loop.
+_retry_ledger: dict[str, dict] = {}
+
+
+def _patch_issue_state(html_url: str, token: str, state: str) -> bool:
+    """PATCH an issue open/closed. True on success, False on any failure."""
+    try:
+        data = json.dumps({"state": state}).encode("utf-8")
+        req = urllib.request.Request(_issue_api(html_url), data=data, method="PATCH",
+                                     headers=_gh_headers(token))
+        req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            resp.read()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _age_sec(iso_ts: str) -> float | None:
+    """Seconds since a GitHub ISO-8601 timestamp, or None if unparseable."""
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
+        return (datetime.now(timezone.utc) - dt).total_seconds()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _kick_stuck_request(db, team: str, url: str, token: str, info: dict) -> dict | None:
+    """Close-and-reopen an unanswered issue to re-fire the auto-fix workflow.
+
+    Returns an action dict when something happened, None otherwise. Only ever
+    called for OPEN issues with ZERO comments — a comment means someone (the
+    fix run, the owner) has engaged and retrying would stack duplicates.
+    """
+    age = _age_sec(info.get("updated_at") or "")
+    if age is None or age < _RETRY_AFTER_SEC:
+        return None
+    entry = _retry_ledger.setdefault(url, {"count": 0, "wedged": False})
+    if entry["count"] >= _RETRY_MAX:
+        return None   # exhausted — already reported below when it happened
+    entry["count"] += 1
+    if not _patch_issue_state(url, token, "closed"):
+        entry["count"] -= 1   # nothing happened; try again next pass
+        return None
+    # Reopen is what fires the workflow. If it fails the issue is stuck
+    # CLOSED with no comment — flag it so the resolution scan does not
+    # mistake our half-done kick for a shipped fix, and retry next pass.
+    reopened = False
+    for delay in (0, 2, 4):
+        if delay:
+            time.sleep(delay)
+        if _patch_issue_state(url, token, "open"):
+            reopened = True
+            break
+    entry["wedged"] = not reopened
+    try:
+        db.log_agent("runner", "dev_request_kicked",
+                     f"{url} had no answer after {age/60:.0f}m — closed+reopened "
+                     f"to re-fire the auto-fix workflow (retry {entry['count']}/{_RETRY_MAX})")
+    except Exception:  # noqa: BLE001
+        pass
+    if entry["count"] >= _RETRY_MAX:
+        try:
+            from daytrader.data.feeds.base import record_named_error
+            record_named_error(
+                "dev_autofix", "retries_exhausted",
+                f"{url} still unanswered after {_RETRY_MAX} automatic retries",
+                hint=("The auto-fix workflow keeps finishing without commenting on, "
+                      "closing, or fixing this request. Check the run logs on the "
+                      "repo's Actions page — the desk is still waiting."))
+        except Exception:  # noqa: BLE001
+            pass
+    return {"team": team, "url": url, "kicked": True,
+            "retry": entry["count"], "reopened": reopened}
 
 
 def _report_bridge_failure(db, exc) -> None:
