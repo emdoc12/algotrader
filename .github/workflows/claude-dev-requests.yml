@@ -110,6 +110,36 @@ jobs:
             competition terms), comment your analysis and LEAVE THE ISSUE OPEN
             for the owner rather than deciding yourself.
 
+            YOUR TEXT REPLIES ARE DISCARDED. The only things that exist after
+            this run are commits pushed to main and what you post on the issue
+            with gh. Whatever you conclude — fixed, not planned, or needs the
+            owner — you MUST run gh issue comment with that conclusion before
+            you finish. A run that ends with no commit and no comment has done
+            nothing: the desk keeps waiting on a request nobody will ever see
+            an answer to. (This happened: issue #43 got a thorough analysis
+            written as a text reply, which evaporated, and the run showed a
+            green check over a no-op.)
+
+      # A run that neither commented on the issue nor pushed a commit did
+      # NOTHING, whatever its exit code says — observed live on issue #43:
+      # Claude wrote its analysis as a discarded text reply, the run went
+      # green in 51 seconds, and the desk's request sat unanswered for 8
+      # hours looking "completed". Turn that into a red X so it is visible,
+      # and so close-and-reopen (the documented retry lever above) re-fires.
+      - name: Fail if the run left no trace on the issue or on main
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          state=$(gh issue view ${{ github.event.issue.number }} -R ${{ github.repository }} --json state --jq .state)
+          comments=$(gh issue view ${{ github.event.issue.number }} -R ${{ github.repository }} --json comments --jq '.comments | length')
+          pushed=$( [ "$(git rev-parse HEAD)" != "$(git ls-remote origin main | cut -f1)" ] && echo moved || echo same )
+          echo "issue state=$state comments=$comments main=$pushed"
+          if [ "$state" = "OPEN" ] && [ "$comments" -eq 0 ] && [ "$pushed" = "same" ]; then
+            echo "::error::Run finished without commenting, closing, or pushing — the desk's request went unanswered. Close and reopen the issue to retry."
+            exit 1
+          fi
+
       # Pushes made by claude[bot] never fire the push-triggered image build
       # (observed live: five bot releases, zero builds, a container four
       # versions stale while "up to date"). Dispatch it explicitly so a fix

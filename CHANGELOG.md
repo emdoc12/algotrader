@@ -9,6 +9,24 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.40.1] — 2026-08-31
+
+### Fixed — the auto-fix pipeline could no-op silently behind a green check
+Issue #43 (the premium-selling lane's ask for IV rank, expected move, and
+earnings dates) ran through the auto-fix workflow and came out looking
+"completed": green check, 51 seconds. It had done nothing — no commit, no
+comment, no close. The run's Claude wrote its conclusion as a plain text
+reply, which the action discards, so the analysis evaporated and the desk's
+request sat unanswered for 8 hours while the Actions page said success.
+Two changes to `claude-dev-requests.yml`: the prompt now states outright
+that text replies are discarded and that EVERY outcome — fixed, not
+planned, or needs-the-owner — must be posted with `gh issue comment`
+before finishing; and a verification step after the action fails the run
+(red X, not green check) whenever it ends with the issue still open,
+zero comments, and main unmoved. A silent no-op is now visible at a
+glance, and close-and-reopen — the workflow's documented retry lever —
+re-fires it.
+
 ## [6.40.0] — 2026-08-30
 
 ### Added — the P&L chart is now interactive: zoom, pan, hover readout
