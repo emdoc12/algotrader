@@ -264,6 +264,28 @@ def provider_health() -> dict:
     return out
 
 
+def even_sample_indices(n_items: int, n_keep: int) -> set[int]:
+    """Index set that evenly covers a SORTED sequence of length ``n_items`` down
+    to ``n_keep`` entries, always including both ends.
+
+    Every option-chain strike-selector in this codebase used to sort candidate
+    strikes by distance-to-spot and slice the closest N — which clusters
+    entirely near-the-money on a fine-strike-grid name (SPY's $1 grid, INTC)
+    even when the caller asked for a wide ``strike_pct_window``, because the
+    20-30 delta wings a premium-selling strategy actually needs are exactly
+    the strikes furthest from spot (dev request #44). Sampling evenly across
+    the already-window-filtered, price-sorted list keeps both wings visible
+    instead of starving them for near-money strikes nobody asked to see.
+    """
+    if n_keep <= 0 or n_items <= 0:
+        return set()
+    if n_items <= n_keep:
+        return set(range(n_items))
+    if n_keep == 1:
+        return {n_items // 2}
+    return {round(i * (n_items - 1) / (n_keep - 1)) for i in range(n_keep)}
+
+
 def http_text(url: str, params: dict | None = None, headers: dict | None = None,
               timeout: float = 12.0, enforce_public: bool = False) -> str | None:
     """Defensive GET returning raw text (for CSV exports etc.). None on failure.

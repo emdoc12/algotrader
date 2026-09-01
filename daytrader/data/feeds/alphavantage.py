@@ -35,13 +35,16 @@ call, not this module's.
 """
 from __future__ import annotations
 
+import csv
+import io
 import json
 import os
 import time
+from datetime import date as _date
 from pathlib import Path
 from typing import Any
 
-from .base import env, http_json
+from .base import env, http_json, http_text
 
 NAME = "alphavantage"
 _BASE = "https://www.alphavantage.co/query"
@@ -253,6 +256,120 @@ def cached_dates(symbol: str) -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
+# earnings calendar (dev request #44)                                        #
+# --------------------------------------------------------------------------- #
+# Polygon's Benzinga earnings add-on (polygon.py's next_earnings) turned out
+# not to be on the configured plan — a 403 on every symbol, not a transient
+# error — which left iron_condor and the other premium-selling lanes unable
+# to screen the single largest tail risk in a 30-45 DTE trade: an earnings
+# print inside the expiry. EARNINGS_CALENDAR is a plain stock-fundamentals
+# endpoint (not the options add-on HISTORICAL_OPTIONS above needs a premium
+# plan for), and unlike every other Alpha Vantage function used in this repo
+# it always answers CSV regardless of ``datatype``. It shares this module's
+# daily request budget — an earnings lookup is still a real API call — but
+# results are cached per (symbol, day) since a next-earnings estimate does
+# not change minute to minute, so repeated screening of the same name across
+# a session costs nothing after the first call.
+def _earnings_cache_dir() -> Path:
+    d = Path(os.environ.get("OPTIONS_CACHE_DIR")
+             or os.environ.get("DAYTRADER_CACHE_DIR", "cache")) / "earnings_calendar"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _earnings_cache_file(symbol: str) -> Path:
+    today = _date.today().isoformat()
+    return _earnings_cache_dir() / f"{symbol.upper()}_{today}.json"
+
+
+def next_earnings_calendar(symbol: str, reserve: int = 0) -> dict:
+    """Best-effort next earnings date for ``symbol`` from Alpha Vantage's
+    EARNINGS_CALENDAR. Returns the same shape as polygon.py's
+    ``next_earnings``/finviz.py's ``next_earnings`` — ``{"symbol",
+    "next_earnings_date", "confirmed", "source", ...}`` with ``error``/``note``
+    set instead when nothing usable came back. Never raises.
+
+    ``confirmed`` is always False: Alpha Vantage does not distinguish a
+    company-confirmed report date from an analyst estimate the way Polygon's
+    Benzinga feed does — treat every date from this source as an estimate
+    good enough for a DTE gate, not a locked date.
+    """
+    sym = str(symbol or "").upper().strip()
+    if not sym:
+        return {"error": "symbol required"}
+
+    cache_f = _earnings_cache_file(sym)
+    try:
+        cached = json.loads(cache_f.read_text())
+        cached["source"] = "alphavantage_earnings_calendar"
+        return cached
+    except Exception:  # noqa: BLE001
+        pass   # no/corrupt cache entry for today: fetch below
+
+    key = _key()
+    if not key:
+        return {"symbol": sym, "next_earnings_date": None, "confirmed": False,
+                "source": "alphavantage_earnings_calendar",
+                "error": "alphavantage not configured — set ALPHAVANTAGE_API_KEY"}
+
+    state = budget_state()
+    if state["remaining"] <= reserve:
+        return {"symbol": sym, "next_earnings_date": None, "confirmed": False,
+                "source": "alphavantage_earnings_calendar",
+                "error": (f"alphavantage daily request budget exhausted or reserved "
+                          f"({state['used']}/{state['limit']} used today)"),
+                "budget": state}
+
+    params = {"function": "EARNINGS_CALENDAR", "symbol": sym,
+              "horizon": "3month", "apikey": key}
+    text = http_text(_BASE, params=params, timeout=15)
+    _spend(1)
+    if not text:
+        return {"symbol": sym, "next_earnings_date": None, "confirmed": False,
+                "source": "alphavantage_earnings_calendar",
+                "error": "alphavantage earnings calendar request failed"}
+    # Quota/plan errors come back as a JSON body even though a normal
+    # response is CSV — same "200 with a note" shape historical_chain()
+    # already has to detect.
+    stripped = text.lstrip()
+    if stripped.startswith("{"):
+        try:
+            raw = json.loads(text)
+        except Exception:  # noqa: BLE001
+            raw = {}
+        for k in ("Note", "Information", "Error Message"):
+            if isinstance(raw, dict) and raw.get(k):
+                return {"symbol": sym, "next_earnings_date": None, "confirmed": False,
+                        "source": "alphavantage_earnings_calendar",
+                        "error": str(raw[k])[:400]}
+        return {"symbol": sym, "next_earnings_date": None, "confirmed": False,
+                "source": "alphavantage_earnings_calendar",
+                "error": "unexpected (non-CSV) response from alphavantage"}
+
+    try:
+        reader = csv.DictReader(io.StringIO(text))
+        rows = [r for r in reader if str(r.get("symbol") or "").upper() == sym]
+    except Exception as e:  # noqa: BLE001
+        return {"symbol": sym, "next_earnings_date": None, "confirmed": False,
+                "source": "alphavantage_earnings_calendar", "error": f"parse failed: {e!r}"}
+
+    today = _date.today().isoformat()
+    upcoming = sorted((r.get("reportDate") for r in rows
+                       if r.get("reportDate") and r["reportDate"] >= today))
+    out = ({"symbol": sym, "next_earnings_date": upcoming[0], "confirmed": False,
+            "source": "alphavantage_earnings_calendar"}
+           if upcoming else
+           {"symbol": sym, "next_earnings_date": None, "confirmed": False,
+            "source": "alphavantage_earnings_calendar",
+            "note": "no upcoming earnings date returned for this symbol"})
+    try:
+        cache_f.write_text(json.dumps(out))
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # agent-facing tools                                                          #
 # --------------------------------------------------------------------------- #
 def _t_historical(inp: dict) -> dict:
@@ -330,6 +447,16 @@ def get_tools() -> list[dict]:
                             "symbols already have cached chains (free to research)."),
             "input_schema": {"type": "object", "properties": {}},
         },
+        {
+            "name": "av_next_earnings",
+            "description": ("Best-effort next earnings date for a ticker from Alpha Vantage's "
+                            "EARNINGS_CALENDAR (dev request #44 — a free fallback "
+                            "poly_next_earnings reaches for when Polygon's Benzinga add-on "
+                            "isn't on the plan). Shares this module's daily request budget; "
+                            "cached per symbol per day."),
+            "input_schema": {"type": "object", "properties": {"symbol": {"type": "string"}},
+                             "required": ["symbol"]},
+        },
     ]
 
 
@@ -337,4 +464,6 @@ def get_handlers() -> dict[str, Any]:
     if not is_configured():
         return {}
     return {"av_historical_option_chain": _t_historical,
-            "av_options_budget": _t_budget}
+            "av_options_budget": _t_budget,
+            "av_next_earnings": lambda inp: next_earnings_calendar(
+                (inp or {}).get("symbol", ""), reserve=_FALLBACK_RESERVE)}

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import env, http_json
+from .base import env, even_sample_indices, http_json
 
 NAME = "polygon"
 _BASE = "https://api.polygon.io"
@@ -150,9 +150,12 @@ def chain(symbol: str, min_dte: int | None = None, max_dte: int | None = None,
         strikes = sorted({float(k) for k in
                           ((r.get("details") or {}).get("strike_price") for r in rows_e)
                           if k is not None})
-        if spot:
-            strikes.sort(key=lambda k: abs(k - float(spot)))
-        keep = set(strikes[: max(1, int(max_strikes))])
+        # Sample evenly across the (already server-side window-filtered)
+        # strikes rather than taking the closest max_strikes to spot — the
+        # nearest-to-spot cut throws away the OTM wings a premium-selling
+        # short strike actually sits at (dev request #44).
+        idxs = even_sample_indices(len(strikes), max(1, int(max_strikes)))
+        keep = {strikes[i] for i in idxs}
         block = {"expiration": exp, "days_to_expiration": _dte(exp), "strikes": {}}
         for r in rows_e:
             det = r.get("details") or {}

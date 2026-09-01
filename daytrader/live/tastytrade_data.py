@@ -367,6 +367,8 @@ async def _collect_option_chain(
     from tastytrade.dxfeed import Greeks, Quote
     from tastytrade.instruments import OptionType, get_option_chain  # read chain only
 
+    from daytrader.data.feeds.base import even_sample_indices
+
     # 12.x: get_option_chain(session, symbol) -> {expiration_date: [Option, ...]}
     # This blocking HTTP download of the symbol's ENTIRE chain is the phase that
     # was silently eating the whole budget in production — ~10k contracts for
@@ -452,17 +454,20 @@ async def _collect_option_chain(
         options = chain.get(exp_date) or []
         if not options:
             continue
-        # Unique strikes, then pick the N closest to spot (fallback: lowest N).
+        # Unique strikes within the requested window, then sample evenly across
+        # it (see even_sample_indices) rather than taking the N closest to
+        # spot — a 20-30 delta short strike sits well outside the money, so
+        # "closest to spot" throws away exactly the strikes a premium-selling
+        # strategy needs on a fine-strike-grid name (dev request #44: SPY's $1
+        # grid and INTC both capped visible coverage to spot +/- a few dollars
+        # even with strike_pct_window set wide).
         strikes = sorted({_q_num(o.strike_price) for o in options if o.strike_price is not None})
         if spot is not None and strike_pct_window:
-            # A 20-30 delta short strike sits well outside the money, so a
-            # count-based window centred on spot misses exactly the strikes the
-            # premium-selling strategies need. Select by DISTANCE first, then cap.
             span = float(strike_pct_window) / 100.0 * spot
             strikes = [k for k in strikes if k is not None and abs(k - spot) <= span] or strikes
-        if spot is not None:
-            strikes.sort(key=lambda s: abs((s or 0.0) - spot))
-        chosen = set(strikes[: max(1, strikes_around_atr)])
+        strikes.sort()
+        idxs = even_sample_indices(len(strikes), max(1, strikes_around_atr))
+        chosen = {strikes[i] for i in idxs}
 
         exp_key = str(exp_date)
         try:
@@ -738,6 +743,7 @@ def _historical_chain_fallback(symbol, min_dte, max_dte, strike_pct_window,
     """
     try:
         from daytrader.data.feeds import alphavantage as av
+        from daytrader.data.feeds.base import even_sample_indices
         if not av.is_configured():
             return None, ("ALPHAVANTAGE_API_KEY is not visible in this process — set it in "
                           "Settings (and note settings apply on save; a container update "
@@ -788,9 +794,8 @@ def _historical_chain_fallback(symbol, min_dte, max_dte, strike_pct_window,
         for exp in sorted(exps)[: max(1, int(max_expirations))]:
             rows_e = exps[exp]
             strikes = sorted({float(r["strike"]) for r in rows_e if r.get("strike")})
-            if spot:
-                strikes.sort(key=lambda k: abs(k - spot))
-            keep = set(strikes[: max(1, int(max_strikes))])
+            idxs = even_sample_indices(len(strikes), max(1, int(max_strikes)))
+            keep = {strikes[i] for i in idxs}
             block = {"expiration": exp, "days_to_expiration": _dte(exp), "strikes": {}}
             for r in rows_e:
                 k = float(r.get("strike") or 0)

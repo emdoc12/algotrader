@@ -1064,8 +1064,14 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                 "iv_sample_days says how many days deep it is; 'IV Rank > 40' needs it to "
                 "have accumulated real history, not just be nonzero), expected_move per "
                 "expiration (ATM straddle mid, for placing short strikes outside 1.2x it), "
-                "and next_earnings_date/earnings_confirmed (Polygon Benzinga, best-effort) "
-                "so you can filter a name out of a 30-45 DTE condor before it prints."),
+                "and next_earnings_date/earnings_confirmed/earnings_source/earnings_confidence "
+                "plus a per-expiration earnings_inside_expiry boolean — Polygon Benzinga first, "
+                "falling back to Finviz then Alpha Vantage's EARNINGS_CALENDAR (source/"
+                "confidence say which one answered) — so you can filter a name out of a "
+                "30-45 DTE condor before it prints. Strikes are sampled evenly across the "
+                "requested strike_pct_window rather than clustered nearest-the-money, so a "
+                "wide window on a fine-strike-grid name (SPY, INTC) still surfaces the 15-22 "
+                "delta wings a premium-selling short strike actually sits at."),
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -1074,7 +1080,7 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                     "min_dte": {"type": "integer"},
                     "max_dte": {"type": "integer"},
                     "max_expirations": {"type": "integer", "description": "How many expirations (default 2)"},
-                    "strikes": {"type": "integer", "description": "Strikes per expiration, nearest the money first (default 16)"},
+                    "strikes": {"type": "integer", "description": "Strikes per expiration, sampled evenly across strike_pct_window (default 16)"},
                     "strike_pct_window": {"type": "number", "description": "Only strikes within this %% of spot (default 15)"},
                 },
                 "required": ["symbol"],
@@ -1570,5 +1576,33 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
         handlers.update(dhandlers)
     except Exception as e:  # noqa: BLE001 - feeds are optional, never fatal
         print(f"[tools] data feeds unavailable: {e}")
+
+    # Dev request #44: Polygon's Benzinga add-on turned out not to be on the
+    # configured plan (403 on every symbol), which left poly_next_earnings —
+    # the tool desks use to screen a name BEFORE spending a chain fetch on
+    # it — always empty. get_option_chain already fell back through Finviz
+    # then Alpha Vantage via options_analytics.next_earnings; point this tool
+    # at the same aggregator instead of leaving it Polygon-only. The name
+    # stays "poly_next_earnings" (CLAUDE.md: don't rename working interfaces)
+    # even though it now checks more than Polygon.
+    if "poly_next_earnings" in handlers:
+        def _next_earnings_with_fallback(inp: dict) -> dict:
+            from daytrader.live import options_analytics as oa
+            sym = str((inp or {}).get("symbol", "")).upper().strip()
+            res = oa.next_earnings(sym)
+            return res or {"symbol": sym, "next_earnings_date": None, "confirmed": False,
+                          "source": None, "note": "no earnings source configured"}
+        handlers["poly_next_earnings"] = _next_earnings_with_fallback
+        for s in schemas:
+            if s.get("name") == "poly_next_earnings":
+                s["description"] = (
+                    "Best-effort next earnings date for a ticker, with a confirmed/estimated "
+                    "flag and a source field (polygon_benzinga, finviz, or "
+                    "alphavantage_earnings_calendar — whichever answered first). "
+                    "get_option_chain already attaches this for the symbol you're pricing; "
+                    "use this tool directly to screen a name BEFORE spending a chain fetch on "
+                    "it — the single largest tail risk in a 30-45 DTE premium-selling trade is "
+                    "an earnings print inside the window.")
+                break
 
     return schemas, handlers

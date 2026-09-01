@@ -31,10 +31,15 @@ chain that only carries a mark). Attached per expiration on the chain the
 desk already asked for.
 
 NEXT EARNINGS DATE: Polygon's Benzinga earnings add-on (polygon.py's
-next_earnings). A separate optional add-on on top of the base plan the
-options-chain fallback already uses — this module treats "plan doesn't
-include it" the same as any other degraded source: report why, return
-next_earnings_date=None, never block a desk's plan on it.
+next_earnings) tried first, since it carries a real confirmed/estimated flag
+when it answers. Dev request #44: that add-on turned out not to be on the
+configured Polygon plan at all (403 on every symbol, not a transient error),
+which silently narrowed the executable universe for every premium-selling
+lane to whatever names a desk could verify by memory. next_earnings() below
+now falls through Finviz Elite's screener, then Alpha Vantage's
+EARNINGS_CALENDAR, before giving up — same "report why, return
+next_earnings_date=None, never block a desk's plan on it" degrade-and-explain
+handling, just with two more sources to actually exhaust first.
 
 Every function here is defensive and never raises: this is selection
 guidance, not execution data, and a bug in a percentile calculation must
@@ -204,17 +209,86 @@ def expected_move(spot: float | None, block: dict) -> dict | None:
             "low": round(spot - move, 4), "high": round(spot + move, 4)}
 
 
+_EARNINGS_SOURCES = (
+    ("polygon", "daytrader.data.feeds.polygon", "next_earnings"),
+    ("finviz", "daytrader.data.feeds.finviz", "next_earnings"),
+    ("alphavantage", "daytrader.data.feeds.alphavantage", "next_earnings_calendar"),
+)
+
+
 def next_earnings(symbol: str) -> dict | None:
-    """Best-effort next-earnings lookup via Polygon's Benzinga add-on. None if
-    Polygon isn't configured; never raises."""
-    try:
-        from daytrader.data.feeds import polygon as poly
-        if not poly.is_configured():
-            return None
-        return poly.next_earnings(symbol)
-    except Exception as e:  # noqa: BLE001
-        log.info("options_analytics: next_earnings for %s failed (%s)", symbol, e)
+    """Best-effort next-earnings lookup, tried against each configured source
+    in ``_EARNINGS_SOURCES`` order until one returns an actual date (dev
+    request #44). None only if every source is unconfigured or crashed with
+    nothing to report; a source that answered with an error (e.g. Polygon's
+    403 auth_or_plan) still counts as an "attempt" so the caller can see what
+    was tried. Never raises."""
+    import importlib
+
+    attempts: list[dict] = []
+    for _label, mod_name, fn_name in _EARNINGS_SOURCES:
+        try:
+            mod = importlib.import_module(mod_name)
+            if not mod.is_configured():
+                continue
+            res = getattr(mod, fn_name)(symbol)
+        except Exception as e:  # noqa: BLE001
+            log.info("options_analytics: %s earnings for %s failed (%s)", mod_name, symbol, e)
+            continue
+        if not res:
+            continue
+        if res.get("next_earnings_date"):
+            if attempts:
+                res["other_sources_tried"] = [
+                    {"source": a.get("source"), "error": a.get("error") or a.get("note")}
+                    for a in attempts]
+            return res
+        attempts.append(res)
+
+    if not attempts:
         return None
+    out = attempts[0]
+    if len(attempts) > 1:
+        out["other_sources_tried"] = [
+            {"source": a.get("source"), "error": a.get("error") or a.get("note")}
+            for a in attempts[1:]]
+    return out
+
+
+_CONFIDENCE_BY_SOURCE = {"finviz": "estimated", "alphavantage_earnings_calendar": "estimated"}
+
+
+def _earnings_confidence(earn: dict) -> str:
+    source = earn.get("source")
+    if source == "polygon_benzinga":
+        return "confirmed" if earn.get("confirmed") else "estimated"
+    return _CONFIDENCE_BY_SOURCE.get(source, "unknown")
+
+
+def earnings_inside_expiry(next_earnings_date: str | None, chain: dict) -> dict:
+    """Per-expiration ``{exp_key: bool}`` — is the next print between today and
+    that expiration? This is the minimum-viable gate dev request #44 asked
+    for: a desk doesn't need the exact date to skip a name, just whether it
+    falls inside the window it is about to sell premium into. Only populated
+    for expirations where both dates parse; empty (not guessed) when
+    next_earnings_date is unknown."""
+    if not next_earnings_date:
+        return {}
+    try:
+        y, m, d = (int(x) for x in str(next_earnings_date)[:10].split("-"))
+        earn_date = _date(y, m, d)
+    except Exception:  # noqa: BLE001
+        return {}
+    today = _date.today()
+    out = {}
+    for exp_key, block in (chain or {}).items():
+        try:
+            ey, em_, ed = (int(x) for x in str(exp_key)[:10].split("-"))
+            exp_date = _date(ey, em_, ed)
+        except Exception:  # noqa: BLE001
+            continue
+        out[exp_key] = today <= earn_date <= exp_date
+    return out
 
 
 def enrich_chain(symbol: str, spot: float | None, chain: dict) -> dict:
@@ -236,13 +310,24 @@ def enrich_chain(symbol: str, spot: float | None, chain: dict) -> dict:
     except Exception as e:  # noqa: BLE001
         log.info("options_analytics: expected_move for %s failed (%s)", symbol, e)
 
+    out["earnings_confidence"] = "unknown"
     earn = next_earnings(symbol)
     if earn:
         out["next_earnings_date"] = earn.get("next_earnings_date")
         out["earnings_confirmed"] = earn.get("confirmed")
         out["earnings_source"] = earn.get("source")
+        out["earnings_confidence"] = _earnings_confidence(earn)
         if earn.get("note"):
             out["earnings_note"] = earn["note"]
         if earn.get("error"):
             out["earnings_error"] = earn["error"]
+        if earn.get("other_sources_tried"):
+            out["earnings_sources_tried"] = earn["other_sources_tried"]
+
+    try:
+        eie = earnings_inside_expiry(out.get("next_earnings_date"), chain)
+        if eie:
+            out["earnings_inside_expiry"] = eie
+    except Exception as e:  # noqa: BLE001
+        log.info("options_analytics: earnings_inside_expiry for %s failed (%s)", symbol, e)
     return out

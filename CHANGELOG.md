@@ -9,6 +9,85 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.43.0] — 2026-09-01
+
+### Added — earnings-date fallback (Finviz, Alpha Vantage) when Polygon's plan lacks it; wider option-chain strike coverage
+Issue #44. v6.42.0 wired `next_earnings_date`/`earnings_confirmed` into
+`get_option_chain` and `poly_next_earnings` off Polygon's Benzinga add-on —
+but the desk that declared on `iron_condor` verified live that it 403s on
+every symbol (MSFT, AMZN, and every name in every snapshot since it
+shipped). Confirmed against the actual response: `error_code: auth_or_plan`,
+a key IS present, so this is the configured Polygon plan not including the
+Benzinga add-on, not a broken key or a transient fault — no amount of
+retrying fixes it, and re-issuing `POLYGON_API_KEY` is the owner's call on a
+paid add-on, not something this change can do. Since the desk's mitigation
+("skip the name if you can't establish the next print is outside the
+expiry") had narrowed the executable universe for the whole premium-selling
+mandate to two names, this ships the two free fallbacks the issue asked
+for instead of waiting on a plan decision:
+
+* **`options_analytics.next_earnings()`** (feeding both `get_option_chain`
+  and `snapshot["options_analytics"][sym]`) now tries Polygon's Benzinga add-on,
+  then **Finviz Elite's screener** (`finviz.next_earnings`, new), then
+  **Alpha Vantage's `EARNINGS_CALENDAR`** (`alphavantage.next_earnings_calendar`,
+  new — a different, non-premium endpoint from the `HISTORICAL_OPTIONS` this
+  module already uses, cached per symbol per day and sharing the same daily
+  request budget so it can't starve `get_option_chain`'s stale-chain
+  fallback). Each source that answers with a real date wins immediately;
+  a source that fails still gets recorded so the response shows what was
+  tried and why (`earnings_sources_tried`), rather than only ever showing
+  the last failure.
+* **`poly_next_earnings`** (the standalone screening tool) now runs through
+  the same fallback chain instead of Polygon alone — the name stays
+  `poly_next_earnings` per CLAUDE.md (working tool names don't move), even
+  though it now checks more than Polygon. `fv_next_earnings` and
+  `av_next_earnings` are also exposed standalone so a desk can see which
+  source actually answered.
+* **`earnings_confidence`** (`confirmed` for a Polygon-confirmed date,
+  `estimated` for anything from Finviz/Alpha Vantage or an unconfirmed
+  Polygon date, `unknown` if nothing answered) and **`earnings_inside_expiry`**
+  — a per-expiration `{exp_key: bool}` on `get_option_chain` — ship as the
+  minimum-viable version the issue offered as a fallback ask: a desk doesn't
+  need the exact date to gate an entry, just whether the next print falls
+  between today and that expiration.
+
+### Fixed — get_option_chain starved the OTM wings on fine-strike-grid names
+Same issue, its "one more nicety": `strike_pct_window` filtered candidate
+strikes correctly, but the final cap to `strikes` (default 16) then sorted
+by distance-to-spot and took the closest N — which clusters entirely
+near-the-money on a $1-wide grid (SPY, INTC) even when the window was set
+wide, because the 15-22 delta short strike a premium-selling structure
+actually wants sits far from spot. Reproduced: SPY at $1 strikes with a
+15% window (spot ± $82) returned only spot ± $20 of visible coverage.
+`even_sample_indices` (new, `daytrader/data/feeds/base.py`) replaces the
+"closest N" cut with an even sample across the already-window-filtered,
+price-sorted list, guaranteeing both ends of the requested window stay
+visible — applied to all three strike selectors that had the identical
+pattern: the live tastytrade path, the Polygon live-snapshot fallback, and
+the Alpha Vantage historical-chain fallback. Verified: a synthetic SPY-style
+468-632 $1 grid with a 16-strike cap now returns 468 and 632 (previously
+534-566); same check against Polygon's and Alpha Vantage's fallback
+builders.
+
+Verified with `python -c` scripts, no live credentials available in this
+environment: `even_sample_indices` against several (n_items, n_keep) pairs
+including the SPY-grid reproduction; the earnings fallback chain with
+Polygon mocked to 403 and Finviz mocked to answer (confirms the aggregator
+actually falls through rather than stopping at the first configured
+source); Alpha Vantage's CSV and JSON-error-body parsing paths for
+`EARNINGS_CALENDAR`; Finviz's earnings-date-string parser across the
+AMC/BMO/actual-vs-estimate marker formats and year-rollover at the turn of
+the calendar; `enrich_chain`'s `earnings_inside_expiry` against a two-
+expiration synthetic chain (correctly false for the expiration before the
+mocked earnings date, true for the one after); and the `poly_next_earnings`
+tool override end-to-end through `tools.build_tools` with Polygon and
+Finviz mocked. Finviz's exact export view for the Earnings column
+(`v=161`, the "Financial" screener tab) is a best-effort guess, unverified
+against a live Finviz Elite account in this environment — same disclaimer
+already on this file's Finviz Elite integration since it was reconstructed
+after a `.gitignore` loss; it degrades to an explicit "no Earnings column"
+error rather than returning a wrong field if the view id is off.
+
 ## [6.42.0] — 2026-08-31
 
 ### Added — IV rank, expected move, and next-earnings date on get_option_chain
