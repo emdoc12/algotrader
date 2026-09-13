@@ -205,12 +205,22 @@ def _desk_report(name: str, path: str, by_date: dict, min_trades: int) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-dir", default=None)
-    ap.add_argument("--out", default="competition_report.json")
+    # Default INTO the data dir, not the working directory: in the container
+    # /app is ephemeral and invisible from the host, so a report written there
+    # is one `docker restart` from gone and unreachable meanwhile. /app/data is
+    # the mounted volume — the file lands on the host share where the owner can
+    # actually open it.
+    ap.add_argument("--out", default=None,
+                    help="output path (default: <data-dir>/competition_report.json)")
     ap.add_argument("--min-trades", type=int, default=2,
                     help="drop breakdown buckets thinner than this (default 2)")
+    ap.add_argument("--top", type=int, default=4,
+                    help="buckets per dimension in the printed summary (default 4)")
     args = ap.parse_args()
 
     data_dir = args.data_dir or _data_dir()
+    if not args.out:
+        args.out = os.path.join(data_dir, "competition_report.json")
     dbs = _desk_dbs(data_dir)
     if not dbs:
         print(f"no team_*.db found in {data_dir}", file=sys.stderr)
@@ -233,14 +243,45 @@ def main() -> int:
     with open(args.out, "w") as fh:
         json.dump(report, fh, indent=1, default=str)
 
-    print(f"wrote {args.out}  ({os.path.getsize(args.out)/1024:.0f} KB)\n")
-    print(f"{'desk':<10}{'return%':>9}{'P&L':>11}{'PF':>7}{'win%':>7}{'trades':>8}{'maxDD%':>8}")
+    print(f"wrote {args.out}  ({os.path.getsize(args.out)/1024:.0f} KB)")
+    print(f"regime source: {report['regime_source']}\n")
+    print(f"{'desk':<10}{'return%':>9}{'P&L':>11}{'PF':>7}{'win%':>7}{'trades':>8}"
+          f"{'maxDD%':>8}{'exp/trade':>11}")
     rows = [(n, d.get("headline", {})) for n, d in report["desks"].items() if "headline" in d]
     for n, h in sorted(rows, key=lambda r: r[1].get("return_pct", 0), reverse=True):
         pf = h.get("profit_factor")
         print(f"{n:<10}{h.get('return_pct', 0):>9.2f}{h.get('pnl_vs_base', 0):>11,.0f}"
               f"{(pf if pf is not None else float('inf')):>7.2f}{h.get('win_rate', 0):>7.1f}"
-              f"{h.get('n_trades', 0):>8}{h.get('max_drawdown_pct', 0):>8.2f}")
+              f"{h.get('n_trades', 0):>8}{h.get('max_drawdown_pct', 0):>8.2f}"
+              f"{h.get('expectancy', 0):>11,.2f}")
+
+    # A compact text digest, sized to be COPIED out of a terminal. The JSON is
+    # the complete record, but it lands inside a container on a NAS — a report
+    # nobody can get at explains nothing, so the findings that matter print here.
+    KEY_DIMS = ("strategy", "exit_reason", "with_trend", "market_regime", "tod_bucket")
+    for n, d in sorted(report["desks"].items()):
+        bd = d.get("breakdown") or {}
+        if not bd:
+            continue
+        print(f"\n{'='*74}\n{n.upper()}")
+        for dim in KEY_DIMS:
+            groups = bd.get(dim) or []
+            if not groups:
+                continue
+            # Best and worst by TOTAL P&L: the tails are where a decision lives.
+            show = groups[:args.top]
+            if len(groups) > args.top:
+                show = show + [None] + groups[-min(args.top, len(groups) - args.top):]
+            print(f"  {dim}:")
+            for g in show:
+                if g is None:
+                    print(f"    {'...':<22}")
+                    continue
+                pf = g.get("profit_factor")
+                pf_s = "inf" if pf is None else f"{pf:.2f}"
+                print(f"    {g['group'][:22]:<22} n={g['n_trades']:<4} "
+                      f"pnl={g['total_pnl']:>10,.0f}  pf={pf_s:<5} "
+                      f"win={g['win_rate']:>5.1f}%  exp={g['expectancy']:>8,.2f}")
     return 0
 
 

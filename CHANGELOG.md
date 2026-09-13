@@ -9,6 +9,30 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.48.1] — 2026-09-13
+
+### Fixed — the report generator wasn't in the image, and wrote where nobody could reach it
+Two defects that would each have made v6.48.0 useless on the only machine it
+matters on. The Dockerfile copies `daytrader/` and `VERSION` and nothing else,
+so `tools/` never reached the image: `docker exec ... python
+tools/competition_report.py` would have failed with a bare "No such file" on a
+container that self-evidently had the code. `tools/` is now copied in — these
+are operator scripts that run with `docker exec` against a LIVE container,
+because the desk databases only exist inside it.
+
+And the JSON defaulted to the working directory, which in the container is
+`/app` — ephemeral, invisible from the host, one restart from gone. It now
+defaults into the data dir (`/app/data`), the mounted volume, so the file
+lands on the host share where it can actually be opened.
+
+### Added — a compact printed digest, sized to be copied out of a terminal
+The JSON is the complete record but it lands inside a container on a NAS, and
+a report nobody can retrieve explains nothing. The run now also prints, per
+desk, the best AND worst buckets by strategy, exit reason, trend-alignment,
+market regime and time-of-day — with n, P&L, profit factor, win rate and
+expectancy on every line. Both tails print because the decision usually lives
+in them. `--top N` controls the depth.
+
 ## [6.48.0] — 2026-09-13
 
 ### Added — `tools/competition_report.py`: the whole competition, cut every way

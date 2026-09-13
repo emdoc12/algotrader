@@ -49,6 +49,11 @@ RUN pip install --no-cache-dir -r daytrader/live/requirements.txt
 # ── Agent / trading code ─────────────────────────────────────────────────────
 COPY daytrader/ ./daytrader/
 COPY VERSION ./VERSION
+# Operator scripts run with `docker exec` against a LIVE container — the
+# competition report reads the desk databases, which only exist inside it.
+# Left out of the image originally, which made `python tools/...` fail with a
+# bare "No such file" on the one machine where it needed to work.
+COPY tools/ ./tools/
 
 # ── Persistent data directory (per-team SQLite DBs) ──────────────────────────
 RUN mkdir -p /app/data
