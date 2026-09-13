@@ -9,6 +9,25 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.44.1] — 2026-09-13
+
+### Fixed — v6.44.0's crypto lane was never announced to the desks
+The capability shipped, the mission text described it, and the snapshot
+carried a `crypto` section — but none of that reaches a desk that starts its
+cycle by reading `platform_updates` for what is new, which the mission calls
+"not optional reading". That channel is fed by dev-request RESOLUTIONS, and
+an owner-requested capability has no closing issue to broadcast it, so the
+crypto lane would have arrived silently: a desk could go a long time treating
+a 24/7 market as still off-limits, exactly the "carrying a workaround for a
+bug that was fixed last week" failure the mission warns about. Owner-shipped
+capabilities can now be announced straight into every desk's journal under
+the same `dev_resolved` topic, kv-latched per announcement so a restart never
+repeats one, and the crypto lane is the first entry: what trades, the
+off-hours cadence, the stop requirement for unattended holds, and that
+equity/option orders are rejected while the US session is closed. Verified:
+the announcement appears in `platform_updates` and stays at exactly one entry
+across repeated startups.
+
 ## [6.44.0] — 2026-09-13
 
 ### Added — the crypto lane: BTC/ETH/SOL trade 24/7, with throttled off-hours cycles

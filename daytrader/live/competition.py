@@ -156,6 +156,39 @@ def _apply_capital_topup(team: "Team") -> None:
         print(f"[capital] {team.name}: top-up failed: {e!r}")
 
 
+# Owner-shipped capabilities announced straight to every desk's journal under
+# the 'dev_resolved' topic — the same channel dev-request resolutions use, and
+# the one the mission calls "not optional reading" (platform_updates). A
+# capability that ships from an OWNER request has no closing issue to
+# broadcast it, so without this a desk whose habit is "check platform_updates
+# for what's new" would never see it there. kv-latched per announcement, like
+# the capital top-up, so a restart can never repeat one.
+_ANNOUNCEMENTS: list[tuple[str, str]] = [
+    ("crypto_lane_v6_44",
+     "NEW CAPABILITY (v6.44.0): CRYPTO TRADES 24/7. BTC-USD, ETH-USD and "
+     "SOL-USD now trade through place_trade — fractional qty, long or short, "
+     "any hour including weekends. See the snapshot's 'crypto' section for "
+     "live indicators. Off-session you get a throttled decision cycle every "
+     "few hours; stops/targets/trails are enforced every ~2 minutes around "
+     "the clock, so every crypto position MUST carry a stop you would accept "
+     "being filled on unattended. horizon='day' still flattens at the equity "
+     "close; 'swing'/'long' runs through nights and weekends. Equity/option "
+     "orders while the US session is closed are rejected — crypto is what "
+     "trades then. Weekend liquidity is thinner: size down."),
+]
+
+
+def _apply_announcements(team: "Team") -> None:
+    for key, text in _ANNOUNCEMENTS:
+        try:
+            if team.db.kv_get(f"announced_{key}"):
+                continue
+            team.db.add_journal("system", "dev_resolved", text)
+            team.db.kv_set(f"announced_{key}", "done")
+        except Exception:  # noqa: BLE001 - never block startup on an announcement
+            pass
+
+
 def _build_team(name: str, provider) -> Team:
     db = LiveDB(team_db_path(name))
     broker = PaperBroker(db, starting_equity=START_CASH)
@@ -164,6 +197,7 @@ def _build_team(name: str, provider) -> Team:
                 day_start_equity=broker.equity())
     _restore_risk_state(team)
     _apply_capital_topup(team)
+    _apply_announcements(team)
     return team
 
 
