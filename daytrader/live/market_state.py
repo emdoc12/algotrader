@@ -885,6 +885,34 @@ def with_account(market_snap: dict, broker) -> dict:
     except Exception as e:  # noqa: BLE001
         out["risk_state_error"] = str(e)
 
+    # Where this desk stands against the mandate, on the rolling window. The
+    # desks are TOLD the survival rule, deliberately: it only creates pressure
+    # to trade well, never pressure to gamble, because the window has no
+    # deadline and the score prices in the drawdown a gamble opens.
+    try:
+        from daytrader.live import standing as _standing
+        from daytrader.live.competition import (
+            team_names as _tn, team_db_path as _tdp, spy_benchmark as _bench)
+        _b = _bench()
+        _all = _standing.evaluate(_tn(), _tdp,
+                                  (_b or {}).get("return_pct"))
+        _me = broker.db.path.split("team_")[-1].rsplit(".db", 1)[0]
+        _mine = next((r for r in _all["ranked"] + _all["inactive"]
+                      if r["team"] == _me), None)
+        if _mine:
+            out["standing"] = {
+                "you": _mine,
+                "field": [{k: r[k] for k in
+                           ("team", "rank", "risk_score", "annualized_pct",
+                            "max_drawdown_pct", "n_trades", "status")}
+                          for r in _all["ranked"]],
+                "benchmark_spy_return_pct": _all["spy_return_pct"],
+                "targets": _all["targets"],
+                "rule": _all["rule"],
+            }
+    except Exception:  # noqa: BLE001 - standing is informational, never fatal
+        pass
+
     # Signals from THIS desk's deployed (out-of-sample-validated) strategies.
     # Per-team, so it belongs here rather than in the shared market snapshot.
     try:

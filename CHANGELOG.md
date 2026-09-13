@@ -9,6 +9,43 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.50.0] — 2026-09-13
+
+### Added — the mandate, and a relegation rule that cannot be gamed
+The desks now have explicit targets and know how they are judged: beat a
+buy-and-hold of SPY, clear 8% annualized as a floor, aim for 15-30%. Last
+place is relegated. Telling them that is normally dangerous — a desk behind at
+a deadline has every incentive to increase variance, since a coin-flip that
+might save it costs nothing when the downside is elimination either way. It is
+a documented effect in real fund management, and it would corrupt exactly the
+record the owner is using to choose a manager.
+
+Two design choices make announcing it safe, and both are in `standing.py`:
+
+**The window rolls.** Every desk is judged on a trailing 90 days that moves
+with it. There is no quarter-end, no date that matters more than another, and
+therefore no moment at which taking risk you would not otherwise take becomes
+rational. The deadline is what creates the gamble, so there is no deadline.
+
+**The score prices in the risk.** Ranking is annualized return DIVIDED BY max
+drawdown, not raw return. Verified with two desks posting the identical +6%
+window return: the one that ground it out through a 0.2% drawdown scores
+49.95, the one that took a 20% crater to get to the same place scores 2.50 and
+is the desk at risk. Trading bigger to catch up actively sinks you. Drawdown
+is floored at 1% so a barely-traded book cannot manufacture a huge ratio from
+a rounding-error denominator.
+
+Two further guards. Fewer than 20 closed trades in the window marks a desk
+`inactive` — its own failure category, not a safe mid-table, because a desk
+that will not take positions is not doing the job and relegating on seven
+trades would be relegating on noise. And window return subtracts any owner
+deposit landing inside it (verified: a $2,000 top-up drops measured return
+from 6.00% to 2.00%), so capital given can never read as capital earned.
+
+Each desk sees its own standing every cycle — rank, score, drawdown, the whole
+field, and whether it is currently the one at risk — alongside the rule itself,
+stated so it reads as an incentive to trade well rather than a countdown.
+
 ## [6.49.0] — 2026-09-13
 
 ### Changed — Claude is retired from the competition; its record stays on the board
