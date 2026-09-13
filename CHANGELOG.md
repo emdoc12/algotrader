@@ -9,6 +9,20 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.48.2] — 2026-09-13
+
+### Fixed — the report's bull/bear dimension labelled 14 trades out of 331
+The first real run came back with `market_regime: unknown` for 96% of every
+desk's book, which reads as "the data isn't there" — it wasn't. The regime
+lookup asked the loader for SPY daily bars at the interval's default range of
+`max`, and Yahoo answers `range=max&interval=1d` with a DOWNSAMPLED series:
+405 rows spanning 1993-2026, roughly monthly. Every lookup here is by exact
+trade date, so against a monthly series almost nothing matches. Asking for a
+bounded `rng="2y"` returns true daily bars (501 rows) and the dimension works:
+on a 60-trade sample spread across the real date range, 40 label as
+bull/flat/bear and the 20 that stay unknown are weekend timestamps, which is
+correct. Re-run the report to get the bull-vs-bear cut on the real book.
+
 ## [6.48.1] — 2026-09-13
 
 ### Fixed — the report generator wasn't in the image, and wrote where nobody could reach it

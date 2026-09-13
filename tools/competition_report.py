@@ -59,7 +59,15 @@ def _spy_regime_by_date() -> dict:
     """
     try:
         from daytrader.data import loader
-        df = loader.load("SPY", interval="1d", max_age_hours=24)
+        # rng="2y", NOT the interval's default of "max": Yahoo answers
+        # range=max&interval=1d with a DOWNSAMPLED series — 405 rows spanning
+        # 1993-2026, i.e. roughly monthly. Every lookup here is by exact trade
+        # date, so against that series almost nothing matches: the first run of
+        # this report labelled 14 of 331 trades and reported the rest
+        # "unknown", which reads as a data gap rather than the wrong range
+        # being asked for. A bounded range returns true daily bars (501 rows
+        # for 2y), which is what a per-date lookup needs.
+        df = loader.load("SPY", interval="1d", rng="2y", max_age_hours=24)
         if df is None or len(df) < 30:
             return {}
         close = df["close"]
