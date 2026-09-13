@@ -707,8 +707,12 @@ class Competition:
             try:
                 t.broker.manage_positions(cycle_quotes, atr, adx, only_symbols=cset)
                 if not t.halted and not self._provider_paused(t):
-                    res = t.desk.trade_cycle(with_account(market, t.broker))
-                    self._record_usage(t, "trader", res)
+                    # The LEAN agent, not the full session trader: off-hours
+                    # cycles run around the clock, so 92% of a full cycle's
+                    # tokens being unusable equity/options boilerplate is a
+                    # recurring bill, not a one-off inefficiency.
+                    res = t.desk.crypto_cycle(with_account(market, t.broker))
+                    self._record_usage(t, "crypto_trader", res)
                     self._note_provider_result(t, res)
             finally:
                 t.broker.set_cycle_quotes(None)

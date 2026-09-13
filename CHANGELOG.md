@@ -9,6 +9,36 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.45.0] — 2026-09-13
+
+### Changed — off-hours crypto cycles run a lean agent: 67% fewer tokens each
+The first off-hours cycles reused the full session trader, which meant every
+3am crypto cycle re-sent the entire equity/options mission and all 40 tool
+schemas — option chains, backtests, futures contract specs, equity staging —
+none of which a three-symbol crypto cycle can act on, since equity and option
+orders are rejected while the US session is closed. Measured: 18,143 tokens
+per iteration, of which 16,656 (92%) was that unusable boilerplate and only
+1,487 was actual market data. Off-hours cycles run around the clock, so that
+waste is a recurring bill rather than a one-off inefficiency.
+
+There is now a dedicated off-hours agent (`_crypto_trader`, reached via
+`TradingTeam.crypto_cycle`) carrying 15 crypto-relevant tools instead of 40
+and a crypto-specific mission instead of the full one: what trades now, the
+off-hours clock (stops enforced every ~2 min, judgment only every few hours,
+so every unattended position needs a stop worth being filled on), the same
+enforced risk rails, and an explicit statement that sitting flat is a normal
+and often correct outcome. Iterations are capped at 6 rather than 14 — with
+three symbols and no research surface, a cycle needing 14 turns is a lost one.
+It also tells the desk plainly not to plan equity trades here: that belongs to
+the Strategist at the open.
+
+Per-iteration cost drops 18,143 → 5,949 tokens (67%). Across all seven desks
+the off-hours lane costs $41/month at the current 3-hour cadence (was $90),
+and a hypothetical 24/7 15-minute cadence would cost ~$493/month rather than
+~$1,081. Verified: every tool in the slim list exists and has a live handler,
+no options/futures/backtest/staging tool leaks in, and `crypto_all` routes to
+the slim agent with the crypto snapshot intact.
+
 ## [6.44.2] — 2026-09-13
 
 ### Fixed — the crypto note told desks the off-hours rules even during market hours

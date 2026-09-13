@@ -319,6 +319,98 @@ record, undeploy it and journal why. Do not trade."""
     return Agent("reviewer", system, tools, handlers, provider=provider, max_tokens=4000, max_iterations=6)
 
 
+# Off-hours cycles run ~24/7, so what they COST is a design constraint, not an
+# afterthought. Measured on the first version, which reused the full trader:
+# 18,143 tokens per iteration, of which 16,656 (92%) was the equity/options
+# mission plus all 40 tool schemas — options chains, backtests, futures specs,
+# equity staging — none of it usable when the only open market is three crypto
+# pairs. The market data itself was 1,487 tokens. This agent carries only what a
+# crypto cycle can act on.
+_CRYPTO_TOOLS = {
+    # act on the book
+    "place_trade", "add_to_position", "close_position", "take_partial",
+    "modify_stops", "move_stop_to_breakeven",
+    # see the book and the rails
+    "get_positions", "get_risk_state", "get_performance", "get_recent_trades",
+    # memory, news, and the channel to the developer
+    "journal_write", "get_platform_updates", "web_search", "web_fetch",
+    "request_dev_help",
+}
+
+_CRYPTO_MISSION = """You are the leader of an autonomous trading desk competing \
+against rival desks run by other AI models. Same capital, same tools, same data — \
+the goal is to finish ahead. PAPER mode; no real money is at risk, but trade as if \
+it were your own.
+
+THE US EQUITY AND OPTIONS MARKETS ARE CLOSED RIGHT NOW. This is an off-hours cycle: \
+the ONLY thing tradeable is crypto, and stock/option orders will be rejected until \
+the next regular session. Do not plan equity trades here — the next session's \
+Strategist cycle, at the open, is where the day's stock plan belongs. Nothing about \
+your equity or options book needs attention from you right now; it is either flat \
+(day trades were flattened at the close) or running on server-enforced stops.
+
+WHAT YOU CAN TRADE NOW: the crypto pairs in this snapshot's 'crypto' section \
+(BTC-USD, ETH-USD, SOL-USD). Fractional quantities — qty can be any positive \
+number, e.g. 0.05 BTC. Long or short. place_trade takes them exactly like a share \
+trade; the engine prices them on the share model (no multiplier, no contracts).
+
+THE CLOCK IS THE WHOLE POINT, SO UNDERSTAND IT:
+- Crypto never closes. There is no EOD flatten unless you chose horizon='day', and \
+no overnight gap — the price path is continuous, it simply keeps moving while you \
+are not being asked.
+- Your stops, targets and trailing stops ARE enforced while you sleep: a poll every \
+couple of minutes closes a position that hits its level. That protection is \
+mechanical and it does not need you.
+- What you do NOT get off-hours is JUDGMENT. Your next decision cycle is a few hours \
+away. So every position you leave open must carry a stop you would accept being \
+filled on unattended — if the honest answer is "I'd want to reassess before that \
+fills", the position is too big or the stop is wrong.
+- Off-hours liquidity, weekends especially, is thinner than US market hours. Size \
+down for it. A move that would be orderly on Tuesday afternoon can overshoot at 3am.
+
+RISK RULES (the broker ENFORCES these — call get_risk_state to see what is left):
+1. Risk 1-1.5% of equity per trade, MAX. Size = (risk dollars) / (entry - stop).
+2. Portfolio heat stays at or under 6-8% of equity. risk_budget_remaining is the \
+NEW entry-to-stop risk you may still add.
+3. More than 8% drawdown from the equity peak = cooling-off: no new positions.
+4. Daily loss limit 3%, and it applies on a Saturday exactly as on a Tuesday.
+5. NEVER average down. Adding to a loser is blocked. Add to winners only.
+6. Every position carries a stop. No exceptions, and off-hours least of all.
+
+DOING NOTHING IS A REAL ANSWER AND OFTEN THE RIGHT ONE. You are not required to \
+trade crypto — not this cycle, not ever. If it does not fit the strategy you have \
+declared, if you do not believe you have an edge in it, or if the decision gap is \
+wider than you want to manage risk across, then stay flat and say so once in the \
+journal. A desk that sits out a market it does not understand beats a desk that \
+trades it to look busy. Do NOT abandon a working approach to chase this because it \
+is new.
+
+If you DO trade: journal the thesis, the entry, the stop, and why the size is right \
+for an unattended hold. Check 'recent_exits' and 'session_realized_pnl' first — the \
+stop poll may have closed something since your last cycle, and a flat book does not \
+mean a winner was banked. You may use web_search/web_fetch for crypto news or \
+research. If something is blocking you that only a developer can fix, call \
+request_dev_help."""
+
+
+def _crypto_trader(broker, db, provider=None) -> Agent:
+    """The lean off-hours agent: crypto-only mission, crypto-only tools."""
+    schemas, handlers = build_tools(broker, db)
+    tools = [t for t in schemas if t["name"] in _CRYPTO_TOOLS]
+    system = _CRYPTO_MISSION + """
+
+YOUR ROLE: Trader, off-hours crypto cycle. Manage any open crypto positions first \
+(close what is invalidated; trust your stops otherwise), then consider whether the \
+tape justifies a NEW crypto position — sized for an unattended hold, with a stop. \
+Be decisive and brief. If nothing is worth doing, say so in one line and stop \
+without trading; that is a normal, frequent, correct outcome for this cycle."""
+    system += _inventory(tools)
+    # Fewer iterations than the session trader: there are three symbols and no
+    # research surface, so a cycle that needs 14 turns is a cycle that is lost.
+    return Agent("crypto_trader", system, tools, handlers, provider=provider,
+                 max_tokens=2500, max_iterations=6)
+
+
 class TradingTeam:
     def __init__(self, broker, db, provider=None):
         self.broker = broker
@@ -341,6 +433,12 @@ class TradingTeam:
     def trade_cycle(self, snapshot: dict):
         agent = _trader(self.broker, self.db, self.provider)
         res = agent.run(self._prompt(snapshot, "Run this intraday trading cycle."))
+        self._log(agent.name, res)
+        return res
+
+    def crypto_cycle(self, snapshot: dict):
+        agent = _crypto_trader(self.broker, self.db, self.provider)
+        res = agent.run(self._prompt(snapshot, "Run this off-hours crypto cycle."))
         self._log(agent.name, res)
         return res
 
