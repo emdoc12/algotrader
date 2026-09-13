@@ -9,6 +9,35 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.48.0] — 2026-09-13
+
+### Added — `tools/competition_report.py`: the whole competition, cut every way
+Months of trading with six of seven desks under 1% is a result that deserves
+a proper post-mortem, and nothing existed to produce one across all desks at
+once — `get_performance_breakdown` answers for a single desk inside a single
+cycle. This reads every `team_*.db` and emits one JSON document: per-desk
+headline (return, P&L vs capital base, profit factor, win rate, expectancy,
+max drawdown from the real equity curve, trade count, options structures,
+journal/hypothesis counts, lifetime API cost) plus the full trade record cut
+by strategy, direction, trend-alignment, time-of-day, exit reason, symbol,
+month — and by MARKET REGIME.
+
+Regime is RECONSTRUCTED rather than read, because nothing has ever recorded
+"was this a bull tape" at entry time: each trade is labelled from SPY's own
+daily bars at its entry date (20-session return, bull >+2% / bear <-2%, plus
+a realized-vol bucket). If those bars cannot be loaded the dimension is
+omitted entirely rather than guessed — an unlabelled trade is not evidence,
+and the report says which source it used. Buckets thinner than `--min-trades`
+are dropped for the same reason.
+
+Expectancy per trade is reported alongside win rate in every bucket, since
+that is the number that decides whether a bucket is worth repeating: a 70%
+win rate with an average loss larger than the average win is a losing bucket,
+and win rate alone hides it. Verified end-to-end against four synthetic desks
+with 120 trades each: all nine dimensions populate, regime labelling resolves
+against live SPY bars, and per-desk failures are isolated so one bad database
+cannot lose the rest of the report.
+
 ## [6.47.1] — 2026-09-13
 
 ### Changed — the 15-minute off-hours trial is cancelled before it ran a full day
