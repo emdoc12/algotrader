@@ -9,6 +9,31 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.44.2] — 2026-09-13
+
+### Fixed — the crypto note told desks the off-hours rules even during market hours
+Every desk that was asked about the new lane declined it, citing the 3-hour
+decision gap and thin weekend liquidity — sound risk management, but reached
+partly from a false premise the snapshot was feeding them. `_CRYPTO_NOTE` was
+one fixed string describing the OFF-SESSION regime ("you only get a DECISION
+cycle every few hours"), and it rode along in the in-session snapshot too,
+where it is simply untrue: during the equity session crypto gets the same
+~15-minute cycles as every other instrument, with the deepest liquidity of
+the 24/7 curve. A desk reading that on a Tuesday morning would correctly
+conclude "crypto means unattended risk" — from a constraint that did not
+apply to the hours it was actually trading. The note is now computed per
+snapshot and states the regime the desk is ACTUALLY in when it reads it:
+in-session, that crypto is attended exactly like an equity and the reduced
+cadence applies only to positions deliberately carried past the close;
+off-session, the existing unattended-stop warning, naming the specific reason
+the session is closed. Session state comes from `tools.equity_session_closed`,
+so the note and the order gate can never disagree. Verified both branches
+render correctly and neither leaks the other's constraint.
+
+Note this changes only the accuracy of what the desks are told, not what they
+are asked to do: declining the lane remains an entirely legitimate answer,
+and several desks may still decline it on the corrected facts.
+
 ## [6.44.1] — 2026-09-13
 
 ### Fixed — v6.44.0's crypto lane was never announced to the desks

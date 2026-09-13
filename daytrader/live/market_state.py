@@ -681,13 +681,42 @@ def crypto_universe() -> list[str]:
     return [s.strip().upper() for s in raw.split(",") if s.strip()]
 
 
-_CRYPTO_NOTE = (
-    "Crypto trades 24/7 with NO closing bell: there is no EOD flatten unless you "
-    "chose horizon='day', and no overnight 'gap' — the price path is continuous "
-    "but moves while US equities sleep. Off-session your stops are enforced by a "
-    "poll every couple of minutes, and you only get a DECISION cycle every few "
-    "hours — so every crypto position must carry a stop it can live with "
-    "unattended. Weekend liquidity is thinner; size down accordingly.")
+def _crypto_note() -> str:
+    """What the crypto constraints ARE RIGHT NOW — not a blanket warning.
+
+    The first version of this shipped one fixed string that described the
+    off-session regime ("you only get a DECISION cycle every few hours"), and
+    it rode along in-session too, where it is simply FALSE: during the equity
+    session crypto gets the same ~15-minute cycles as everything else. Desks
+    read it as "crypto means unattended risk" and declined the lane on a
+    constraint that did not apply to the hours they were actually trading —
+    a correct decision from a wrong fact. The note now states the regime the
+    desk is in when it reads it.
+    """
+    common = ("Crypto trades 24/7 with NO closing bell: no EOD flatten unless you "
+              "chose horizon='day', and no overnight 'gap' — the price path is "
+              "continuous, it simply keeps moving while US equities sleep. ")
+    try:
+        from daytrader.live.tools import equity_session_closed
+        closed = equity_session_closed()
+    except Exception:  # noqa: BLE001
+        closed = None
+    if closed:
+        return common + (
+            f"RIGHT NOW the US session is closed ({closed}), so this is the "
+            "off-hours regime: stops/targets/trails are enforced by a poll every "
+            "couple of minutes, but your next DECISION cycle is a few hours away. "
+            "Every position you leave open must carry a stop you would accept "
+            "being filled on unattended. Off-hours liquidity — weekends "
+            "especially — is thinner than weekday US hours; size down.")
+    return common + (
+        "RIGHT NOW the US session is OPEN, so crypto trades on the SAME cadence "
+        "as your equities: a decision cycle every ~15 minutes, with stops "
+        "enforced every couple of minutes, and this is the deepest part of the "
+        "24/7 liquidity curve. The reduced off-hours cadence applies only to "
+        "positions you deliberately carry past the close — an intraday crypto "
+        "trade taken and closed inside the session is attended exactly like an "
+        "equity one.")
 
 
 def _crypto_block(interval: str = "5m") -> dict:
@@ -709,7 +738,7 @@ def _crypto_block(interval: str = "5m") -> dict:
                for sym, df in data.items() if sym in syms}
         if not per:
             return {}
-        return {"note": _CRYPTO_NOTE, "market": per, "quotes": qmap}
+        return {"note": _crypto_note(), "market": per, "quotes": qmap}
     except Exception:  # noqa: BLE001 - crypto view is additive, never fatal
         return {}
 
