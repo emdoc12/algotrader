@@ -9,6 +9,46 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.47.0] — 2026-09-13
+
+### Fixed — the off-hours agent could not do the one thing every desk said it would do
+Asked what they would do with a 15-minute off-hours cadence, every desk
+answered some version of "research and observe". None of them could: v6.45.0's
+lean agent carried 15 tools and not one of them was a research tool — no
+`get_performance_breakdown`, no backtests, no `propose_hypothesis`, no
+`research_log`, no `deploy_strategy`. The cycles could stare at three crypto
+pairs and write about them, nothing more, so the September trial would have
+measured a capability the desks had already declined instead of the one they
+asked for. The research surface is now in the off-hours agent (25 tools, still
+no options/futures/equity-staging) and the role prompt puts research second in
+the cycle and says plainly it is often the better use of it. None of this
+needs an open market: backtests run on cached bars, the breakdown reads the
+desk's own trade record, and hypotheses are judged later out-of-sample — so
+the quiet hours are the cheapest research time the desks get.
+
+### Fixed — a desk re-writing one thought could crowd its own memory out
+The Claude desk reported writing itself the identical journal note nine times.
+At the 3-hour cadence that is merely funny; at 15 minutes it is ~77 copies a
+day per desk, enough to push an entire session's real trading narrative out of
+the 40-entry recency window the next morning's Strategist reads — the journal
+is the desks' memory, and filling it with copies of one thought is how the
+memory stops working. `add_journal` now COALESCES a repeat of a recent entry
+(same author + topic + normalized text, within the last 40 of that pair)
+instead of appending: it bumps the timestamp and a new `repeats` count, so
+nothing is lost and the entry additionally records how persistently the desk
+has been thinking it — the more useful signal. `journal_write` returns the
+count and, past the first repeat, tells the desk it is re-deriving a standing
+condition rather than making progress, and to act on it, escalate it with
+`request_dev_help`, or let it rest. Verified: nine identical writes collapse
+to one row with repeats=9, case/punctuation variants collapse with it, a
+genuinely different note still appends, and the same text under a different
+author or topic is never merged.
+
+Cost note: the research tools take the off-hours agent from 4,461 to 9,698
+fixed tokens, so the September trial runs ~$745/month while active (~$422 for
+its 17 days) rather than ~$493. Still well under the ~$1,081 the un-slimmed
+agent would have cost, and it now funds the work the desks actually intend.
+
 ## [6.46.0] — 2026-09-13
 
 ### Added — September trial: off-hours crypto runs a full 15-minute cadence, and expires on its own

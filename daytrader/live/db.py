@@ -213,6 +213,7 @@ class LiveDB:
     def _migrate(self) -> None:
         """Backfill columns added after the original schema shipped."""
         try:
+            self._ensure_column("journal", "repeats", "INTEGER DEFAULT 1")
             self._ensure_column("option_positions", "open_commission", "REAL DEFAULT 0")
             self._ensure_column("dev_requests", "report_count", "INTEGER DEFAULT 1")
             self._ensure_column("dev_requests", "last_reported_ts", "TEXT")
@@ -408,7 +409,47 @@ class LiveDB:
     # ------------------------------------------------------------------ #
     # journal (agent memory)                                             #
     # ------------------------------------------------------------------ #
-    def add_journal(self, author: str, topic: str, note: str) -> int:
+    @staticmethod
+    def _journal_key(note: str) -> str:
+        """Normalized form for duplicate detection: case, whitespace and
+        punctuation folded away, so two notes that say the same thing in
+        slightly different keystrokes collapse to one key."""
+        import re
+        return re.sub(r"[^a-z0-9 ]+", "", str(note or "").lower()).strip()
+
+    def add_journal(self, author: str, topic: str, note: str,
+                    dedupe_within: int = 40) -> int:
+        """Append a journal entry, COALESCING an immediate repeat of itself.
+
+        A desk that re-derives the same conclusion every cycle used to append it
+        every cycle: the Claude desk reported writing itself an identical note
+        nine times, and at a 15-minute off-hours cadence that becomes ~77 a day
+        per desk — enough to push a whole session's real trading narrative out
+        of the 40-entry recency window the next morning's Strategist reads. The
+        journal is the desks' memory; filling it with copies of one thought is
+        how the memory stops working.
+
+        So an entry matching a recent one (same author + topic + normalized
+        text, within the last ``dedupe_within`` entries) bumps that entry's
+        timestamp and repeat count instead of adding a row. Nothing is lost —
+        the note still says what it said, and now also says how persistently the
+        desk has been thinking it, which is the more useful signal.
+        """
+        note = str(note or "")
+        key = self._journal_key(note)
+        if key:
+            cur = self.conn.execute(
+                "SELECT id, note, repeats FROM journal WHERE author=? AND topic=? "
+                "ORDER BY id DESC LIMIT ?", (author, topic, int(dedupe_within)))
+            for row in cur.fetchall():
+                if self._journal_key(row["note"]) != key:
+                    continue
+                repeats = int(row["repeats"] or 1) + 1
+                self.conn.execute(
+                    "UPDATE journal SET ts=?, repeats=? WHERE id=?",
+                    (_now_iso(), repeats, row["id"]))
+                self.conn.commit()
+                return int(row["id"])
         cur = self.conn.execute(
             "INSERT INTO journal (ts, author, topic, note) VALUES (?, ?, ?, ?)",
             (_now_iso(), author, topic, note),

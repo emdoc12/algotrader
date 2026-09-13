@@ -965,10 +965,24 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
         # built before this write, so your entry won't appear there; it IS saved
         # and carries to the next session (topic 'lesson'/'plan' surface in
         # 'recent_lessons'). This confirmation stops the "silently dropped" doubt.
-        persisted = any(j.get("id") == jid for j in db.recent_journal(limit=5))
-        return {"ok": True, "id": jid, "persisted": persisted,
-                "note": "Saved. Not in your current snapshot (built pre-write); "
-                        "visible to all roles next cycle and carried forward as a lesson/plan."}
+        row = next((j for j in db.recent_journal(limit=5) if j.get("id") == jid), None)
+        repeats = int((row or {}).get("repeats") or 1)
+        out = {"ok": True, "id": jid, "persisted": row is not None, "repeats": repeats,
+               "note": "Saved. Not in your current snapshot (built pre-write); "
+                       "visible to all roles next cycle and carried forward as a lesson/plan."}
+        if repeats > 1:
+            # Tell the desk it is repeating itself, rather than letting it
+            # rediscover that by counting copies later. A note written N times
+            # is a standing condition nothing has resolved — either act on it,
+            # escalate it with request_dev_help, or stop re-deriving it.
+            out["note"] = (
+                f"Saved by UPDATING your existing identical note — you have now written "
+                f"this same thing {repeats} times, so it was coalesced rather than "
+                "duplicated (your journal is memory; N copies of one thought crowds out "
+                "everything else). If it keeps being true and nothing has changed it, "
+                "that is a standing condition: act on it, file it with request_dev_help, "
+                "or let it rest — writing it again will not move it.")
+        return out
 
     def request_dev_help(inp: dict) -> dict:
         res = file_dev_request(inp["title"], inp.get("body", ""), inp.get("labels"), db=db)

@@ -335,6 +335,17 @@ _CRYPTO_TOOLS = {
     # memory, news, and the channel to the developer
     "journal_write", "get_platform_updates", "web_search", "web_fetch",
     "request_dev_help",
+    # RESEARCH. Added after every desk, asked what it would do with a 15-minute
+    # off-hours cadence, answered "research" — and could not: the first cut of
+    # this list had none of these, so the cycles could only stare at three
+    # crypto pairs and journal about them. Research is the right use of idle
+    # cycles and works fine at 3am: backtests run on cached bars, the breakdown
+    # reads stored trades, and hypotheses are judged later out-of-sample. None
+    # of it needs an open market.
+    "get_performance_breakdown", "backtest_strategy", "backtest_custom_strategy",
+    "save_custom_strategy", "list_custom_strategies", "propose_hypothesis",
+    "research_log", "deploy_strategy", "undeploy_strategy",
+    "list_deployed_strategies",
 }
 
 _CRYPTO_MISSION = """You are the leader of an autonomous trading desk competing \
@@ -399,11 +410,25 @@ def _crypto_trader(broker, db, provider=None) -> Agent:
     tools = [t for t in schemas if t["name"] in _CRYPTO_TOOLS]
     system = _CRYPTO_MISSION + """
 
-YOUR ROLE: Trader, off-hours crypto cycle. Manage any open crypto positions first \
-(close what is invalidated; trust your stops otherwise), then consider whether the \
-tape justifies a NEW crypto position — sized for an unattended hold, with a stop. \
-Be decisive and brief. If nothing is worth doing, say so in one line and stop \
-without trading; that is a normal, frequent, correct outcome for this cycle."""
+YOUR ROLE: Trader and researcher, off-hours cycle. In order:
+1. Manage any open crypto positions (close what is invalidated; trust your stops \
+otherwise), and consider whether the tape justifies a NEW crypto position — sized \
+for an unattended hold, with a stop.
+2. Then USE THE REST OF THE CYCLE FOR RESEARCH, which is very often the better use \
+of it. You have the full research surface here: get_performance_breakdown to see \
+which of your setups and session-windows actually make money, backtest_strategy and \
+backtest_custom_strategy to measure an idea instead of guessing at it, \
+save_custom_strategy to keep one that works, propose_hypothesis to pre-register a \
+genuinely new idea for out-of-sample judging, and deploy_strategy to put an ACCEPTED \
+hypothesis to work feeding your Trader mechanical signals. None of that needs an \
+open market — backtests run on cached bars and the breakdown reads your own trade \
+record — so these quiet hours are the cheapest research time you get.
+
+Be decisive and brief. Trading nothing this cycle is a normal, frequent, correct \
+outcome; finishing a cycle having neither traded NOR learned anything is the one \
+outcome worth avoiding. And do not re-write a journal note you have already written \
+— if the system tells you an entry was coalesced, you are re-deriving a standing \
+condition rather than making progress on it."""
     system += _inventory(tools)
     # Fewer iterations than the session trader: there are three symbols and no
     # research surface, so a cycle that needs 14 turns is a cycle that is lost.
