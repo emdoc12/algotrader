@@ -7,6 +7,8 @@ auditable is what makes an autonomous trader safe to run unattended.
 """
 from __future__ import annotations
 
+from datetime import time as dtime
+
 from daytrader.core.types import Side
 from daytrader.live.db import team_from_db as _team_from_db
 from daytrader.live.dev_requests import file_dev_request
@@ -50,9 +52,66 @@ def unsupported_instrument(symbol) -> str | None:
                 "assignment and exercise properly. get_option_chain gives you the strikes "
                 "and Greeks to build it from.")
     if "-USD" in s or "-USDT" in s:
-        return (f"{s} is a crypto pair. It trades 24/7, so the EOD flatten and the "
-                "session-based risk model do not apply. Use a listed proxy "
-                "(IBIT, BITO, COIN, MSTR).")
+        from daytrader.live.market_state import crypto_universe
+        allowed = crypto_universe()
+        if s in allowed:
+            return None   # whitelisted crypto pair — trades 24/7, share model
+        return (f"{s} is not on the tradeable crypto whitelist. Supported pairs: "
+                f"{', '.join(allowed) or '(crypto lane disabled)'}. The whitelist is "
+                "deliberately short: paper fills come from the last-trade quote, "
+                "which is only honest for deep, liquid pairs.")
+    return None
+
+
+def _crypto_syms() -> set:
+    try:
+        from daytrader.live.market_state import crypto_universe
+        return set(crypto_universe())
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def equity_session_closed() -> str | None:
+    """A reason string when the US equity session is closed, else None.
+
+    Exists because desks now get DECISION CYCLES around the clock for crypto —
+    and an equity order placed at 2am Saturday would 'fill' at Friday's close,
+    a price nobody can actually trade. Weekends, NYSE holidays, and anything
+    outside 09:30-16:00 ET count as closed.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo("America/New_York"))
+    holidays: set = set()
+    try:  # lazy: competition imports tools (via agents), never the reverse
+        from daytrader.live.competition import _MARKET_HOLIDAYS
+        holidays = _MARKET_HOLIDAYS
+    except Exception:  # noqa: BLE001
+        pass
+    if now.weekday() >= 5:
+        return "it is the weekend"
+    if now.date().isoformat() in holidays:
+        return "today is a US market holiday"
+    t = now.time()
+    if t < dtime(9, 30) or t >= dtime(16, 0):
+        return f"it is {now.strftime('%H:%M')} ET, outside the 09:30-16:00 session"
+    return None
+
+
+def _session_gate(symbol) -> str | None:
+    """Reject an equity/futures/options OPEN while the US session is closed.
+    Crypto passes at any hour — that is the whole point of the crypto lane."""
+    s = str(symbol or "").upper().strip()
+    if s in _crypto_syms():
+        return None
+    closed = equity_session_closed()
+    if closed:
+        return (f"The US equity market is CLOSED ({closed}) — an order in {s} now "
+                "would fill at the last session's stale price, which nobody can "
+                "actually trade. Only the crypto pairs "
+                f"({', '.join(sorted(_crypto_syms())) or 'none configured'}) trade "
+                "24/7. Stage the equity idea with stage_order instead; it fires "
+                "next session once its conditions hold.")
     return None
 
 
@@ -77,7 +136,7 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
             return {"ok": False, "error": "qty must be a number"}
         if qty <= 0:
             return {"ok": False, "error": "qty must be positive"}
-        bad = unsupported_instrument(inp.get("symbol"))
+        bad = unsupported_instrument(inp.get("symbol")) or _session_gate(inp.get("symbol"))
         if bad:
             return {"ok": False, "error": bad}
         res = broker.open(
@@ -99,7 +158,7 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
     def add_to_position(inp: dict) -> dict:
         """Scale into an existing position, blending to one averaged position."""
         inp = inp or {}
-        bad = unsupported_instrument(inp.get("symbol"))
+        bad = unsupported_instrument(inp.get("symbol")) or _session_gate(inp.get("symbol"))
         if bad:
             return {"ok": False, "error": bad}
         try:
@@ -353,6 +412,12 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
     def place_option_trade(inp: dict) -> dict:
         """Open a multi-leg options position (defined risk only)."""
         inp = inp or {}
+        closed = equity_session_closed()
+        if closed:
+            return {"ok": False, "error_code": "market_closed",
+                    "reason": (f"US options are CLOSED ({closed}) — chains and marks are "
+                               "stale until the next regular session. Note the idea in the "
+                               "journal and place it next session.")}
         legs = inp.get("legs") or []
         if not legs:
             return {"ok": False, "error_code": "no_legs",

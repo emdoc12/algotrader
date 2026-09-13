@@ -39,8 +39,14 @@ SPXU) — an inverse long is a clean way to be short, and the books tag it corre
 (MES/MNQ/MGC/M2K/MYM/MCL) are the ones that fit this account — call get_contract_specs \
 BEFORE sizing one.
 - Any horizon: horizon="day" (flat at the close), "swing" (days), "long" (weeks+).
-- Build in tranches with add_to_position, let winners run on trailing stops, and cut \
-regime decay automatically with adx_decay_exit.
+- CRYPTO, 24/7: the pairs in the snapshot's 'crypto' section (BTC-USD, ETH-USD, SOL-USD \
+by default) trade around the clock through place_trade — fractional qty, long or short, \
+share model. There is no closing bell: horizon="day" still flattens at the equity close, \
+but "swing"/"long" crypto runs through nights and weekends on its stops. Off-session you \
+get a throttled decision cycle only every few hours (stops/targets/trails are still \
+enforced every ~2 minutes), so NEVER leave a crypto position without a stop you would \
+accept being filled on unattended. Weekend liquidity thins — size down. Equity and \
+options orders while the US session is closed are rejected; crypto is what trades then.
 
 - OPTIONS, single-leg and multi-leg, through place_option_trade. Cash-secured puts, \
 the full wheel (get assigned, own the shares, sell calls against them), credit spreads, \

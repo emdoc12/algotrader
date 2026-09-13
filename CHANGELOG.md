@@ -9,6 +9,55 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.44.0] — 2026-09-13
+
+### Added — the crypto lane: BTC/ETH/SOL trade 24/7, with throttled off-hours cycles
+Owner request. The desks can now trade a short crypto whitelist (BTC-USD,
+ETH-USD, SOL-USD — `CRYPTO_UNIVERSE` to change or disable) through the same
+`place_trade` path as everything else: fractional qty, long or short, share
+model, paper only. Quotes and 5m bars ride the existing Yahoo path, which
+serves crypto around the clock (verified live on a Saturday: quote + 4,600
+bars for BTC-USD through the unmodified data layer).
+
+The engineering is in the CLOCK, not the symbols:
+- **Off-session decision cycles, throttled.** Nights, weekends and holidays,
+  every desk gets a lean crypto-only cycle every `CRYPTO_CYCLE_MINUTES`
+  (default 180) — a three-symbol snapshot with the full indicator treatment,
+  no watchlist scan, no plan/review phases. In-session cadence would cost
+  ~5x the LLM bill run 24/7 (168 open hours vs ~32.5/wk); every few hours is
+  the deliberate compromise, and the desks are told exactly that in their
+  snapshot so they size for unattended holds.
+- **Stops are enforced around the clock**, not per-cycle: the idle loop now
+  runs a crypto-only bracket poll every `STOP_POLL_SECONDS` (~2 min, quotes
+  only, no LLM cost) through nights and weekends. Verified: a held BTC
+  position whose price crashes through its stop during idle is closed by the
+  poll, not left until the next decision window.
+- **Equity stops can never fire on an off-session print.**
+  `manage_positions` gained an additive `only_symbols` filter; the off-hours
+  poll passes the crypto set, so the missing-quote fallback can no longer
+  live-fetch an equity's stale/after-hours price at 2am and fill a stop at
+  it. Verified: with BTC and AAPL both held, the off-hours poll closes the
+  stopped BTC and provably never fetches an AAPL quote.
+- **The session gate cuts the other way too**: with decision cycles now
+  running while US markets are closed, `place_trade`/`add_to_position` for
+  equities and all of `place_option_trade` are rejected off-session with the
+  reason (weekend / holiday / outside 09:30-16:00 ET) — an equity "fill" at
+  Friday's close is a price nobody can trade. Crypto passes at any hour;
+  desks are pointed at `stage_order` for next-session equity ideas.
+- **Horizon semantics unchanged**: crypto `horizon="day"` still flattens at
+  the equity close; "swing"/"long" runs through the weekend on its stops
+  (verified: EOD flatten closes the day-book AAPL and leaves swing BTC).
+  The 3% daily circuit breaker runs on off-hours cycles too, so a weekend
+  bleed halts a desk the same way a Tuesday one does.
+- Crypto stays OUT of the session-based machinery by construction — its own
+  snapshot section, never mixed into RS-vs-SPY, breadth, sector clusters or
+  the EMA open-window scans, whose math assumes a session.
+Also verified end-to-end: a real off-hours cycle through a stub desk (lean
+snapshot + account overlay delivered, equity curve recorded), the 180-min
+throttle (fires when due, silent between), the DOGE-USD rejection naming the
+whitelist, and the in-session snapshot carrying the crypto section with
+merged quotes while the equity scan stays clean.
+
 ## [6.43.0] — 2026-09-01
 
 ### Added — earnings-date fallback (Finviz, Alpha Vantage) when Polygon's plan lacks it; wider option-chain strike coverage

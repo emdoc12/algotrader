@@ -1057,7 +1057,8 @@ class PaperBroker:
 
     def manage_positions(self, quote_map: Optional[dict] = None,
                          atr_map: Optional[dict] = None,
-                         adx_map: Optional[dict] = None) -> list[dict]:
+                         adx_map: Optional[dict] = None,
+                         only_symbols: Optional[set] = None) -> list[dict]:
         """Server-side bracket management, run once per trade cycle.
 
         For each open position: (1) ratchet a trailing stop in the favorable
@@ -1079,6 +1080,13 @@ class PaperBroker:
         adx_map = {str(k).upper(): v for k, v in (adx_map or {}).items() if v is not None}
         events: list[dict] = []
         for sym in list(self._positions):
+            # ``only_symbols`` restricts enforcement to instruments whose market
+            # is actually OPEN right now. The off-hours crypto poll passes the
+            # crypto set: without it, the missing-quote fallback below would
+            # live-fetch an equity's stale/after-hours print at 2am and fire a
+            # stop at a price the real market never traded during a session.
+            if only_symbols is not None and sym not in only_symbols:
+                continue
             pos = self._positions.get(sym)
             if pos is None:
                 continue

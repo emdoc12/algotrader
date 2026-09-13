@@ -71,6 +71,13 @@ def _adx_info(df) -> dict:
 
 START_CASH = float(os.environ.get("START_EQUITY", "25000"))
 INTERVAL_SEC = int(os.environ.get("AGENT_INTERVAL_SECONDS", "900"))
+# Off-session (nights, weekends, holidays) the desks still get crypto decision
+# cycles — but THROTTLED. In-session they decide every ~15 min because the
+# equity tape demands it; running that cadence 24/7 would roughly 5x the LLM
+# bill (168 open hours a week vs ~32.5) for a three-symbol book. Every few
+# hours is enough for swing-scale crypto; the ~2-min stop poll (free — quotes
+# only) is what actually guards the positions in between.
+CRYPTO_CYCLE_MIN = float(os.environ.get("CRYPTO_CYCLE_MINUTES", "180"))
 DAILY_LOSS_LIMIT_PCT = float(os.environ.get("DAILY_LOSS_LIMIT_PCT", "3.0"))
 WATCHLIST_SIZE = int(os.environ.get("WATCHLIST_SIZE", "18"))
 DATA_DIR = os.environ.get("DAYTRADER_DATA_DIR") or os.path.dirname(
@@ -376,6 +383,9 @@ class Competition:
     def __init__(self):
         self.teams = build_teams()
         self._day = None
+        # Last off-hours crypto LLM cycle (module clock, not persisted: a
+        # restart grants at most one early cycle, it cannot loop).
+        self._last_crypto_cycle = 0.0
 
     def _sync_teams(self):
         """Activate any team whose API key has appeared (e.g. entered via the
@@ -629,6 +639,102 @@ class Competition:
             self._save_risk(t, d)
             t.db.log_agent("runner", "new_day", d)
 
+    # -- the crypto lane (24/7, throttled off-session) -------------------
+    @staticmethod
+    def _crypto_set() -> set:
+        try:
+            from daytrader.live.market_state import crypto_universe
+            return set(crypto_universe())
+        except Exception:  # noqa: BLE001
+            return set()
+
+    def crypto_all(self):
+        """One throttled off-session decision cycle, crypto only.
+
+        The lean sibling of trade_all: a three-symbol snapshot instead of the
+        full watchlist scan, no plan/review phases, and bracket enforcement
+        restricted to crypto (see manage_positions' only_symbols — equity
+        stops must never fire on an off-session print).
+        """
+        from daytrader.live.market_state import crypto_only
+        market = crypto_only()
+        cmarket = (market.get("crypto") or {}).get("market") or {}
+        if not cmarket:
+            return   # crypto lane disabled or data unavailable — skip quietly
+        cycle_quotes = dict(market.get("quotes") or {})
+        atr = {sym: m.get("atr14") for sym, m in cmarket.items()
+               if m.get("atr14") is not None}
+        adx = {sym: {"adx14": m.get("adx14"), "adx_slope": m.get("adx_slope")}
+               for sym, m in cmarket.items() if m.get("adx14") is not None}
+        cset = self._crypto_set()
+        for t in self.teams:
+            self._risk_check(t)   # the 3% daily breaker guards weekends too
+            t.broker.set_cycle_quotes(cycle_quotes)
+            try:
+                t.broker.manage_positions(cycle_quotes, atr, adx, only_symbols=cset)
+                if not t.halted and not self._provider_paused(t):
+                    res = t.desk.trade_cycle(with_account(market, t.broker))
+                    self._record_usage(t, "trader", res)
+                    self._note_provider_result(t, res)
+            finally:
+                t.broker.set_cycle_quotes(None)
+            t.broker.db.record_equity(t.broker.cash(), t.broker.equity(),
+                                      len(t.broker.positions()), t.broker.drawdown_pct())
+
+    def _crypto_stop_poll(self):
+        """Between off-session cycles: enforce brackets on HELD crypto only.
+
+        Quotes-only (no LLM, no bars), so running it every STOP_POLL_SEC around
+        the clock costs nothing — and it is the mechanism that makes an
+        unattended weekend crypto position survivable. Staged equity orders
+        deliberately do NOT fire here; they wait for the session poll.
+        """
+        cset = self._crypto_set()
+        if not cset:
+            return
+        held: set = set()
+        for t in self.teams:
+            try:
+                held |= {p["symbol"] for p in t.broker.positions()
+                         if p["symbol"] in cset}
+            except Exception:  # noqa: BLE001
+                pass
+        if not held:
+            return
+        from daytrader.data import quotes as _quotes
+        qmap = _quotes.get_quotes(list(held))
+        if not qmap:
+            return
+        for t in self.teams:
+            try:
+                t.broker.set_cycle_quotes(qmap)
+                t.broker.manage_positions(qmap, {}, {}, only_symbols=cset)
+            except Exception:  # noqa: BLE001
+                pass
+            finally:
+                t.broker.set_cycle_quotes(None)
+
+    def _offhours_idle(self, total: float):
+        """Idle for `total` seconds off-session — but not blindly: run the
+        throttled crypto decision cycle when it is due, and poll crypto
+        brackets every STOP_POLL_SEC throughout."""
+        if (CRYPTO_CYCLE_MIN > 0 and self._crypto_set()
+                and time.time() - self._last_crypto_cycle >= CRYPTO_CYCLE_MIN * 60.0):
+            self._last_crypto_cycle = time.time()
+            try:
+                self.crypto_all()
+            except Exception as e:  # noqa: BLE001
+                print(f"[competition] crypto cycle error: {e!r}")
+        slept = 0.0
+        while slept < total:
+            chunk = min(STOP_POLL_SEC, total - slept)
+            time.sleep(chunk)
+            slept += chunk
+            try:
+                self._crypto_stop_poll()
+            except Exception as e:  # noqa: BLE001
+                print(f"[competition] crypto stop-poll error: {e!r}")
+
     # -- the always-on loop ---------------------------------------------
     def run_forever(self):
         print(f"[competition] starting; teams online: {[t.name for t in self.teams]} "
@@ -654,16 +760,16 @@ class Competition:
                 # Weekends and market holidays: idle. (Per-team planned/reviewed
                 # state is persisted, so restarts never double-run either phase.)
                 if now.weekday() >= 5 or _is_market_holiday(now.date()):
-                    time.sleep(300); continue
+                    self._offhours_idle(300); continue
                 t = now.time()
                 if t < OPEN:
-                    time.sleep(60); continue
+                    self._offhours_idle(60); continue
                 # EOD is DEADLINE-based: once past 15:50 ET, flatten day trades +
                 # review — reachable even if a trade cycle overran 16:00. review_all
                 # is idempotent, so this is cheap once the day is done.
                 if t >= EOD_FLAT:
                     self.review_all()
-                    time.sleep(120); continue
+                    self._offhours_idle(120); continue
                 if t < PLAN_BY:
                     self.plan_all()
                 elif t < NO_NEW_TRADES_AFTER:

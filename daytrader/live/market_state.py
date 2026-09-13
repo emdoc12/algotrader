@@ -668,6 +668,79 @@ def _default_symbols(top_n: int | None = None) -> list[str]:
     return syms
 
 
+def crypto_universe() -> list[str]:
+    """The crypto pairs the desks may trade, Yahoo-symbol form (BTC-USD).
+
+    Deliberately a short, liquid whitelist rather than "anything ending -USD":
+    the paper fills come from Yahoo's last-trade quote, which is only honest
+    for pairs deep enough that the next real trade is near it. Set
+    CRYPTO_UNIVERSE="" to disable the crypto lane entirely, or to a comma-list
+    to choose your own pairs.
+    """
+    raw = _os.environ.get("CRYPTO_UNIVERSE", "BTC-USD,ETH-USD,SOL-USD")
+    return [s.strip().upper() for s in raw.split(",") if s.strip()]
+
+
+_CRYPTO_NOTE = (
+    "Crypto trades 24/7 with NO closing bell: there is no EOD flatten unless you "
+    "chose horizon='day', and no overnight 'gap' — the price path is continuous "
+    "but moves while US equities sleep. Off-session your stops are enforced by a "
+    "poll every couple of minutes, and you only get a DECISION cycle every few "
+    "hours — so every crypto position must carry a stop it can live with "
+    "unattended. Weekend liquidity is thinner; size down accordingly.")
+
+
+def _crypto_block(interval: str = "5m") -> dict:
+    """Indicators + live quotes for the crypto universe. {} when disabled.
+
+    Same _latest_indicators treatment as the equity watchlist so a desk reads a
+    BTC entry exactly like an AAPL entry. Kept as its own snapshot section
+    (rather than merged into the scanned watchlist) so the equity-only
+    machinery — RS vs SPY, breadth, sector clusters, EMA open-window scans —
+    never has a 24/7 instrument mixed into a session-based calculation.
+    """
+    syms = crypto_universe()
+    if not syms:
+        return {}
+    try:
+        data = loader.load_many(syms, interval=interval, max_age_hours=0.1)
+        qmap = quotes.get_quotes(syms)
+        per = {sym: _latest_indicators(df, live_price=qmap.get(sym))
+               for sym, df in data.items() if sym in syms}
+        if not per:
+            return {}
+        return {"note": _CRYPTO_NOTE, "market": per, "quotes": qmap}
+    except Exception:  # noqa: BLE001 - crypto view is additive, never fatal
+        return {}
+
+
+def crypto_only(interval: str = "5m") -> dict:
+    """The lean off-session snapshot: crypto only, no equity scan.
+
+    Off-hours cycles run around the clock, so this must stay cheap — a few
+    symbols of bars + quotes, none of the watchlist scanning, RS, options or
+    signal machinery whose inputs are all session-based (and stale) anyway.
+    """
+    block = _crypto_block(interval)
+    now_et = datetime.now(timezone.utc).astimezone()
+    out = {
+        "timestamp": now_et.isoformat(),
+        "session": "crypto_offhours",
+        "session_note": (
+            "The US equity/options market is CLOSED. Only the crypto pairs below "
+            "are tradeable right now — equity and option orders will be rejected "
+            "until the next regular session. This is a throttled off-hours cycle: "
+            "your next decision window is a few hours away, so leave every "
+            "position protected by a stop before you finish."),
+        "universe": list((block.get("market") or {}).keys()),
+        "interval": interval,
+        "crypto": {"note": block.get("note"), "market": block.get("market") or {}},
+        "market": {},   # no equity scan off-session — see session_note
+        "quotes": dict(block.get("quotes") or {}),
+    }
+    return out
+
+
 def market_only(symbols: list[str] | None = None, interval: str = "5m") -> dict:
     """The shared market view: prices, indicators, regime, fresh signals.
 
@@ -707,6 +780,13 @@ def market_only(symbols: list[str] | None = None, interval: str = "5m") -> dict:
         "fresh_signals": fresh,
         "quotes": quote_map,
     }
+    # Crypto rides along in-session too (its own section — 24/7 instruments
+    # stay out of the session-based scans), and its quotes join the shared
+    # quote map so crypto fills match what the desk saw, like everything else.
+    cb = _crypto_block(interval)
+    if cb:
+        out["crypto"] = {"note": cb["note"], "market": cb["market"]}
+        out["quotes"] = {**quote_map, **(cb.get("quotes") or {})}
     # Data-source health: a desk must know a confluence source is unavailable
     # BEFORE it builds a plan around it, not after the call fails mid-cycle.
     try:
