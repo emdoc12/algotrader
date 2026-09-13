@@ -702,10 +702,29 @@ def _crypto_note() -> str:
     except Exception:  # noqa: BLE001
         closed = None
     if closed:
+        # State the ACTUAL current cadence, not a generic "a few hours": a desk
+        # sizes an unattended position against how long it will be left alone,
+        # so a stale number here is a sizing error, not a wording nit.
+        cadence, ends = None, ""
+        try:
+            from daytrader.live.competition import (
+                crypto_cadence_min, crypto_trial_active, CRYPTO_CYCLE_MIN,
+                CRYPTO_FAST_UNTIL)
+            cadence = crypto_cadence_min()
+            if crypto_trial_active():
+                ends = (f" NOTE: this is a TRIAL cadence that ends after "
+                        f"{CRYPTO_FAST_UNTIL}, after which off-hours cycles return "
+                        f"to every {CRYPTO_CYCLE_MIN:.0f} minutes. Do not open a "
+                        "position that only makes sense while you are being asked "
+                        "every few minutes — it will outlive that cadence.")
+        except Exception:  # noqa: BLE001
+            pass
+        gap = (f"every ~{cadence:.0f} minutes" if cadence
+               else "a few hours apart")
         return common + (
             f"RIGHT NOW the US session is closed ({closed}), so this is the "
             "off-hours regime: stops/targets/trails are enforced by a poll every "
-            "couple of minutes, but your next DECISION cycle is a few hours away. "
+            f"couple of minutes, and your DECISION cycles come {gap}.{ends} "
             "Every position you leave open must carry a stop you would accept "
             "being filled on unattended. Off-hours liquidity — weekends "
             "especially — is thinner than weekday US hours; size down.")

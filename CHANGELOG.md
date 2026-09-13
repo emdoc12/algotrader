@@ -9,6 +9,41 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.46.0] — 2026-09-13
+
+### Added — September trial: off-hours crypto runs a full 15-minute cadence, and expires on its own
+Owner decision: for the rest of September every desk gets the same 15-minute
+decision cadence off-session that it gets during the equity session — 12x the
+current off-hours frequency — to find out whether decision frequency produces
+anything in a 24/7 market. Given to ALL seven desks rather than the leaders,
+deliberately: handing the top two 12x the cycles would confound the
+leaderboard permanently, and the competition's premise is identical resources
+with the model as the only variable.
+
+The trial EXPIRES BY ITSELF on `CRYPTO_FAST_UNTIL` (default 2026-09-30),
+after which the cadence returns to `CRYPTO_CYCLE_MINUTES` with no action
+required. That is the point of building it this way: across seven desks this
+is the difference between ~$41 and ~$493 a month, and a temporary cost
+increase that silently becomes permanent is the standard way a trial turns
+into a bill nobody chose. A missing or malformed date fails to the CHEAP
+cadence, never the expensive one.
+
+The desks are told the truth on both ends. The off-hours note now states the
+ACTUAL current cadence rather than a generic "a few hours" — a desk sizes an
+unattended position against how long it will be left alone, so a stale number
+there is a sizing error, not a wording nit — and while the trial is running it
+also names the expiry date and warns against opening a position that only
+makes sense while being asked every few minutes, since it will outlive that
+cadence. When the trial ends, a one-time notice goes to every desk's journal
+(and Discord) telling them the gap between reassessments just widened and to
+re-check their open stops. Verified: cadence inside and outside the window,
+both fail-safe paths, the note's wording in both regimes, and the revert
+notice firing exactly once per desk.
+
+Cost at this cadence is ~$493/month across seven desks against ~$41 at the
+3-hour cadence — roughly doubling total system spend while it runs, or about
+$256 for the 17-day trial.
+
 ## [6.45.0] — 2026-09-13
 
 ### Changed — off-hours crypto cycles run a lean agent: 67% fewer tokens each

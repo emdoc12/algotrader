@@ -78,6 +78,37 @@ INTERVAL_SEC = int(os.environ.get("AGENT_INTERVAL_SECONDS", "900"))
 # hours is enough for swing-scale crypto; the ~2-min stop poll (free — quotes
 # only) is what actually guards the positions in between.
 CRYPTO_CYCLE_MIN = float(os.environ.get("CRYPTO_CYCLE_MINUTES", "180"))
+# SEPTEMBER 2026 TRIAL: the owner opened the off-hours lane to a full 15-minute
+# cadence for every desk — same cadence the equity session gets — to see whether
+# 12x the decision frequency produces anything. Given to ALL desks rather than
+# the leaders, deliberately: handing two desks 12x the cycles would confound the
+# leaderboard permanently, and the competition's whole premise is identical
+# resources.
+#
+# It EXPIRES ON ITS OWN. A temporary cost increase that silently becomes
+# permanent is the standard way a trial turns into a bill nobody chose — at
+# these cadences it is the difference between ~$41 and ~$493 a month across
+# seven desks. Past CRYPTO_FAST_UNTIL the cadence reverts to CRYPTO_CYCLE_MIN
+# with no action required; extend the date (or clear it) to change that.
+CRYPTO_FAST_CYCLE_MIN = float(os.environ.get("CRYPTO_FAST_CYCLE_MINUTES", "15"))
+CRYPTO_FAST_UNTIL = os.environ.get("CRYPTO_FAST_UNTIL", "2026-09-30").strip()
+
+
+def crypto_cadence_min() -> float:
+    """Minutes between off-hours crypto cycles, honoring the trial window."""
+    if not CRYPTO_FAST_UNTIL:
+        return CRYPTO_CYCLE_MIN
+    try:
+        from datetime import date as _date
+        if datetime.now(ET).date() <= _date.fromisoformat(CRYPTO_FAST_UNTIL):
+            return CRYPTO_FAST_CYCLE_MIN
+    except ValueError:      # malformed date: fail to the CHEAP cadence
+        return CRYPTO_CYCLE_MIN
+    return CRYPTO_CYCLE_MIN
+
+
+def crypto_trial_active() -> bool:
+    return crypto_cadence_min() == CRYPTO_FAST_CYCLE_MIN and CRYPTO_FAST_CYCLE_MIN < CRYPTO_CYCLE_MIN
 DAILY_LOSS_LIMIT_PCT = float(os.environ.get("DAILY_LOSS_LIMIT_PCT", "3.0"))
 WATCHLIST_SIZE = int(os.environ.get("WATCHLIST_SIZE", "18"))
 DATA_DIR = os.environ.get("DAYTRADER_DATA_DIR") or os.path.dirname(
@@ -420,6 +451,7 @@ class Competition:
         # Last off-hours crypto LLM cycle (module clock, not persisted: a
         # restart grants at most one early cycle, it cannot loop).
         self._last_crypto_cycle = 0.0
+        self._crypto_fast: bool | None = None   # trial state, for the one-time notice
 
     def _sync_teams(self):
         """Activate any team whose API key has appeared (e.g. entered via the
@@ -756,8 +788,32 @@ class Competition:
         """Idle for `total` seconds off-session — but not blindly: run the
         throttled crypto decision cycle when it is due, and poll crypto
         brackets every STOP_POLL_SEC throughout."""
-        if (CRYPTO_CYCLE_MIN > 0 and self._crypto_set()
-                and time.time() - self._last_crypto_cycle >= CRYPTO_CYCLE_MIN * 60.0):
+        cadence = crypto_cadence_min()
+        # Announce the trial ending exactly once, so the change in behaviour is
+        # explainable later rather than a mystery drop in activity.
+        fast = crypto_trial_active()
+        if self._crypto_fast is None:
+            self._crypto_fast = fast
+        elif self._crypto_fast and not fast:
+            self._crypto_fast = False
+            msg = (f"off-hours crypto cadence reverted to {CRYPTO_CYCLE_MIN:.0f} min "
+                   f"(the {CRYPTO_FAST_CYCLE_MIN:.0f}-min trial ended {CRYPTO_FAST_UNTIL})")
+            print(f"[competition] {msg}")
+            _notify(f"⏱️ {msg}")
+            for t in self.teams:
+                try:
+                    t.db.add_journal("system", "dev_resolved",
+                                     "PLATFORM CHANGE: the 15-minute off-hours crypto "
+                                     "cadence trial has ended. Off-session decision "
+                                     f"cycles are back to every {CRYPTO_CYCLE_MIN:.0f} "
+                                     "minutes. Stops are still enforced every couple of "
+                                     "minutes, but any crypto position you carry now "
+                                     "goes much longer between reassessments — check "
+                                     "that your open stops still reflect that.")
+                except Exception:  # noqa: BLE001
+                    pass
+        if (cadence > 0 and self._crypto_set()
+                and time.time() - self._last_crypto_cycle >= cadence * 60.0):
             self._last_crypto_cycle = time.time()
             try:
                 self.crypto_all()
