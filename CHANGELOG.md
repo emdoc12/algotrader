@@ -9,6 +9,26 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.50.2] — 2026-09-13
+
+### Fixed — v6.50.1's settlement could never run on the desk it was written for
+Claude was still showing an open SPY position after v6.50.1 shipped the
+"settle the book on retirement" fix, and the reason is a guard that defeated
+itself. v6.49.0's `_mark_retired` only stamped `retired_ts`; the container
+picked it up and stamped it. v6.50.1 then added the settling step and guarded
+the whole function on that same key — `if db.kv_get("retired_ts"): return` —
+so on every subsequent start it returned immediately, and the position it was
+written to close was the one case it could never reach. A desk retired BEFORE
+settling existed is exactly the desk that needs settling.
+
+The two facts now get two keys: `retired_ts` records when the desk was cut,
+`retired_settled_ts` records when its book was closed out. The original
+retirement date is preserved rather than rewritten, and settlement still runs
+exactly once. Verified against the real shape of the bug: a desk already
+stamped by the old code, still holding 45 SPY, comes back with zero open
+positions, the trade booked with `exit_reason='retired'`, its original
+retirement date untouched, and a second run changing nothing.
+
 ## [6.50.1] — 2026-09-13
 
 ### Fixed — retiring a desk left its open positions stranded

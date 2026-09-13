@@ -155,14 +155,23 @@ def _mark_retired(name: str) -> None:
     the then-current market. That way the final equity is a real settled figure
     and the curve ends on it, which is the whole point of keeping the record.
 
-    Runs exactly once, guarded by the retired_ts key. Every close is attempted
-    individually: one symbol whose quote cannot be fetched must not leave the
-    rest of the book open.
+    The settlement is guarded by its OWN key, not by retired_ts. Those were the
+    same key once, and it was a bug with teeth: the first version of this
+    function only stamped retired_ts, so a desk retired under it came back
+    under this version already stamped — and the settle step, keyed on the same
+    flag, skipped forever. Claude sat with an open SPY position on the
+    dashboard because of exactly that. A desk retired before settling existed
+    still needs settling, so the two facts get two keys.
+
+    Every close is attempted individually: one symbol whose quote cannot be
+    fetched must not leave the rest of the book open.
     """
     try:
         db = LiveDB(team_db_path(name))
         try:
-            if db.kv_get("retired_ts"):
+            if not db.kv_get("retired_ts"):
+                db.kv_set("retired_ts", _today_et())
+            if db.kv_get("retired_settled_ts"):
                 return
             closed, failed = [], []
             try:
@@ -191,7 +200,7 @@ def _mark_retired(name: str) -> None:
                 detail += f"; settled {len(closed)}: {', '.join(closed)[:300]}"
             if failed:
                 detail += f"; COULD NOT SETTLE: {'; '.join(failed)[:300]}"
-            db.kv_set("retired_ts", _today_et())
+            db.kv_set("retired_settled_ts", _today_et())
             db.log_agent("system", "retired", detail)
             print(f"[retire] {detail}")
             if failed:
