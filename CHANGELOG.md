@@ -9,6 +9,41 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.49.0] — 2026-09-13
+
+### Changed — Claude is retired from the competition; its record stays on the board
+First quarter's verdict: $1,074.65 of model spend against −$961.89 of P&L —
+the worst return and 57% of the competition's entire API bill. The desk stops
+trading and stops costing anything, but NOTHING is deleted. Its database,
+trades, journal and equity curve freeze exactly as they were, and the
+leaderboard keeps showing it struck through in red with its final numbers and
+the date the line ends. A retired desk is a record, not a gap — you can always
+look back at what it did. `RETIRED_TEAMS` (default `claude`) controls this;
+clearing it brings a desk back and its history resumes rather than restarting.
+
+### Added — a live SPY buy-and-hold benchmark on the leaderboard
+The mission has always told the desks to beat a buy-and-hold of SPY, and
+nothing ever measured it — the leaderboard only compared desks to each other.
+That was survivable while seven ran under identical conditions, because they
+were each other's control. As the field narrows it stops being survivable: one
+desk's +2% floats free, and in a rising tape almost any long-biased or
+premium-selling book looks skilful. The benchmark now sits under the field as
+its own row — the bar, not a contestant — showing the index's return over the
+competition's exact window and what a desk's capital would be worth having
+simply held it. Costs nothing in model calls. First reading: SPY +1.25% since
+15 June, which GLM's +2.14% beats and every other desk does not.
+
+### Fixed — futures were gated to equity hours, blocking ~17 tradeable hours a day
+The session gate built for the crypto lane treated everything non-crypto as a
+cash-hours instrument, so a desk could not trade MES or MNQ outside
+09:30-16:00 ET — despite the broker offering them roughly 23 hours a day. The
+gate now knows three schedules instead of one: crypto 24/7, futures Sunday
+18:00 ET to Friday 17:00 ET with the daily 17:00 maintenance break, and
+equities/options on US cash hours. Full market holidays still block futures,
+deliberately on the conservative side: CME runs shortened sessions on several
+of them, and a blocked order costs a cycle while an order filled against a
+stale holiday quote books a number that never existed.
+
 ## [6.48.2] — 2026-09-13
 
 ### Fixed — the report's bull/bear dimension labelled 14 trades out of 331

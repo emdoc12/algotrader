@@ -127,6 +127,40 @@ def team_db_path(name: str) -> str:
     return os.path.join(DATA_DIR, f"team_{name}.db")
 
 
+# Desks that have been RETIRED from the competition. They stop trading — no
+# cycles, no spend — but nothing is deleted: their database, trades, journal and
+# equity curve stay exactly as they were on the day they were cut, and the
+# leaderboard keeps showing them struck through with their final numbers. A
+# retired desk is a record, not a gap.
+#
+# Claude is retired as of the first quarter's results: $1,074.65 of model spend
+# against −$961.89 of P&L, the worst return and 57% of the competition's entire
+# API bill. Clear this env var to bring a desk back; its history resumes where
+# it stopped rather than starting over.
+RETIRED_TEAMS = {s.strip().lower() for s in
+                 os.environ.get("RETIRED_TEAMS", "claude").split(",") if s.strip()}
+
+
+def is_retired(name: str) -> bool:
+    return str(name or "").lower() in RETIRED_TEAMS
+
+
+def _mark_retired(name: str) -> None:
+    """Stamp the retirement date once, so the record says when the line ends."""
+    try:
+        db = LiveDB(team_db_path(name))
+        try:
+            if not db.kv_get("retired_ts"):
+                db.kv_set("retired_ts", _today_et())
+                db.log_agent("system", "retired",
+                             f"{name} retired from the competition — trading stopped, "
+                             "record preserved")
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 - never block startup on bookkeeping
+        pass
+
+
 _LAST_NOTIFY: dict[str, float] = {}
 
 
@@ -261,6 +295,9 @@ def build_teams(only_with_keys: bool = True) -> list[Team]:
     _settings.apply_to_env()
     teams: list[Team] = []
     for name, provider in default_team_providers().items():
+        if is_retired(name):
+            _mark_retired(name)     # stamp the date, then leave the record alone
+            continue
         if only_with_keys and not has_key(provider):
             continue
         teams.append(_build_team(name, provider))
@@ -303,6 +340,76 @@ def team_names() -> list[str]:
     return list(default_team_providers().keys())
 
 
+_BENCH_CACHE: dict = {}
+
+
+def spy_benchmark() -> dict | None:
+    """SPY buy-and-hold over the competition's own lifetime. None if unavailable.
+
+    The mission has always told the desks to beat a buy-and-hold of SPY, but
+    nothing ever measured it — the leaderboard only compared desks to each
+    other. That was survivable while seven desks ran under identical
+    conditions, because they were each other's control. As the field narrows
+    it stops being survivable: one desk's +2% floats free, and in a rising
+    tape almost any long-biased or premium-selling book looks skilful.
+
+    Costs nothing in model calls — daily bars the loader already caches —
+    and answers the only question that outlives the competition: did picking
+    stocks beat owning the index.
+    """
+    now = time.time()
+    hit = _BENCH_CACHE.get("v")
+    if hit and now - hit[0] < 900:
+        return hit[1]
+    try:
+        start = None
+        for name in team_names():
+            try:
+                db = LiveDB(team_db_path(name))
+                try:
+                    row = db.conn.execute(
+                        "SELECT ts FROM equity_snapshots ORDER BY id ASC LIMIT 1"
+                    ).fetchone()
+                finally:
+                    db.close()
+                if row and row["ts"]:
+                    d = str(row["ts"])[:10]
+                    start = d if start is None else min(start, d)
+            except Exception:  # noqa: BLE001
+                continue
+        if not start:
+            return None
+        from daytrader.data import loader
+        df = loader.load("SPY", interval="1d", rng="2y", max_age_hours=12)
+        if df is None or len(df) < 2:
+            return None
+        # First close ON OR AFTER the competition's first snapshot — the day it
+        # actually started, not the nearest bar in either direction.
+        after = df[df.index >= start]
+        if len(after) < 2:
+            return None
+        first, last = float(after["close"].iloc[0]), float(after["close"].iloc[-1])
+        if first <= 0:
+            return None
+        out = {
+            "symbol": "SPY",
+            "start_date": str(after.index[0].date()),
+            "end_date": str(after.index[-1].date()),
+            "start_price": round(first, 2),
+            "end_price": round(last, 2),
+            "return_pct": round((last / first - 1) * 100, 2),
+            # What a desk's whole capital base would be worth having simply
+            # bought and held instead — the comparison in dollars, not percent.
+            "equity_if_held": round(START_CASH * 2 * (last / first), 2),
+            "note": "Buy and hold SPY over the same window — the benchmark the "
+                    "desks are asked to beat.",
+        }
+        _BENCH_CACHE["v"] = (now, out)
+        return out
+    except Exception:  # noqa: BLE001 - the benchmark is additive, never fatal
+        return None
+
+
 def _trade_stats(trades: list[dict]) -> dict:
     pnls = [float(t.get("pnl") or 0) for t in trades]
     wins = [p for p in pnls if p > 0]
@@ -327,6 +434,7 @@ def db_standings() -> list[dict]:
     rows = []
     for name, provider in providers.items():
         provider_down = None
+        retired_ts = None
         eq = START_CASH
         cash = START_CASH
         capital_base = START_CASH
@@ -349,6 +457,7 @@ def db_standings() -> list[dict]:
             stats = _trade_stats(db.recent_trades(limit=1000))
             n_open = len(db.load_open_positions())
             provider_down = db.kv_get("provider_down") or None
+            retired_ts = db.kv_get("retired_ts") or None
             try:
                 cost_today = db.usage_totals(since_iso=datetime.now(ET).strftime("%Y-%m-%dT00:00:00"))["cost_usd"]
                 cost_total = db.usage_totals()["cost_usd"]
@@ -361,6 +470,10 @@ def db_standings() -> list[dict]:
             "team": name,
             "model": getattr(provider, "model", "?"),
             "has_key": has_key(provider),
+            # Retired desks are shown, not hidden: the leaderboard is also the
+            # record of who played. retired_ts is the day the line stops.
+            "retired": is_retired(name),
+            "retired_ts": retired_ts,
             # Why a desk is idle, when it is: an account problem the owner must
             # clear, not something the desk can trade its way out of.
             "provider_down": provider_down,
@@ -466,7 +579,7 @@ class Competition:
         _settings.apply_to_env()
         have = {t.name for t in self.teams}
         for name, provider in default_team_providers().items():
-            if name not in have and has_key(provider):
+            if name not in have and has_key(provider) and not is_retired(name):
                 self.teams.append(_build_team(name, provider))
                 print(f"[competition] activated team '{name}' ({getattr(provider,'model','?')})")
 

@@ -106,8 +106,15 @@ def overview_payload() -> dict:
     for s in strategies:
         s["open_positions"] = sum(1 for p in positions if p["team"] == s["team"])
         s["open_options"] = sum(1 for o in options if o["team"] == s["team"])
+    benchmark = None
+    try:
+        from daytrader.live.competition import spy_benchmark
+        benchmark = spy_benchmark()
+    except Exception:  # noqa: BLE001 - benchmark is additive, never fatal
+        benchmark = None
     return {
         "start_cash": START_CASH,
+        "benchmark": benchmark,
         "standings": stand,
         "activity": activity,
         "curves": curves,
@@ -810,6 +817,11 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .green{color:var(--green)} .red{color:var(--red)} .gray{color:var(--gray)}
   .pill{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;
         background:#23232a;color:var(--gray)}
+  /* Retired desk: struck through in red, dimmed, but still legible — the point
+     is to be able to look back at what it did, not to erase it. */
+  tr.retired td{color:#6b6b74;text-decoration:line-through;
+                text-decoration-color:var(--red);text-decoration-thickness:1.5px}
+  tr.bench td{border-top:2px solid #33333c;font-style:italic;color:var(--gray)}
   canvas{width:100%;height:340px;display:block}
   /* pan-y (not none): a horizontal drag pans the chart, but a vertical swipe
      still scrolls the PAGE — a phone must not get stuck on the chart. */
@@ -1024,11 +1036,16 @@ async function loadOverview(){
     const tr = el("tr");
     const DOWN = {out_of_credit:"OUT OF CREDIT", bad_api_key:"KEY REJECTED",
                   no_access:"NO ACCESS", bad_model:"BAD MODEL"};
-    const nameCell = !s.has_key
-      ? (LABELS[s.team]||s.team) + "  (no key — idle)"
-      : (s.provider_down
-          ? (LABELS[s.team]||s.team) + "  \u26a0 " + (DOWN[s.provider_down]||s.provider_down)
-          : (LABELS[s.team] || s.team));
+    const nameCell = s.retired
+      ? (LABELS[s.team]||s.team) + "  RETIRED" + (s.retired_ts ? " " + s.retired_ts : "")
+      : (!s.has_key
+        ? (LABELS[s.team]||s.team) + "  (no key — idle)"
+        : (s.provider_down
+            ? (LABELS[s.team]||s.team) + "  \u26a0 " + (DOWN[s.provider_down]||s.provider_down)
+            : (LABELS[s.team] || s.team)));
+    // A retired desk is struck through, not removed: its final numbers stay on
+    // the board as the record of what it did, frozen the day it was cut.
+    if(s.retired) tr.className = "retired";
     const cells = [
       el("td", null, String(s.rank)),
       el("td", {class: !s.has_key ? "gray" : (s.provider_down ? "red" : "")}, nameCell),
@@ -1045,6 +1062,24 @@ async function loadOverview(){
     cells.forEach(c => tr.appendChild(c));
     tbl.appendChild(tr);
   });
+  // The benchmark the desks are asked to beat. Sits under the field rather than
+  // in it — it is the bar, not a contestant.
+  const bm = data.benchmark;
+  if(bm){
+    const tr = el("tr", {class:"bench"});
+    const cells = [
+      el("td", {class:"gray"}, "—"),
+      el("td", null, "Buy & hold SPY"),
+      el("td", {class:"gray"}, bm.start_date + " \u2192 " + bm.end_date),
+      el("td", {class: Number(bm.equity_if_held)>=START?"green":"red"}, fmtMoney(bm.equity_if_held)),
+      el("td", {class: clsFor(bm.return_pct)}, fmtPct(bm.return_pct)),
+      el("td", {class:"gray"}, "—"), el("td", {class:"gray"}, "—"),
+      el("td", {class:"gray"}, "—"), el("td", {class:"gray"}, "—"),
+      el("td", {class:"gray"}, "—"), el("td", {class:"gray"}, "$0.00"),
+    ];
+    cells.forEach(c => tr.appendChild(c));
+    tbl.appendChild(tr);
+  }
   lbCard.appendChild(tbl);
   main.appendChild(lbCard);
 

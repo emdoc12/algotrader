@@ -98,20 +98,78 @@ def equity_session_closed() -> str | None:
     return None
 
 
+def futures_session_closed() -> str | None:
+    """A reason string when the CME futures session is closed, else None.
+
+    Futures are NOT equity-hours instruments and were being gated as if they
+    were: the session gate blocked MES and MNQ outside 09:30-16:00 ET, so a
+    desk could not trade overnight index futures that its broker offers for
+    roughly 23 hours a day. The real schedule is Sunday 18:00 ET through
+    Friday 17:00 ET, with a one-hour maintenance break each weekday at 17:00.
+
+    Full US market holidays are still treated as closed. CME actually runs
+    shortened sessions on several of them, so this is deliberately the
+    conservative side of the trade: a blocked order the desk can retry costs
+    a cycle, while an order filled against a stale holiday quote books a
+    number that never existed.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo("America/New_York"))
+    wd, t = now.weekday(), now.time()          # Mon=0 … Sun=6
+    if wd == 5:
+        return "it is Saturday — futures reopen Sunday 18:00 ET"
+    if wd == 4 and t >= dtime(17, 0):
+        return "the week's futures session closed Friday 17:00 ET"
+    if wd == 6 and t < dtime(18, 0):
+        return "futures reopen Sunday at 18:00 ET"
+    if wd <= 3 and dtime(17, 0) <= t < dtime(18, 0):
+        return "the daily futures maintenance break (17:00-18:00 ET)"
+    try:
+        from daytrader.live.competition import _MARKET_HOLIDAYS
+        if now.date().isoformat() in _MARKET_HOLIDAYS:
+            return "today is a US market holiday"
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _is_future(symbol) -> bool:
+    s = str(symbol or "").upper().strip()
+    if not s.endswith("=F"):
+        return False
+    try:
+        from daytrader.core.contracts import spec_for
+        return spec_for(s) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _session_gate(symbol) -> str | None:
-    """Reject an equity/futures/options OPEN while the US session is closed.
-    Crypto passes at any hour — that is the whole point of the crypto lane."""
+    """Reject an OPEN whose market is closed right now.
+
+    Three schedules, not one: crypto trades 24/7, futures ~23 hours a day
+    Sunday evening to Friday evening, and equities/options keep US cash hours.
+    """
     s = str(symbol or "").upper().strip()
     if s in _crypto_syms():
+        return None
+    if _is_future(s):
+        closed = futures_session_closed()
+        if closed:
+            return (f"Futures are CLOSED ({closed}) — an order in {s} now would fill "
+                    "at a stale price. The futures session runs Sunday 18:00 ET to "
+                    "Friday 17:00 ET with a daily break at 17:00; crypto trades "
+                    "through it.")
         return None
     closed = equity_session_closed()
     if closed:
         return (f"The US equity market is CLOSED ({closed}) — an order in {s} now "
                 "would fill at the last session's stale price, which nobody can "
-                "actually trade. Only the crypto pairs "
-                f"({', '.join(sorted(_crypto_syms())) or 'none configured'}) trade "
-                "24/7. Stage the equity idea with stage_order instead; it fires "
-                "next session once its conditions hold.")
+                "actually trade. Futures (MES=F, MNQ=F) trade nearly 24/5 and the "
+                f"crypto pairs ({', '.join(sorted(_crypto_syms())) or 'none configured'}) "
+                "trade 24/7. Stage the equity idea with stage_order instead; it "
+                "fires next session once its conditions hold.")
     return None
 
 
