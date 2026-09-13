@@ -9,6 +9,31 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.50.1] — 2026-09-13
+
+### Fixed — retiring a desk left its open positions stranded
+Claude was retired with a position still open, and a retired desk never runs
+another cycle: nothing would ever close it, ratchet its stop, or take its
+target. It would have sat on the dashboard indefinitely, marked at whatever
+quote happened to be last — an unsettled number pretending to be a position,
+and a final equity figure that was never actually final.
+
+Retirement now SETTLES the book before it freezes it: every open position and
+option structure is closed once, at the then-current market, booked as a real
+trade with `exit_reason='retired'`, followed by a last equity snapshot so the
+curve ends on the settled figure. That is the point of preserving the record —
+it should be a finished account, not a paused one.
+
+Each close is attempted individually, so one symbol whose quote cannot be
+fetched cannot leave the rest of the book open, and anything that genuinely
+could not be settled is named in the agent log and pushed to Discord — the one
+case where a frozen record is not actually final is worth knowing about. The
+whole routine is guarded by the `retired_ts` key, so it runs exactly once and
+re-running it never touches the frozen record. Verified end to end: a desk
+retired holding AAPL comes back with zero open positions, the trade booked
+with the right exit reason, the curve ending on the settled equity, and a
+second run changing nothing.
+
 ## [6.50.0] — 2026-09-13
 
 ### Added — the mandate, and a relegation rule that cannot be gamed

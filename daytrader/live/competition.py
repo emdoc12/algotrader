@@ -146,15 +146,59 @@ def is_retired(name: str) -> bool:
 
 
 def _mark_retired(name: str) -> None:
-    """Stamp the retirement date once, so the record says when the line ends."""
+    """Settle the desk's book, then stamp the date the record ends.
+
+    A retired desk never runs another cycle, so anything still open would sit
+    on the dashboard forever: marked at whatever the last quote happened to be,
+    never stopped out, never taken — an unsettled number pretending to be a
+    position. So the book is FLATTENED once, at the moment of retirement, at
+    the then-current market. That way the final equity is a real settled figure
+    and the curve ends on it, which is the whole point of keeping the record.
+
+    Runs exactly once, guarded by the retired_ts key. Every close is attempted
+    individually: one symbol whose quote cannot be fetched must not leave the
+    rest of the book open.
+    """
     try:
         db = LiveDB(team_db_path(name))
         try:
-            if not db.kv_get("retired_ts"):
-                db.kv_set("retired_ts", _today_et())
-                db.log_agent("system", "retired",
-                             f"{name} retired from the competition — trading stopped, "
-                             "record preserved")
+            if db.kv_get("retired_ts"):
+                return
+            closed, failed = [], []
+            try:
+                broker = PaperBroker(db, starting_equity=START_CASH)
+                for sym in [p["symbol"] for p in broker.positions()]:
+                    try:
+                        res = broker.close(sym, reason="retired")
+                        closed.append(f"{sym} ({res.get('pnl', 0):+.2f})"
+                                      if res.get("ok") else f"{sym} (refused)")
+                    except Exception as e:  # noqa: BLE001
+                        failed.append(f"{sym}: {e!r}"[:120])
+                for opt in broker.options.positions():
+                    try:
+                        broker.options.close_structure(int(opt["id"]), reason="retired")
+                        closed.append(f"option #{opt['id']}")
+                    except Exception as e:  # noqa: BLE001
+                        failed.append(f"option #{opt.get('id')}: {e!r}"[:120])
+                # Final snapshot, so the equity curve's last point is the
+                # settled book rather than the last mid-cycle mark.
+                db.record_equity(broker.cash(), broker.equity(),
+                                 len(broker.positions()), broker.drawdown_pct())
+            except Exception as e:  # noqa: BLE001
+                failed.append(f"settle failed: {e!r}"[:160])
+            detail = f"{name} retired — trading stopped, record preserved"
+            if closed:
+                detail += f"; settled {len(closed)}: {', '.join(closed)[:300]}"
+            if failed:
+                detail += f"; COULD NOT SETTLE: {'; '.join(failed)[:300]}"
+            db.kv_set("retired_ts", _today_et())
+            db.log_agent("system", "retired", detail)
+            print(f"[retire] {detail}")
+            if failed:
+                # Left open despite retiring is worth an alert: it is the one
+                # case where the frozen record is not actually final.
+                _notify(f"⚠️ {name} retired but could not settle everything: "
+                        f"{'; '.join(failed)[:400]}")
         finally:
             db.close()
     except Exception:  # noqa: BLE001 - never block startup on bookkeeping
