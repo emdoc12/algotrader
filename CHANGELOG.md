@@ -9,6 +9,28 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.47.1] — 2026-09-13
+
+### Changed — the 15-minute off-hours trial is cancelled before it ran a full day
+With the research surface the desks said they wanted, the 15-minute cadence
+priced out at ~$745/month across seven desks rather than the ~$256 the trial
+was agreed on. Owner's call, and the right one: the desks have been trading
+and researching for months and all but one have returned under 1%, so paying
+12x for more cycles of a process that has not yet produced a result is not a
+trial, it is a subscription to hope. `CRYPTO_FAST_UNTIL` now defaults to empty
+and the off-hours cadence stays at `CRYPTO_CYCLE_MINUTES` (180), putting the
+off-hours lane at ~$62/month.
+
+The trial WINDOW mechanism is deliberately kept, not deleted: setting
+`CRYPTO_FAST_UNTIL` to a date still runs a self-expiring experiment at
+`CRYPTO_FAST_CYCLE_MINUTES`. It is the right shape for any future cost
+experiment precisely because it ends on its own — and the reason this one
+could be cancelled at a cost of zero is that it had not yet been paid for.
+
+Everything else from 6.45-6.47 stands: crypto still trades 24/7, the
+off-hours agent is still lean and can still research, and the journal still
+coalesces repeated notes.
+
 ## [6.47.0] — 2026-09-13
 
 ### Fixed — the off-hours agent could not do the one thing every desk said it would do

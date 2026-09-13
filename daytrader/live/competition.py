@@ -90,8 +90,15 @@ CRYPTO_CYCLE_MIN = float(os.environ.get("CRYPTO_CYCLE_MINUTES", "180"))
 # these cadences it is the difference between ~$41 and ~$493 a month across
 # seven desks. Past CRYPTO_FAST_UNTIL the cadence reverts to CRYPTO_CYCLE_MIN
 # with no action required; extend the date (or clear it) to change that.
+# Trial CANCELLED before it ran a full day: with the research surface the
+# desks asked for, the 15-minute cadence priced out at ~$745/month across
+# seven desks — against desks that have returned under 1% each over months of
+# trading and researching. Paying 12x for more of a process that has not yet
+# produced a result is not a trial, it is a subscription to hope. The window
+# mechanism stays (set CRYPTO_FAST_UNTIL to a date to run it) because it is
+# the right shape for any future cost experiment: it expires by itself.
 CRYPTO_FAST_CYCLE_MIN = float(os.environ.get("CRYPTO_FAST_CYCLE_MINUTES", "15"))
-CRYPTO_FAST_UNTIL = os.environ.get("CRYPTO_FAST_UNTIL", "2026-09-30").strip()
+CRYPTO_FAST_UNTIL = os.environ.get("CRYPTO_FAST_UNTIL", "").strip()
 
 
 def crypto_cadence_min() -> float:
