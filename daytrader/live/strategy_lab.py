@@ -180,15 +180,21 @@ def run_backtest(
         except Exception:  # noqa: BLE001
             symbols = list(loader.DEFAULT_UNIVERSE)
     symbols = [str(s).upper() for s in symbols][:30]
-    if "SPY" not in symbols:
-        symbols = symbols + ["SPY"]
+    # SPY is always fetched for the buy-and-hold benchmark and for RS-vs-SPY
+    # features, but it must not silently join the traded universe — a desk
+    # that asked for a crypto-only symbol list should never get SPY trades
+    # back in sample_trades just because we needed its close for the bench.
+    load_symbols = symbols if "SPY" in symbols else symbols + ["SPY"]
 
     rng = f"{lookback_days}d"
     try:
-        data = loader.load_many(symbols, interval=interval, rng=rng, max_age_hours=12)
+        data = loader.load_many(load_symbols, interval=interval, rng=rng, max_age_hours=12)
     except Exception as e:  # noqa: BLE001
         return {"error": f"data load failed: {e!r}"}
     if not data:
+        return {"error": "no data loaded for the requested symbols/interval"}
+    trade_data = {s: df for s, df in data.items() if s in symbols}
+    if not trade_data:
         return {"error": "no data loaded for the requested symbols/interval"}
 
     # Build the ensemble. Pin a regime if asked, else use each strategy's
@@ -209,7 +215,7 @@ def run_backtest(
         # Cross-sectional context so a rule can condition on the TAPE (breadth,
         # sector cluster), not just the single chart. Built from the same universe
         # the backtest trades, so it is identical to what the desk saw live.
-        market_ctx = _market_context(data, interval)
+        market_ctx = _market_context(trade_data, interval)
         for strat in custom_strats:
             if spy_df is not None:
                 strat._spy_close = spy_df["close"]
@@ -230,7 +236,7 @@ def run_backtest(
 
     try:
         ens = Ensemble(allocs, adx_threshold=adx_threshold, market_filter=market_filter)
-        signals = ens.generate(data)
+        signals = ens.generate(trade_data)
     except Exception as e:  # noqa: BLE001
         return {"error": f"signal generation failed: {e!r}"}
 
@@ -245,7 +251,7 @@ def run_backtest(
     if N > 1 and signals:
         from daytrader.core.indicators import adx as _adx
         from daytrader.core.types import SignalType as _ST
-        adx_series = {s: _adx(df, 14) for s, df in data.items()}
+        adx_series = {s: _adx(df, 14) for s, df in trade_data.items()}
         kept = []
         for sig in signals:
             if getattr(sig, "type", None) != _ST.ENTRY:
@@ -280,7 +286,7 @@ def run_backtest(
                        breakeven_at_r=float(breakeven_at_r or 0.0))
     try:
         engine = BacktestEngine(cfg)
-        trades, equity = engine.run(data, signals)
+        trades, equity = engine.run(trade_data, signals)
     except Exception as e:  # noqa: BLE001
         return {"error": f"backtest run failed: {e!r}"}
 
@@ -321,7 +327,7 @@ def run_backtest(
         "config": {
             "strategies": names,
             "regime": sorted(pinned) if pinned else "natural (per-strategy)",
-            "symbols": [s for s in symbols if s in data],
+            "symbols": [s for s in symbols if s in trade_data],
             "lookback_days": lookback_days,
             "interval": interval,
             "adx_threshold": adx_threshold,

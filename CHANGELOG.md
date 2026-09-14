@@ -9,6 +9,30 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.50.3] — 2026-09-14
+
+### Fixed — backtest_custom_strategy traded SPY even for a crypto-only symbol list
+`strategy_lab.run_backtest` force-appended `"SPY"` onto the caller's `symbols`
+list so it always had a close series for the buy-and-hold benchmark and for
+RS-vs-SPY features. That combined list was then passed straight to
+`Ensemble.generate` and `BacktestEngine.run`, which iterate every symbol in
+the data they're given — so SPY got signals, fills, and trades exactly like
+any requested symbol. A desk running a crypto-only custom rule
+(`symbols=['BTC-USD','ETH-USD','SOL-USD']`) got back a config showing
+`['BTC-USD','ETH-USD','SOL-USD','SPY']` and SPY shorts in `sample_trades`,
+contaminating crypto research with equity trades nobody asked for (#46).
+
+SPY is now only fetched into a separate load set, never merged into the
+caller's `symbols`. A new `trade_data` (the loaded bars restricted to the
+requested symbols) is what actually goes through signal generation and the
+engine; the full data (with SPY) is kept only for the benchmark return and
+the RS-vs-SPY feature injection. Requesting SPY explicitly still trades it
+normally. Verified with synthetic OHLCV fixtures standing in for the data
+loader: pre-fix, `config.symbols` and `sample_trades` both leaked SPY for a
+BTC/ETH/SOL-only request; post-fix, neither does, the SPY benchmark return is
+still reported, and an explicit `symbols=['AAPL','SPY']` request still trades
+SPY.
+
 ## [6.50.2] — 2026-09-13
 
 ### Fixed — v6.50.1's settlement could never run on the desk it was written for
