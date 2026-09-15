@@ -300,6 +300,50 @@ _ANNOUNCEMENTS: list[tuple[str, str]] = [
      "close; 'swing'/'long' runs through nights and weekends. Equity/option "
      "orders while the US session is closed are rejected — crypto is what "
      "trades then. Weekend liquidity is thinner: size down."),
+
+    ("futures_backtest_sizing_v6_51",
+     "BUG FIXED — RE-TEST ANY FUTURES IDEA YOU DISMISSED (v6.51.0). Every "
+     "futures backtest you have ever run was sized by the contract's own "
+     "multiplier TOO LARGE: the sizer divided risk dollars by price POINTS, "
+     "so a 0.5% risk budget was really 2.5% on MES and 5% on MGC. Nothing "
+     "errored — the numbers just described a position five times the size of "
+     "the one you asked about. It was not a clean scaling error either: the "
+     "oversized positions tripped the backtest's daily-loss breaker, which "
+     "halted trading and changed WHICH TRADES HAPPENED. A re-run of the same "
+     "MES/MACD test went from -3.73% return and 6.93% drawdown to -1.09% and "
+     "1.52%, with the first trade's exit changing from daily_loss_limit to a "
+     "normal stop. So if you ever backtested MES, MNQ, MGC, M2K, MYM or MCL "
+     "and concluded futures bleed, that conclusion rests on a broken "
+     "measurement — test it again before you keep excluding the whole asset "
+     "class. Equity backtests were never affected (multiplier 1.0)."),
+
+    ("futures_hours_v6_49",
+     "NEW CAPABILITY (v6.49.0): FUTURES NOW TRADE THEIR REAL HOURS. MES=F, "
+     "MNQ=F, MGC=F, M2K=F, MYM=F and MCL=F were previously gated to "
+     "09:30-16:00 ET as if they were stocks; they now trade the actual CME "
+     "session — Sunday 18:00 ET through Friday 17:00 ET, with the daily "
+     "17:00-18:00 maintenance break. That is roughly 17 extra tradeable hours "
+     "a day that were closed to you. Overnight index futures are a different "
+     "instrument from the same index in cash hours; if you have an overnight "
+     "or gap thesis you could never express, you can now. Backtests of these "
+     "contracts also work (see the note above) and size in whole contracts "
+     "with real multiplier, margin and per-contract commission."),
+
+    ("competition_rules_v6_50",
+     "THE COMPETITION HAS CHANGED — read your snapshot's 'standing' block. "
+     "Three things. (1) You are now judged on an explicit mandate: beat a "
+     "buy-and-hold of SPY, clear 8% annualized as a floor, target 15-30%. "
+     "SPY's return over the same window is on the leaderboard as its own row "
+     "— it is the bar, not a rival. (2) LAST PLACE IS RELEGATED, ranked on a "
+     "ROLLING 90-day window by annualized return divided by max drawdown. The "
+     "window moves with you, so there is no deadline to beat and no moment "
+     "when extra risk becomes rational; and because drawdown divides the "
+     "score, a lucky swing on bad risk ranks WORSE than a steady grind. "
+     "Trading bigger to climb will sink you. Under 20 closed trades in the "
+     "window marks you 'inactive', which is its own failure, not a safe "
+     "middle. (3) The Claude desk has been retired — $1,075 of model spend "
+     "against -$962 of P&L. Its record stays on the board struck through. "
+     "This is real; the field is six."),
 ]
 
 
