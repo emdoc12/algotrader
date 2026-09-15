@@ -1491,7 +1491,7 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                 "type": "object",
                 "properties": {
                     "strategy": {"description": "Strategy name, profile (trend/momentum/all), or a list of names."},
-                    "symbols": {"type": "array", "items": {"type": "string"}, "description": "Tickers to test (default: today's watchlist)."},
+                    "symbols": {"type": "array", "items": {"type": "string"}, "description": "Tickers to test (default: today's watchlist, which includes the micro futures). FUTURES ARE TESTABLE: pass MES=F, MNQ=F, MGC=F, M2K=F, MYM=F or MCL=F and the engine sizes in whole contracts with the real multiplier, margin and per-contract commission — a futures backtest is directly comparable to an equity one."},
                     "lookback_days": {"type": "integer", "description": "Days of history (default 30; 5m data caps ~55d)."},
                     "interval": {"type": "string", "description": "Bar size: 5m/15m/30m/1h (default 5m)."},
                     "regimes": {"type": "array", "items": {"type": "string"}, "description": "Pin regime gating: trend, range, or any. Omit to use each strategy's natural regime."},
@@ -1532,7 +1532,7 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                 "properties": {
                     "config": {"type": "object", "description": "Inline strategy config (see description)."},
                     "name": {"type": "string", "description": "Name of a previously saved custom strategy (alternative to config)."},
-                    "symbols": {"type": "array", "items": {"type": "string"}, "description": "Tickers to test (default: today's watchlist)."},
+                    "symbols": {"type": "array", "items": {"type": "string"}, "description": "Tickers to test (default: today's watchlist, which includes the micro futures). FUTURES ARE TESTABLE: pass MES=F, MNQ=F, MGC=F, M2K=F, MYM=F or MCL=F and the engine sizes in whole contracts with the real multiplier, margin and per-contract commission — a futures backtest is directly comparable to an equity one."},
                     "lookback_days": {"type": "integer", "description": "Days of history (default 30)."},
                     "interval": {"type": "string", "description": "Bar size: 5m/15m/30m/1h (default 5m)."},
                     "regimes": {"type": "array", "items": {"type": "string"}, "description": "Pin regime gating (trend/range/any)."},

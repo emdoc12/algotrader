@@ -86,14 +86,29 @@ SizingFn = Callable[[float, Signal, float, float], float]
 
 
 def _default_sizer(equity: float, signal: Signal, price: float, atr: float) -> float:
-    """Risk a fixed 0.5% of equity per trade against the stop distance."""
+    """Risk a fixed 0.5% of equity per trade against the stop distance.
+
+    The stop distance is in PRICE POINTS; the risk budget is in DOLLARS, and
+    for a futures contract those are not the same unit. MES moves $5 per point,
+    MGC $10 — so dividing dollars by points without the multiplier sizes a
+    futures position by exactly that multiplier too large. This function did
+    that: a 0.5% risk budget became 2.5% of equity on MES and 5% on MGC, and
+    the engine's margin check let it through because the margin genuinely fit.
+    Nothing errored. The backtests just quietly reported the P&L of a position
+    five times the size of the one they claimed to be testing, which is the
+    worst kind of wrong — a number that looks like an answer.
+
+    Multiplier is 1.0 for equities, so the share path is unchanged.
+    """
     risk_dollars = equity * 0.005
+    mult = _multiplier(signal.symbol) or 1.0
     if signal.stop and price:
-        per_share_risk = abs(price - signal.stop)
-        if per_share_risk > 0:
-            return max(0.0, risk_dollars / per_share_risk)
+        # dollars of risk per unit held, not points
+        per_unit_risk = abs(price - signal.stop) * mult
+        if per_unit_risk > 0:
+            return max(0.0, risk_dollars / per_unit_risk)
     # fall back to a small notional if no stop provided
-    return (equity * 0.05) / price if price else 0.0
+    return (equity * 0.05) / (price * mult) if price else 0.0
 
 
 class BacktestEngine:
