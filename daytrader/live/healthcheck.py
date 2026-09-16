@@ -119,6 +119,32 @@ def _check_tastytrade() -> dict:
             "detail": f"tastytrade rejected the credentials: {why}{hint}"}
 
 
+def _token_days_left(header_value) -> float | None:
+    """Days until a fine-grained PAT expires, from GitHub's own header.
+
+    GitHub sends it as "2026-09-17 00:00:00 UTC"; ISO turns up too depending
+    on the endpoint. Classic tokens with no expiry send nothing, which is not
+    an error — it means "never", so None reads as "no expiry to warn about".
+    """
+    if not header_value:
+        return None
+    raw = str(header_value).strip()
+    from datetime import datetime, timezone
+    for fmt in ("%Y-%m-%d %H:%M:%S %Z", "%Y-%m-%d %H:%M:%S UTC", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            dt = datetime.strptime(raw, fmt).replace(tzinfo=timezone.utc)
+            return (dt - datetime.now(timezone.utc)).total_seconds() / 86400.0
+        except ValueError:
+            continue
+    try:
+        dt = datetime.fromisoformat(raw.replace(" UTC", "+00:00").replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (dt - datetime.now(timezone.utc)).total_seconds() / 86400.0
+    except Exception:  # noqa: BLE001 - an unparseable date must not fail the row
+        return None
+
+
 def _check_github_bridge() -> dict:
     """Prove the dev-request → GitHub bridge actually works.
 
@@ -150,6 +176,16 @@ def _check_github_bridge() -> dict:
                      "User-Agent": "algotrader-healthcheck"})
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = _json.loads(resp.read().decode("utf-8", "replace"))
+            # GitHub returns a fine-grained token's expiry on every
+            # authenticated request. Reading it is free and it is the one
+            # failure this row could not previously see: a valid token that
+            # stops being valid on a date nobody is tracking. When it lapses
+            # the desks keep "filing" requests that only reach the local DB,
+            # the resolution sync stops broadcasting fixes, and the auto-fix
+            # pipeline goes quiet — all without a single error, because
+            # nothing is broken until it suddenly is.
+            expires_in = _token_days_left(resp.headers.get(
+                "github-authentication-token-expiration"))
         # The repo-level permissions object does NOT prove Issues access: a
         # fine-grained token with Contents-but-not-Issues shows push=true here
         # and then 403s on every issue it files — which is precisely how six
@@ -171,11 +207,39 @@ def _check_github_bridge() -> dict:
                                "GitHub. Fine-grained token: grant 'Issues: Read and "
                                "write'. Classic token: tick the full 'repo' scope.")}
         ms = int((time.time() - t0) * 1000)
+        detail = ("token valid: issues readable. NOTE this cannot prove issue "
+                  "CREATION (write) without creating one — if requests still "
+                  "fail to appear on GitHub, check the dashboard's degraded "
+                  "panel for github_issues: it records the exact HTTP error.")
+        if expires_in is not None:
+            when = (f"in {expires_in:.0f} days" if expires_in >= 1
+                    else ("TODAY" if expires_in > 0 else "ALREADY"))
+            if expires_in <= 7:
+                # Red on purpose. Nothing is broken yet, but this is the rare
+                # case where the owner must act on a DATE rather than on a
+                # failure — and if it lapses the pipeline fails silently, which
+                # is exactly the thing that is hard to notice.
+                try:
+                    from daytrader.data.feeds.base import record_named_error
+                    record_named_error(
+                        "github_token", "expiring",
+                        f"the GitHub token expires {when}",
+                        hint=("Regenerate it at github.com/settings/personal-access-tokens "
+                              "(the Regenerate button keeps the same permissions), then "
+                              "paste the new value into Settings. If it lapses, desk dev "
+                              "requests stop reaching GitHub, fixes stop being broadcast "
+                              "back, and nothing errors — it just goes quiet."))
+                except Exception:  # noqa: BLE001
+                    pass
+                return {**base, "configured": True, "ok": False, "latency_ms": ms,
+                        "detail": (f"TOKEN EXPIRES {when.upper()} — regenerate it and paste "
+                                   "the new value into Settings. It still works right now; "
+                                   "when it lapses, dev requests stop reaching GitHub and "
+                                   "fix broadcasts stop, with no error to notice. "
+                                   + detail)}
+            detail = f"expires {when}. " + detail
         return {**base, "configured": True, "ok": True, "latency_ms": ms,
-                "detail": ("token valid: issues readable. NOTE this cannot prove issue "
-                           "CREATION (write) without creating one — if requests still "
-                           "fail to appear on GitHub, check the dashboard's degraded "
-                           "panel for github_issues: it records the exact HTTP error.")}
+                "detail": detail}
     except Exception as e:  # noqa: BLE001
         ms = int((time.time() - t0) * 1000)
         return {**base, "configured": True, "ok": False, "latency_ms": ms,
