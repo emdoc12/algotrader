@@ -219,6 +219,7 @@ def run_backtest(
         for strat in custom_strats:
             if spy_df is not None:
                 strat._spy_close = spy_df["close"]
+                strat._spy_df = spy_df
             strat._market = market_ctx
             allocs.append(Allocation(strategy=strat, regimes=set(regset), weight=1.0))
     else:

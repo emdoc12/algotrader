@@ -54,6 +54,7 @@ _FEATURE_ALIASES = {
     "macd_line": "macd", "macd_sig": "macd_signal", "macd_histogram": "macd_hist",
     "bollinger_upper": "bb_upper", "bollinger_lower": "bb_lower", "bollinger_mid": "bb_mid",
     "vwap_dist_pct": "vs_vwap_pct",
+    "spy_adx14": "spy_adx", "spy_adx_14": "spy_adx",
 }
 
 _FEATURES = {
@@ -72,6 +73,14 @@ _FEATURES = {
     # short only on a broad-down day: {"left":"breadth_pct","op":"<=","right":35}.
     "breadth_pct", "breadth_advancers", "breadth_total", "breadth_change_20m",
     "sector_avg_adx", "sector_avg_adx_slope", "sector_pct_down", "sector_breadth_pct",
+    # SPY-specific gates (needs the SPY frame injected; NaN otherwise) — issue #47:
+    # stage a SINGLE symbol's entry so it only fires when the broad tape (not just
+    # that symbol's own chart) is in the proven regime, e.g. a morning long gated
+    # on {"left":"spy_price","op":">","right":"spy_vwap"} and
+    # {"left":"spy_adx_rising_nbars","op":">=","right":2}.
+    "spy_price", "spy_vwap", "spy_vs_vwap_pct", "spy_ema9", "spy_ema21", "spy_adx",
+    "spy_adx_rising_nbars", "spy_adx_decaying_nbars", "spy_day_change_pct",
+    "spy_direction", "spy_trend_day",
 }
 
 
@@ -179,13 +188,15 @@ class CustomRuleStrategy(Strategy):
             sym = None
         if sym and isinstance(mk.get(sym), dict):
             ctx.update(mk[sym])
-        return build_features(df, getattr(self, "_spy_close", None), ctx or None)
+        return build_features(
+            df, spy_close=getattr(self, "_spy_close", None), market=ctx or None,
+            spy_df=getattr(self, "_spy_df", None))
 
     def generate(self, df: pd.DataFrame) -> list[Signal]:
         return _generate_signals(self, df)
 
 
-def build_features(df: pd.DataFrame, spy_close=None, market=None) -> dict:
+def build_features(df: pd.DataFrame, spy_close=None, market=None, spy_df=None) -> dict:
     """Compute the full causal feature matrix (dict of {name: np.ndarray}) used by
     the custom-strategy DSL, the backtest, and the staged-order condition check.
 
@@ -195,6 +206,10 @@ def build_features(df: pd.DataFrame, spy_close=None, market=None) -> dict:
     onto this symbol's bars and forward-filled. Absent, those features are NaN —
     so a rule that conditions on breadth simply never fires rather than silently
     evaluating against garbage.
+    ``spy_df`` (optional) is SPY's own OHLCV frame — ``spy_close`` alone has no
+    high/low/volume, so it cannot drive SPY's own VWAP/ADX. Enables the spy_*
+    market-gate features; reindexed/forward-filled onto this symbol's bars the
+    same way as ``market``, and NaN (never a phantom fire) when absent.
     """
     close = df["close"]
     high, low = df["high"], df["low"]
@@ -245,6 +260,44 @@ def build_features(df: pd.DataFrame, spy_close=None, market=None) -> dict:
         nanv = pd.Series(np.nan, index=df.index)
         for k in ("rs_vs_spy_pct", "rs_slope_20m", "rs_persistence", "rs_stable"):
             feats[k] = nanv
+    # SPY-specific market gates: computed from SPY's OWN bars (not this
+    # symbol's), then reindexed/forward-filled onto this symbol's timeline —
+    # same causal pattern as the cross-sectional context below. spy_trend_day
+    # mirrors market_state._market_summary's trend-day test (SPY ADX >= 22 AND
+    # its EMA trend agrees with its day direction); keep the two in sync.
+    _SPY_FEATURES = ("spy_price", "spy_vwap", "spy_vs_vwap_pct", "spy_ema9",
+                      "spy_ema21", "spy_adx", "spy_adx_rising_nbars",
+                      "spy_adx_decaying_nbars", "spy_day_change_pct",
+                      "spy_direction", "spy_trend_day")
+    if spy_df is not None and len(spy_df) >= 20:
+        s_close = spy_df["close"]
+        s_ema9, s_ema21 = ind.ema(s_close, 9), ind.ema(s_close, 21)
+        s_adx = ind.adx(spy_df, 14)
+        s_vwap = ind.vwap_session(spy_df)
+        s_day = spy_df.index.normalize()
+        s_day_open = spy_df["open"].groupby(s_day).transform("first")
+        s_day_chg = (s_close / s_day_open - 1) * 100
+        s_rising, s_falling = s_adx.diff() > 0, s_adx.diff() < 0
+        spy_feats = {
+            "spy_price": s_close, "spy_vwap": s_vwap,
+            "spy_vs_vwap_pct": (s_close / s_vwap - 1) * 100,
+            "spy_ema9": s_ema9, "spy_ema21": s_ema21, "spy_adx": s_adx,
+            "spy_adx_rising_nbars": s_rising.astype(int).groupby((~s_rising).cumsum()).cumsum(),
+            "spy_adx_decaying_nbars": s_falling.astype(int).groupby((~s_falling).cumsum()).cumsum(),
+            "spy_day_change_pct": s_day_chg,
+            "spy_direction": np.sign(s_day_chg),
+            "spy_trend_day": (
+                (s_adx >= 22)
+                & (((s_ema9 > s_ema21) & (s_day_chg > 0))
+                   | ((s_ema9 < s_ema21) & (s_day_chg < 0)))
+            ).astype(float),
+        }
+        for k in _SPY_FEATURES:
+            feats[k] = spy_feats[k].reindex(df.index).ffill()
+    else:
+        nan_spy = pd.Series(np.nan, index=df.index)
+        for k in _SPY_FEATURES:
+            feats[k] = nan_spy
     # Cross-sectional context, aligned onto this symbol's bars.
     _MARKET_FEATURES = ("breadth_pct", "breadth_advancers", "breadth_total",
                         "breadth_change_20m", "sector_avg_adx",
@@ -317,16 +370,21 @@ def eval_condition(cond: dict, F: dict, i: int) -> bool:
     }[op]
 
 
-def check_conditions(df: pd.DataFrame, conditions, spy_close=None):
+def check_conditions(df: pd.DataFrame, conditions, spy_close=None, spy_df=None, market=None):
     """Evaluate a raw conditions list against the LAST bar of df. Returns
-    (ok: bool, detail: str). Used to gate staged-order firing."""
+    (ok: bool, detail: str). Used to gate staged-order firing.
+
+    ``spy_df`` and ``market`` are the same optional context ``build_features``
+    takes — pass them so a staged order can gate on spy_*/breadth_*/sector_*
+    features, not just this symbol's own chart. Omitted, those features are
+    NaN and any condition referencing them simply never fires."""
     try:
         norm = normalize_conditions(conditions)
     except StrategyConfigError as e:
         return False, f"invalid conditions: {e}"
     if df is None or len(df) < 40:
         return False, "insufficient bars to evaluate conditions"
-    F = build_features(df, spy_close)
+    F = build_features(df, spy_close=spy_close, market=market, spy_df=spy_df)
     i = len(df) - 1
     failed = []
     for raw, cond in zip(conditions, norm):

@@ -1143,13 +1143,39 @@ class Competition:
                     import json as _json
                     from daytrader.strategies.custom import check_conditions
                     conds = _json.loads(o["conditions"])
-                    spy_close = None
-                    if any("rs_" in str(c.get("left", "")) + str(c.get("right", "")) for c in conds):
+                    cond_text = " ".join(
+                        str(c.get("left", "")) + " " + str(c.get("right", "")) for c in conds)
+                    # SPY needs its own OHLCV frame (rs_* only needs its close) —
+                    # fetched on demand so a staged order with no market gate
+                    # doesn't pay for it on every ~2-min stop-poll.
+                    spy_close = spy_df = None
+                    if "rs_" in cond_text or "spy_" in cond_text:
                         try:
-                            spy_close = _loader.load("SPY", interval="5m", max_age_hours=0.1)["close"]
+                            spy_df = _loader.load("SPY", interval="5m", max_age_hours=0.1)
+                            spy_close = spy_df["close"]
                         except Exception:  # noqa: BLE001
-                            spy_close = None
-                    ok, detail = check_conditions(df, conds, spy_close=spy_close)
+                            spy_close = spy_df = None
+                    # breadth_*/sector_* need the traded universe's bars (issue #47:
+                    # these were already in the DSL vocabulary but always NaN here,
+                    # so a rule that gated on them could never fire). Same on-demand
+                    # gate — only load the universe when a condition actually asks.
+                    market_ctx = None
+                    if "breadth_" in cond_text or "sector_" in cond_text:
+                        try:
+                            from daytrader.live.market_state import _default_symbols
+                            from daytrader.live.strategy_lab import _market_context
+                            syms = _default_symbols()
+                            if sym not in syms:
+                                syms = syms + [sym]
+                            udata = _loader.load_many(syms, interval="5m", max_age_hours=0.1)
+                            uctx = _market_context(udata, "5m")
+                            market_ctx = dict(uctx.get("_global") or {})
+                            if isinstance(uctx.get(sym), dict):
+                                market_ctx.update(uctx[sym])
+                        except Exception:  # noqa: BLE001
+                            market_ctx = None
+                    ok, detail = check_conditions(
+                        df, conds, spy_close=spy_close, spy_df=spy_df, market=market_ctx)
                     if not ok:
                         reasons.append(detail)
                 except Exception as e:  # noqa: BLE001

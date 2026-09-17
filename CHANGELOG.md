@@ -9,6 +9,53 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.52.0] — 2026-09-17
+
+### Added — stage_order conditions can now gate on SPY and market breadth (#47)
+The recovery lane's only profitable bucket is a narrow 10:00-11:00 SPY-aligned
+morning long, but `stage_order.conditions` could only check the symbol's OWN
+chart — there was no way to pre-stage a candidate that only fires when the
+broad tape (SPY trend/VWAP/ADX, universe breadth) is in the proven regime. Two
+separate gaps caused this:
+
+1. `breadth_pct` / `breadth_change_20m` / `sector_*` were already in the DSL's
+   feature vocabulary (added for backtesting) and even documented in a code
+   comment, but `Competition._fire_staged_for_team` — the code that actually
+   evaluates a staged order's conditions live — never passed a `market`
+   context into `build_features`. Every condition referencing them evaluated
+   against `NaN` and silently failed forever; a desk had no way to discover
+   this short of reading the source, since `stage_order`'s tool description
+   never mentioned the feature existed either.
+2. There was no way to condition on SPY's OWN indicators (its VWAP, EMA9/21,
+   ADX) at all — every DSL feature reads the traded symbol's bars, and SPY's
+   close alone (injected for `rs_vs_spy_pct`) has no high/low/volume to drive
+   a VWAP or ADX.
+
+Fixed both. `build_features` takes an optional `spy_df` (SPY's full OHLCV
+frame) and computes `spy_price`, `spy_vwap`, `spy_vs_vwap_pct`, `spy_ema9`,
+`spy_ema21`, `spy_adx` (alias `spy_adx14`), `spy_adx_rising_nbars`,
+`spy_adx_decaying_nbars`, `spy_day_change_pct`, `spy_direction` (-1/0/1), and
+`spy_trend_day` (0/1, mirrors `market_state._market_summary`'s trend-day
+test) — computed causally on SPY's own bars, then reindexed/forward-filled
+onto the traded symbol's timeline, same pattern already used for breadth.
+Absent `spy_df`, these are `NaN`, so a rule fails closed rather than firing on
+garbage. `_fire_staged_for_team` now loads SPY's frame and the trading
+universe's breadth/sector context on demand — only when a staged order's
+conditions actually reference `spy_*`/`breadth_*`/`sector_*`, so orders
+without a market gate pay nothing extra on the ~2-min stop-poll. Both tool
+descriptions (`stage_order`, `backtest_custom_strategy`) now list the
+market-wide features so a desk can find them without reading the source.
+
+Verified against real cached market data: a `backtest_custom_strategy` config
+gated on `spy_price > spy_vwap` and `spy_adx_decaying_nbars == 0` generated
+real trades (33 trades, PF 1.96) end-to-end through the backtest engine; the
+same `check_conditions` call `_fire_staged_for_team` makes was run directly
+against live-loaded bars and correctly evaluated `spy_*`/`breadth_pct`
+conditions true/false, and failed closed with no context supplied. Added
+`test_spy_features_are_causal` to `tests/test_causality.py` (perturbing
+future SPY bars must not change any `spy_*` feature at/before the cut bar) —
+all 4 causality tests pass.
+
 ## [6.50.3] — 2026-09-14
 
 ### Fixed — backtest_custom_strategy traded SPY even for a crypto-only symbol list

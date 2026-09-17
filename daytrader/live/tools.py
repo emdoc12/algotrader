@@ -1401,7 +1401,7 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                     "max_ema9_dist_atr": {"type": "number", "description": "Skip if |price-EMA9| exceeds this many ATRs at fire time (entry still near EMA9)."},
                     "min_adx": {"type": "number", "description": "Skip if the symbol's ADX is below this at fire time."},
                     "conditions": {"type": "array", "items": {"type": "object"},
-                                   "description": "General entry conditions using the SAME grammar as backtest_custom_strategy (each {left, op, right}; features like macd_hist, macd_hist_prev, adx, ema9, rs_stable, etc.). ALL must hold at fire time. E.g. [{\"left\":\"macd_hist\",\"op\":\"<\",\"right\":\"macd_hist_prev\"},{\"left\":\"macd_hist_prev\",\"op\":\"<\",\"right\":0}] to catch a downward MACD-hist re-expansion. Lets you pre-stage the exact validated trigger."},
+                                   "description": "General entry conditions using the SAME grammar as backtest_custom_strategy (each {left, op, right}; features like macd_hist, macd_hist_prev, adx, ema9, rs_stable, etc.). ALL must hold at fire time. E.g. [{\"left\":\"macd_hist\",\"op\":\"<\",\"right\":\"macd_hist_prev\"},{\"left\":\"macd_hist_prev\",\"op\":\"<\",\"right\":0}] to catch a downward MACD-hist re-expansion. Lets you pre-stage the exact validated trigger. Also supports MARKET-WIDE gates so a symbol only fires when the broad tape agrees, not just its own chart: spy_price, spy_vwap, spy_vs_vwap_pct, spy_ema9, spy_ema21, spy_adx (alias spy_adx14), spy_adx_rising_nbars, spy_adx_decaying_nbars, spy_day_change_pct, spy_direction (-1/0/1), spy_trend_day (0/1); breadth_pct, breadth_change_20m, sector_avg_adx, sector_pct_down, sector_breadth_pct. E.g. a 10-11am SPY-aligned long: [{\"left\":\"spy_price\",\"op\":\">\",\"right\":\"spy_vwap\"},{\"left\":\"spy_adx_decaying_nbars\",\"op\":\"==\",\"right\":0},{\"left\":\"breadth_pct\",\"op\":\">=\",\"right\":60}]."},
                 },
                 "required": ["symbol", "side", "qty", "stop", "target"],
             },
@@ -1523,7 +1523,15 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
                 "sma20, rsi, rsi2, atr, atr_pct, adx, vwap, vs_vwap_pct, macd, macd_signal, "
                 "macd_hist, bb_upper, bb_lower, bb_mid, bb_pct, day_change_pct, gap_pct, "
                 "ret1, ret3, rs_vs_spy_pct, rs_slope_20m, rs_persistence, rs_stable (0/1), "
-                "adx_rising_nbars, adx_decaying_nbars. Exits (ATR stop, rr target, EOD-flat) are handled by the engine "
+                "adx_rising_nbars, adx_decaying_nbars. MARKET-WIDE features (cross-sectional over "
+                "the tested universe, or SPY's own chart — NaN if only one symbol is tested): "
+                "breadth_pct, breadth_advancers, breadth_total, breadth_change_20m, sector_avg_adx, "
+                "sector_avg_adx_slope, sector_pct_down, sector_breadth_pct, spy_price, spy_vwap, "
+                "spy_vs_vwap_pct, spy_ema9, spy_ema21, spy_adx (alias spy_adx14), "
+                "spy_adx_rising_nbars, spy_adx_decaying_nbars, spy_day_change_pct, "
+                "spy_direction (-1/0/1), spy_trend_day (0/1) — same grammar works in stage_order's "
+                "'conditions' to pre-stage a single symbol gated on the broad tape. "
+                "Exits (ATR stop, rr target, EOD-flat) are handled by the engine "
                 "— same as the built-ins, so results are directly comparable. Returns the "
                 "same metrics + verdict as backtest_strategy."
             ),

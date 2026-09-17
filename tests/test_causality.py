@@ -52,6 +52,32 @@ def test_custom_features_are_causal():
             f"feature {feat!r} leaks future data (values at/before bar {i} changed)")
 
 
+def test_spy_features_are_causal():
+    """spy_* market-gate features (issue #47) must not leak future SPY bars,
+    same guarantee as the single-symbol features above — a desk pre-staging
+    an entry on tomorrow's SPY regime would be a fake edge, not a real one."""
+    df = _synth(seed=1)
+    spy_df = _synth(seed=2)
+    spy_df["symbol"] = "SPY"
+    strat = CustomRuleStrategy({"name": "probe", "side": "long",
+                                "entry": [{"left": "rsi", "op": "<", "right": 50}]})
+    strat._spy_df = spy_df
+    base = strat._features(df)
+    i = len(df) - 15
+    corrupt_spy = spy_df.copy()
+    corrupt_spy.iloc[i + 1:, corrupt_spy.columns.get_indexer(["open", "high", "low", "close"])] *= 1.5
+    strat._spy_df = corrupt_spy
+    pert = strat._features(df)
+    spy_feats = [f for f in _FEATURES if f.startswith("spy_")]
+    assert spy_feats, "spy_* features missing from the DSL vocabulary"
+    for feat in spy_feats:
+        b = np.asarray(base[feat][:i + 1], dtype="float64")
+        p = np.asarray(pert[feat][:i + 1], dtype="float64")
+        mask = ~(np.isnan(b) | np.isnan(p))
+        assert np.allclose(b[mask], p[mask], rtol=1e-6, atol=1e-6), (
+            f"feature {feat!r} leaks future SPY data (values at/before bar {i} changed)")
+
+
 def test_gap_pct_uses_prior_session_close():
     """gap_pct on day N must reference day N-1's close, constant across the day."""
     d1 = pd.date_range("2026-06-25 09:30", periods=10, freq="5min", tz="America/New_York")
