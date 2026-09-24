@@ -187,7 +187,10 @@ class LiveDB:
                 closed_ts   TEXT,
                 close_cash  REAL,
                 pnl         REAL,
-                exit_reason TEXT
+                exit_reason TEXT,
+                last_mark_mv       REAL,  -- last fully-live signed mid value
+                last_mark_worst_mv REAL,  -- last fully-live worst-case (bid/ask) value
+                last_mark_ts       TEXT
             );
             CREATE TABLE IF NOT EXISTS token_usage (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -215,6 +218,9 @@ class LiveDB:
         try:
             self._ensure_column("journal", "repeats", "INTEGER DEFAULT 1")
             self._ensure_column("option_positions", "open_commission", "REAL DEFAULT 0")
+            self._ensure_column("option_positions", "last_mark_mv", "REAL")
+            self._ensure_column("option_positions", "last_mark_worst_mv", "REAL")
+            self._ensure_column("option_positions", "last_mark_ts", "TEXT")
             self._ensure_column("dev_requests", "report_count", "INTEGER DEFAULT 1")
             self._ensure_column("dev_requests", "last_reported_ts", "TEXT")
             self._ensure_column("dev_requests", "resolution", "TEXT")
@@ -798,6 +804,20 @@ class LiveDB:
             (_now_iso(), float(close_cash), float(pnl), str(exit_reason or ""), int(pid)))
         self.conn.commit()
         return cur.rowcount > 0
+
+    def update_option_mark(self, pid: int, mv: float, worst_mv: float, ts: str) -> None:
+        """Persist the last FULLY-LIVE mark for a structure.
+
+        Read back by OptionsBook._mark_structure as the fallback when a later
+        poll can only get a live quote for some of the structure's legs — so
+        a partial chain miss holds the position at its last trustworthy price
+        instead of blending a live leg with one still priced at open.
+        """
+        self.conn.execute(
+            "UPDATE option_positions SET last_mark_mv=?, last_mark_worst_mv=?, "
+            "last_mark_ts=? WHERE id=?",
+            (float(mv), float(worst_mv), str(ts), int(pid)))
+        self.conn.commit()
 
     def recent_option_positions(self, limit: int = 50) -> list[dict]:
         cur = self.conn.execute(

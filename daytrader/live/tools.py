@@ -1267,7 +1267,13 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
         {
             "name": "get_option_positions",
             "description": ("Open options structures with mark-to-market P&L, %% of max "
-                            "profit captured, DTE, collateral held and remaining buying power."),
+                            "profit captured, DTE, collateral held and remaining buying power. "
+                            "cost_to_close is the bid/ask-aware WORST case to close (pay the "
+                            "ask on a short, collect the bid on a long). mark_quality is "
+                            "'suspect' when the live chain could not quote every leg this poll "
+                            "— the position is held at its last fully-live mark rather than a "
+                            "fresh price, and auto-close does not act on it; treat it as a "
+                            "reason to check the chain by hand before trusting the number."),
             "input_schema": {"type": "object", "properties": {}},
         },
         {

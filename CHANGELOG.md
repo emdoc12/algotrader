@@ -9,6 +9,57 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.53.0] — 2026-09-24
+
+### Fixed — a held option spread's mark could blend one leg's live quote with the other leg's price from weeks earlier (#48)
+A desk held a PLTR bull put spread (167.5P/162.5P) and watched its
+`cost_to_close` jump from $122 to $568 in one poll — while PLTR spot rallied
+15% *above* the short strike and IV sat flat. A hand check of the live chain
+at that moment (bid/ask on both legs) priced the same spread at $148. The
+engine's mark was off by $420+ on a $210-credit spread, on the side that
+fabricates a loss: equity/drawdown misreported the desk's standing, and the
+50%-of-max auto-close (which reads `cost_to_close`) was blocked from a
+legitimate close while, symmetrically, a mark corrupted the other way could
+have fired a spurious auto-close on a healthy structure.
+
+Root cause: `OptionsBook.market_value` priced each leg of a structure with
+its own independent chain lookup, and any leg the chain could not currently
+quote fell back to `l.price` — that leg's premium *at open*, weeks stale, not
+its last live mark as `mark_leg`'s own docstring claims. When one leg of a
+two-leg spread got a live tick and the other missed (a quiet stream, an
+illiquid strike sampled out of the chain's window, an unlucky rest of the
+zoo of transient tastytrade hiccups), the sum was two prices from two
+different markets that were never quoted together — the actual $568 was this
+kind of blend, not a real price at any moment.
+
+Fixed by pricing every leg from ONE poll before trusting any of it
+(`OptionsBook._mark_structure`, new):
+
+- A structure is priced live only when **every** leg has a live two-sided
+  quote this cycle. When it does, the structure's mid AND its bid/ask-aware
+  **worst case** to close (pay the ask to buy back a short, collect only the
+  bid to sell a long — what the reporter's manual $148 check already did)
+  are computed and written back as the position's last known good mark.
+- When any leg misses, the structure holds at that last known good mark
+  instead of blending a live leg with a stale one, and reports
+  `mark_quality: "suspect"` in `get_option_positions`. `manage()`'s
+  profit-target auto-close now skips evaluation entirely on a suspect mark
+  rather than acting on a price the chain never actually gave — a DTE exit
+  still fires on schedule since it doesn't depend on the mark at all.
+- `cost_to_close` in `get_option_positions` is now this worst-case number
+  (previously a stale mid); `close_option_position` still fills at the
+  atomically-priced mid, now free of the same cross-leg blending bug, so a
+  manual close can no longer lock in a phantom loss off a corrupt mark.
+- `option_positions` gained `last_mark_mv` / `last_mark_worst_mv` /
+  `last_mark_ts` columns to carry the last trustworthy mark across polls.
+
+Per-leg last-trade timestamps (also requested, to let a desk spot one stale
+leg without a manual chain diff) were not added — the chain stream here
+carries quotes and Greeks, not trade prints, and wiring up a third streamed
+event type is a heavier, separate change. `mark_quality` + `mark_ts` give the
+same practical signal today: a desk sees directly when the engine itself
+does not trust the number, instead of inferring it from an implausible P&L.
+
 ## [6.52.0] — 2026-09-17
 
 ### Added — stage_order conditions can now gate on SPY and market breadth (#47)

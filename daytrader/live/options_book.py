@@ -145,8 +145,8 @@ class OptionsBook:
         self.db = broker.db
 
     # -- pricing ----------------------------------------------------------- #
-    def _chain_price(self, c) -> float | None:
-        """Mid price for one contract from the live chain, or None."""
+    def _leg_slot(self, c) -> dict | None:
+        """Raw bid/ask dict for one contract from the live chain, or None."""
         try:
             from daytrader.live import tastytrade_data as tt
             if not tt.is_configured():
@@ -163,14 +163,38 @@ class OptionsBook:
                 or (block.get("strikes") or {}).get(str(c.strike))
             if not slot:
                 return None
-            leg = slot.get("call" if c.is_call() else "put") or {}
-            bid, ask = leg.get("bid"), leg.get("ask")
-            if bid is not None and ask is not None and ask > 0:
-                return (float(bid) + float(ask)) / 2.0
-            return float(ask or bid) if (ask or bid) else None
+            return slot.get("call" if c.is_call() else "put") or {}
         except Exception as e:  # noqa: BLE001
-            log.info("options: chain price for %s failed (%s)", c, e)
+            log.info("options: chain quote for %s failed (%s)", c, e)
             return None
+
+    def _chain_price(self, c) -> float | None:
+        """Mid price for one contract from the live chain, or None."""
+        leg = self._leg_slot(c)
+        if not leg:
+            return None
+        bid, ask = leg.get("bid"), leg.get("ask")
+        if bid is not None and ask is not None and ask > 0:
+            return (float(bid) + float(ask)) / 2.0
+        return float(ask or bid) if (ask or bid) else None
+
+    def _leg_quote(self, c) -> dict | None:
+        """Live two-sided bid/ask/mid for one contract, or None.
+
+        Stricter than :meth:`_chain_price`: a one-sided quote is enough to
+        hold a structure flat when it is opened (see ``mark_leg``), but is
+        NOT enough to compute a trustworthy worst-case close or to decide a
+        structure's mark is fully live. Used by :meth:`_mark_structure`,
+        never by the opening path.
+        """
+        leg = self._leg_slot(c)
+        if not leg:
+            return None
+        bid, ask = leg.get("bid"), leg.get("ask")
+        if bid is None or ask is None or ask <= 0:
+            return None
+        bid, ask = float(bid), float(ask)
+        return {"bid": bid, "ask": ask, "mid": (bid + ask) / 2.0}
 
     def mark_leg(self, c, fallback: float | None = None) -> float | None:
         """Current per-share value of a contract.
@@ -442,6 +466,58 @@ class OptionsBook:
             total += l.qty * float(px or 0.0) * l.contract.multiplier
         return total
 
+    def _mark_structure(self, row: dict) -> dict:
+        """Price one structure from ONE consistent read of the live chain.
+
+        ``market_value`` prices each leg independently and falls back, per
+        leg, to that leg's stored ``price`` — which for a leg the chain
+        cannot currently quote is its price at OPEN, weeks stale. Summing one
+        leg's live tick with another leg's frozen entry price manufactures a
+        combination the market never quoted: a 29-DTE PLTR put spread once
+        showed a $568 cost to close this way while the live chain (checked
+        by hand, bid/ask on both legs) priced it at $148 (dev request #48).
+
+        So a structure is only "live" here when EVERY leg has a live
+        two-sided quote this poll. When it does, this also returns the
+        bid/ask-aware WORST CASE to close (pay the ask to buy back a short,
+        collect only the bid to sell a long) and writes both back as the
+        structure's last known good mark. When it does not, the structure
+        holds at that last known good mark rather than blending live and
+        stale legs, and reports quality ``suspect`` — callers should not
+        treat a suspect mark as good enough to act on (see ``manage``).
+        """
+        legs = self._legs_of(row)
+        mid_total = 0.0
+        worst_total = 0.0
+        live = True
+        for l in legs:
+            q = self._leg_quote(l.contract)
+            if q is None:
+                live = False
+                break
+            mid_total += l.qty * q["mid"] * l.contract.multiplier
+            worst_px = q["ask"] if l.is_short else q["bid"]
+            worst_total += l.qty * worst_px * l.contract.multiplier
+
+        if live:
+            try:
+                self.db.update_option_mark(row["id"], mid_total, worst_total, _now_iso())
+            except Exception:  # noqa: BLE001
+                pass
+            return {"mv": mid_total, "worst_mv": worst_total, "quality": "live",
+                    "mark_ts": _now_iso(), "legs": legs}
+
+        last_mv, last_worst = row.get("last_mark_mv"), row.get("last_mark_worst_mv")
+        if last_mv is not None and last_worst is not None:
+            return {"mv": float(last_mv), "worst_mv": float(last_worst),
+                    "quality": "suspect", "mark_ts": row.get("last_mark_ts"), "legs": legs}
+
+        # No live mark has ever landed for this structure — freshly opened, or
+        # the chain has never once quoted every leg at the same time. Best
+        # effort, still flagged so a caller does not treat it as trustworthy.
+        mv = self.market_value(legs)
+        return {"mv": mv, "worst_mv": mv, "quality": "suspect", "mark_ts": None, "legs": legs}
+
     def collateral_held(self) -> float:
         return sum(float(r.get("collateral") or 0.0) for r in self.db.open_option_positions())
 
@@ -465,7 +541,7 @@ class OptionsBook:
         total = 0.0
         for row in self.db.open_option_positions():
             try:
-                total += self.market_value(self._legs_of(row))
+                total += self._mark_structure(row)["mv"]
             except Exception:  # noqa: BLE001
                 continue
         return total
@@ -484,13 +560,16 @@ class OptionsBook:
         today = _today()
         for row in self.db.open_option_positions():
             try:
-                legs = self._legs_of(row)
+                mark = self._mark_structure(row)
             except Exception:  # noqa: BLE001
                 continue
-            mv = self.market_value(legs)
+            legs = mark["legs"]
             open_cash = float(row.get("open_cash") or 0.0)
-            # P&L if closed now: what you took in, less what it costs to close.
-            pnl = open_cash + mv
+            # P&L if closed now at a fair mid: what you took in, less what it
+            # is worth to close. cost_to_close is deliberately the WORSE
+            # bid/ask number (pay the ask on a short, collect the bid on a
+            # long) because that is the number a real close cannot beat.
+            pnl = open_cash + mark["mv"]
             max_profit = row.get("max_profit")
             pct = (100.0 * pnl / float(max_profit)) if max_profit else None
             dte = min(l.contract.dte(today) for l in legs)
@@ -501,13 +580,18 @@ class OptionsBook:
                 "expiration": row.get("expiration"), "dte": dte,
                 "net_credit_received": round(open_cash, 2) if open_cash > 0 else 0.0,
                 "net_debit_paid": round(-open_cash, 2) if open_cash < 0 else 0.0,
-                "cost_to_close": round(-mv, 2),
+                "cost_to_close": round(-mark["worst_mv"], 2),
                 "unrealized_pnl": round(pnl, 2),
                 "pct_of_max_profit": round(pct, 1) if pct is not None else None,
                 "max_loss": row.get("max_loss"), "max_profit": max_profit,
                 "collateral": row.get("collateral"),
                 "legs": [f"{l.contract} x{l.qty:+g}" for l in legs],
                 "rationale": row.get("rationale"),
+                # 'suspect' means at least one leg had no live two-sided quote
+                # this poll — cost_to_close/unrealized_pnl above are held at
+                # the last fully-live mark rather than a fresh blend of live
+                # and stale legs. See _mark_structure.
+                "mark_quality": mark["quality"], "mark_ts": mark["mark_ts"],
             })
         return out
 
@@ -517,12 +601,15 @@ class OptionsBook:
         if row is None or row.get("status") != "open":
             return {"ok": False, "error_code": "no_such_position",
                     "reason": f"no OPEN option position #{pid}"}
-        legs = self._legs_of(row)
-        mv = self.market_value(legs)
+        mark = self._mark_structure(row)
+        legs = mark["legs"]
         commission = OPTION_COMMISSION * sum(abs(l.qty) for l in legs)
         open_cash = float(row.get("open_cash") or 0.0)
         # Closing means reversing the position: you receive its market value.
-        close_cash = mv
+        # This is the atomically-priced mid (see _mark_structure), never a
+        # blend of one leg's live tick and another leg's stale entry price —
+        # that combination is not a fill anyone could have gotten.
+        close_cash = mark["mv"]
         # Both sides of the commission belong to the trade. Charging only the
         # closing leg overstates every result by the opening fee.
         total_comm = commission + float(row.get("open_commission") or 0.0)
@@ -589,15 +676,23 @@ class OptionsBook:
                 actions.append(self.settle_expiration(row["id"]))
                 continue
 
-            mv = self.market_value(legs)
-            pnl = float(row.get("open_cash") or 0.0) + mv
             target = row.get("profit_target_pct")
             max_profit = row.get("max_profit")
             if target and max_profit and float(max_profit) > 0:
-                if pnl >= float(target) / 100.0 * float(max_profit):
-                    actions.append(self.close_structure(
-                        row["id"], f"profit_target_{float(target):g}pct"))
-                    continue
+                mark = self._mark_structure(row)
+                # A suspect mark means at least one leg had no live two-sided
+                # quote this poll — evaluating the profit target against it
+                # risks a spurious auto-close of a healthy structure (or,
+                # symmetrically, silently blocking a legitimate one). Skip
+                # this cycle rather than act on a price the chain never gave.
+                if mark["quality"] == "live":
+                    # The worse of the two bid/ask-aware fills, because that
+                    # is the number a real close cannot beat.
+                    pnl = float(row.get("open_cash") or 0.0) + mark["worst_mv"]
+                    if pnl >= float(target) / 100.0 * float(max_profit):
+                        actions.append(self.close_structure(
+                            row["id"], f"profit_target_{float(target):g}pct"))
+                        continue
             dte_exit = row.get("dte_exit")
             if dte_exit is not None and dte <= int(dte_exit):
                 # Gamma risk rises sharply into the last weeks; the standard
