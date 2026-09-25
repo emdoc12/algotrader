@@ -9,6 +9,42 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.53.1] — 2026-09-25
+
+### Fixed — an options-only desk's 50%/DTE auto-close could sit for a full 15-min cycle without ever being checked (#49)
+META 705/695 bull put x1 (desk Kimi, 2026-09-24): the printed mark crossed
+well past the 50% take-profit trigger (CTC $47.5 vs $90, 73.6% of max
+captured), but the engine's `profit_target` auto-close still hadn't fired
+minutes later — the trader banked it manually at +$164.90. Earlier the same
+week the engine fired on its own for other desks (META 09-22, AMD/TSLA
+09-21), so the behavior was inconsistent rather than always-broken.
+
+Root cause: `Competition._stop_poll` — the every-`STOP_POLL_SEC` (~2 min)
+between-cycle check that calls `manage_positions` (and, through it,
+`OptionsBook.manage`, which owns the profit-target/DTE-exit close) — built
+its `held` set from the SHARE book only (`broker.positions()`) and returned
+immediately, for every team, whenever that set was empty:
+
+    if not held:
+        return
+
+Options don't price off `held`/`qmap` at all — they read the live chain
+directly (`OptionsBook._leg_quote`). But because `manage_positions` (and
+`options.manage()` inside it) lived below that early return, a stop-poll
+where no team happened to be holding a share or futures position skipped
+options management entirely — silently, for every desk, whether or not
+their options structure had already blown through its trigger. Whether the
+bug bit on a given poll depended only on whether some other team's unrelated
+stock trade happened to be open at that moment, which is exactly the
+"sometimes it fires, sometimes it doesn't" pattern reported.
+
+Fixed by decoupling the two: the share-book quote/ADX fetch still only runs
+when `held` is non-empty (no reason to hit the quote API for nothing), but
+`manage_positions` — and with it `options.manage()` — now runs every
+stop-poll regardless. An options-only structure is now re-evaluated against
+its live mark every ~2 minutes like everything else, so a poll that prints
+a past-trigger mark is also the poll that closes it.
+
 ## [6.53.0] — 2026-09-24
 
 ### Fixed — a held option spread's mark could blend one leg's live quote with the other leg's price from weeks earlier (#48)

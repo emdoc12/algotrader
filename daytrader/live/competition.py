@@ -1212,24 +1212,31 @@ class Competition:
                         decay_syms.add(p["symbol"])
             except Exception:  # noqa: BLE001
                 pass
-        if not held:
-            return
-        from daytrader.data import quotes as _quotes
-        qmap = _quotes.get_quotes(list(held))
-        if not qmap:
-            return
-        # ADX is only needed for positions that actually opted into a decay
-        # exit, so the common case stays a quotes-only poll.
+        # NOTE: `held`/`qmap` below are for the SHARE book only. Options price
+        # themselves off the live chain (OptionsBook._leg_quote), not qmap, so
+        # returning early here when no team holds a share position used to skip
+        # manage_positions — and with it options.manage() — entirely. That let
+        # an options structure sit for up to a full 15-min trade cycle past its
+        # 50%/DTE trigger on a day nobody held stock, instead of closing on the
+        # very poll that first prints a past-trigger mark (dev request #49).
+        # So manage_positions always runs below; only the quote/ADX fetch is
+        # skipped when there is nothing in the share book to price.
+        qmap: dict = {}
         amap: dict = {}
-        if decay_syms:
-            from daytrader.data import loader as _loader
-            for sym in decay_syms:
-                try:
-                    df = _loader.load(sym, interval="5m", max_age_hours=0.1)
-                    if df is not None and len(df) >= 15:
-                        amap[sym] = _adx_info(df)
-                except Exception:  # noqa: BLE001
-                    continue
+        if held:
+            from daytrader.data import quotes as _quotes
+            qmap = _quotes.get_quotes(list(held)) or {}
+            # ADX is only needed for positions that actually opted into a decay
+            # exit, so the common case stays a quotes-only poll.
+            if decay_syms:
+                from daytrader.data import loader as _loader
+                for sym in decay_syms:
+                    try:
+                        df = _loader.load(sym, interval="5m", max_age_hours=0.1)
+                        if df is not None and len(df) >= 15:
+                            amap[sym] = _adx_info(df)
+                    except Exception:  # noqa: BLE001
+                        continue
         for t in self.teams:
             try:
                 t.broker.set_cycle_quotes(qmap)
