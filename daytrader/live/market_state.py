@@ -899,7 +899,11 @@ def with_account(market_snap: dict, broker) -> dict:
                 "Until then, do not open anything you would not be content to close by "
                 "the deadline: an option structure expiring AFTER it has to be bought "
                 "back early, at whatever that costs. The final day is closing-only. "
-                "Relegation no longer applies — the record ends for everyone at once.")}
+                "Relegation no longer applies — the record ends for everyone at once. "
+                "At the close that day a WINNER is declared on your standing block's "
+                "risk-adjusted score (annualized return / max drawdown over the final "
+                "90 days, minimum 20 closed trades in that window to be eligible); the "
+                "declaration also states whether the winner beat SPY and the 8% floor.")}
     except Exception:  # noqa: BLE001 - informational, never fatal
         pass
 
@@ -910,10 +914,10 @@ def with_account(market_snap: dict, broker) -> dict:
     try:
         from daytrader.live import standing as _standing
         from daytrader.live.competition import (
-            team_names as _tn, team_db_path as _tdp, spy_benchmark as _bench)
-        _b = _bench()
-        _all = _standing.evaluate(_tn(), _tdp,
-                                  (_b or {}).get("return_pct"))
+            final_field as _ff, team_db_path as _tdp, spy_window_return as _spyw)
+        # Active desks only, against SPY over the SAME trailing window — see
+        # spy_window_return for why the since-inception figure was wrong here.
+        _all = _standing.evaluate(_ff(), _tdp, _spyw(_standing.WINDOW_DAYS))
         _me = broker.db.path.split("team_")[-1].rsplit(".db", 1)[0]
         _mine = next((r for r in _all["ranked"] + _all["inactive"]
                       if r["team"] == _me), None)
@@ -934,9 +938,10 @@ def with_account(market_snap: dict, broker) -> dict:
             if out.get("wind_down"):
                 out["standing"]["rule"] = (
                     "Relegation is SUSPENDED: the remaining desks run to "
-                    f"{out['wind_down']['date']} and are judged together on the "
-                    "mandate. The ranking below is the risk-adjusted score that "
-                    "judgement uses.")
+                    f"{out['wind_down']['date']} and the WINNER is declared at the "
+                    "close from exactly this ranking — risk-adjusted score over the "
+                    "trailing window, minimum trades to be eligible. What you see "
+                    "here is the live scoreboard.")
                 out["standing"]["you"] = {**out["standing"]["you"], "at_risk": False}
     except Exception:  # noqa: BLE001 - standing is informational, never fatal
         pass

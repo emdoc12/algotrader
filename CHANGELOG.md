@@ -9,6 +9,50 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.56.0] — 2026-09-27
+
+### Added — the final three trade to 31 December, and a winner is declared at the close
+The owner kept GLM, Kimi and Qwen on to the end of the year and will
+officially declare a winner then. `WIND_DOWN_DATE` moves to Thursday 31
+December; the shutdown mechanics are unchanged (close by 15:30 ET, closing-only
+final day, automatic settlement, zero model calls afterwards).
+
+The winner is chosen by `_declare_winner()` inside the shutdown, AFTER every
+book is settled so final equity counts, on a rule fixed and announced now so
+the result is a measurement rather than a judgement made after seeing the
+numbers: the highest risk-adjusted score (annualized return divided by max
+drawdown over the final 90 days) among desks with at least 20 closed trades in
+that window. The declaration also states plainly whether the winner cleared
+the mandate — beat SPY and 8% annualized — since winning a field of three is
+not the same as beating the index. It is written once to
+`competition_result.json`; a restart after the close re-reads it and never
+re-judges. The verdict is journaled to each desk, pushed to Discord, and the
+leaderboard shows the winner in gold with a trophy instead of struck through
+with the rest.
+
+Rehearsed end to end: a steady desk (32% annualized, 0.5% drawdown) beats one
+with a larger raw return earned through a 7.6% crater (46%, score 6.05 against
+32.23); an 8-trade desk is listed as ineligible; a retired desk with a better
+curve is never considered; and a second declaration changes nothing.
+
+### Fixed — the standing block compared each desk's 90-day return to SPY since June
+"Beats SPY" in the standing block — and so in the winner's mandate check —
+compared a desk's trailing-90-day return against `spy_benchmark()`, which
+measures SPY from the competition's FIRST day. Two different windows, so
+whichever way the tape moved in between decided the answer (the like-for-like
+figure in testing was SPY +4.10% over 90 days, against +1.25% since-inception
+at the time that number was introduced). The block now uses
+`spy_window_return()` over the same window. It also ranked all seven desks,
+retired ones included; it now ranks only the active field, so a retired
+desk's frozen curve can neither sit above a live one nor be named winner.
+
+### Changed — the final three are told
+A year-end announcement SUPERSEDES the 30 September and 30 October notices
+(replacing the latter in the list so no desk receives a stale date): trade to
+31 December, the exact winner rule, that the standing block is the live
+scoreboard, that under 20 trades is ineligible rather than safe, and that
+options expiring after 31 December must be bought back before then.
+
 ## [6.55.0] — 2026-09-27
 
 ### Changed — the final three: GLM, Kimi and Qwen trade on to 30 October

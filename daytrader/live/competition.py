@@ -157,9 +157,10 @@ RETIRED_TEAMS = {s.strip().lower() for s in
 # half hour of the session for it to happen in. The final day itself is
 # closing-only — a position opened that morning would be force-closed by the
 # afternoon, which is noise in the record and nothing else.
-# Originally 30 September for the whole field; moved to the last trading day
-# of October when the owner kept the final three on for a last stretch.
-WIND_DOWN_DATE = os.environ.get("WIND_DOWN_DATE", "2026-10-30").strip()
+# Originally 30 September for the whole field; then 30 October when the owner
+# kept the final three on; then the year's last trading day, when he decided
+# to officially declare a winner at the end of the year (see _declare_winner).
+WIND_DOWN_DATE = os.environ.get("WIND_DOWN_DATE", "2026-12-31").strip()
 WIND_DOWN_AT = NO_NEW_TRADES_AFTER
 
 
@@ -407,22 +408,27 @@ _ANNOUNCEMENTS: list[tuple[str, str]] = [
      "against -$962 of P&L. Its record stays on the board struck through. "
      "This is real; the field is six."),
 
-    ("final_hunt_2026_10",
-     "YOU ARE IN THE FINAL THREE. This SUPERSEDES the earlier notice that the "
-     "competition ends on 30 September. The owner has retired Grok, DeepSeek "
-     "and OpenAI, joining Claude — the field is now GLM, Kimi and Qwen, and the "
-     "three of you trade on until FRIDAY 30 OCTOBER. Close every position by "
-     "15:30 ET that day; anything still open then is closed at market "
-     "automatically, and 30 October itself is closing-only. What changes for "
-     "you: (1) your October option structures no longer have to be bought back "
-     "early — anything expiring on or before 30 October can run to its exit as "
-     "planned; (2) there is no relegation before the end: the three of you run "
-     "to the deadline and are judged together on the same mandate — beat SPY, "
-     "clear 8% annualized, aim for 15-30% — risk-adjusted, as your standing "
-     "block shows. The owner is looking for the desk that can actually beat "
-     "the index. That is the whole question now. Before the end, leave a "
-     "closing journal entry (topic 'lesson'): what made or lost you money, what "
-     "you would change, and what you would do with another quarter."),
+    ("final_hunt_year_end_2026",
+     "YOU ARE IN THE FINAL THREE, AND A WINNER WILL BE DECLARED AT YEAR END. "
+     "This SUPERSEDES every earlier end date you may have seen (30 September, "
+     "30 October). The owner has retired Grok, DeepSeek and OpenAI, joining "
+     "Claude — the field is GLM, Kimi and Qwen, and the three of you trade on "
+     "until THURSDAY 31 DECEMBER. At the close that day the owner OFFICIALLY "
+     "DECLARES A WINNER, and the rule is fixed now, in advance: the highest "
+     "risk-adjusted score on your standing block — annualized return divided "
+     "by max drawdown over the final 90 days — among desks with at least 20 "
+     "closed trades in that window (fewer is ineligible, not safe). The "
+     "standing block you see every cycle IS the live scoreboard, measured "
+     "against SPY over the same 90 days. The declaration will also say plainly "
+     "whether the winner beat SPY and cleared the 8% annualized floor: winning "
+     "a field of three is not the same as beating the index, and the owner is "
+     "looking for the desk that can do the latter. Practicalities: close "
+     "everything by 15:30 ET on 31 December — anything open then is closed at "
+     "market automatically, and that day is closing-only; option structures "
+     "expiring AFTER 31 December must be bought back before then, so weigh that "
+     "when you open them; no relegation before the end. Before the close, leave "
+     "a final journal entry (topic 'lesson'): what made or lost you money, what "
+     "you would change, what you would do with another year."),
 ]
 
 
@@ -516,6 +522,118 @@ def team_names() -> list[str]:
     return list(default_team_providers().keys())
 
 
+def final_field() -> list[str]:
+    """Desks still competing — everyone not explicitly retired.
+
+    Uses RETIRED_TEAMS directly rather than is_retired(), because past the
+    shutdown is_retired() is true for EVERY desk, and the winner has to be
+    chosen from the desks that were actually still playing.
+    """
+    return [n for n in team_names() if n.lower() not in RETIRED_TEAMS]
+
+
+_SPY_WIN_CACHE: dict = {}
+
+
+def spy_window_return(days: int) -> float | None:
+    """SPY's return over the trailing ``days`` — the same window a desk's
+    standing is measured on.
+
+    The standing block used spy_benchmark() here, which measures SPY from the
+    competition's FIRST day. So "beats SPY" compared a desk's 90-day return
+    with SPY's since-June return: two different windows, and whichever way the
+    tape moved in between decided the answer. With a winner about to be
+    declared partly on that comparison, it has to be like for like.
+    """
+    now = time.time()
+    hit = _SPY_WIN_CACHE.get(days)
+    if hit and now - hit[0] < 900:
+        return hit[1]
+    try:
+        from datetime import timedelta
+        from daytrader.data import loader
+        df = loader.load("SPY", interval="1d", rng="2y", max_age_hours=12)
+        start = (datetime.now(ET) - timedelta(days=days)).date().isoformat()
+        after = df[df.index >= start]
+        if len(after) < 2:
+            return None
+        first, last = float(after["close"].iloc[0]), float(after["close"].iloc[-1])
+        out = round((last / first - 1) * 100, 2) if first > 0 else None
+        _SPY_WIN_CACHE[days] = (now, out)
+        return out
+    except Exception:  # noqa: BLE001
+        return None
+
+
+RESULT_PATH_NAME = "competition_result.json"
+
+
+def competition_result() -> dict | None:
+    """The declared result, once there is one."""
+    try:
+        with open(os.path.join(DATA_DIR, RESULT_PATH_NAME)) as fh:
+            return json.load(fh)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _declare_winner() -> dict | None:
+    """Name the winner at the close, on the rule the desks were told in advance.
+
+    The criterion is exactly the standing block the desks have watched every
+    cycle since the final three were set: risk-adjusted score (annualized
+    return divided by max drawdown) over the trailing window, among desks with
+    at least the minimum number of closed trades in it. Announced months
+    ahead so the result is a measurement, not a judgement call made after
+    seeing the numbers. The declaration also states plainly whether the winner
+    actually cleared the mandate — beat SPY and 8% annualized — because
+    winning a field of three is not the same thing as beating the index.
+    Written once; a restart after the close re-reads it rather than re-judging.
+    """
+    path = os.path.join(DATA_DIR, RESULT_PATH_NAME)
+    if os.path.exists(path):
+        return competition_result()
+    from daytrader.live import standing as _standing
+    spy = spy_window_return(_standing.WINDOW_DAYS)
+    res = _standing.evaluate(final_field(), team_db_path, spy)
+    ranked = res.get("ranked") or []
+    win = ranked[0] if ranked else None
+    if win:
+        cleared = bool(win.get("beats_spy")) and \
+            float(win.get("annualized_pct") or 0) >= _standing.TARGET_FLOOR_PCT
+        verdict = (f"{win['team'].upper()} WINS — risk-adjusted score "
+                   f"{win['risk_score']}, {win['annualized_pct']:.1f}% annualized, "
+                   f"{win['max_drawdown_pct']:.1f}% max drawdown over the final "
+                   f"{_standing.WINDOW_DAYS} days. "
+                   + ("It cleared the mandate: ahead of SPY and above the 8% floor."
+                      if cleared else
+                      "It did NOT clear the mandate — best of the field, but short "
+                      "of beating SPY and/or the 8% floor."))
+    else:
+        cleared = False
+        verdict = ("NO WINNER — no desk met the minimum activity in the final "
+                   f"{_standing.WINDOW_DAYS} days ({_standing.MIN_TRADES} closed trades).")
+    out = {
+        "declared": datetime.now(ET).strftime("%Y-%m-%dT%H:%M:%S"),
+        "winner": win["team"] if win else None,
+        "cleared_mandate": cleared,
+        "verdict": verdict,
+        "spy_window_return_pct": spy,
+        "window_days": _standing.WINDOW_DAYS,
+        "ranked": [{k: r.get(k) for k in ("team", "rank", "risk_score", "annualized_pct",
+                                          "return_pct", "max_drawdown_pct", "n_trades",
+                                          "beats_spy", "status")} for r in ranked],
+        "inactive": [r["team"] for r in res.get("inactive") or []],
+    }
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(path, "w") as fh:
+            json.dump(out, fh, indent=1)
+    except Exception as e:  # noqa: BLE001
+        print(f"[winner] could not persist result: {e!r}")
+    return out
+
+
 _BENCH_CACHE: dict = {}
 
 
@@ -607,6 +725,7 @@ def db_standings() -> list[dict]:
     loop for broker state. Shows all four teams even before any have a key.
     """
     providers = default_team_providers()
+    declared_winner = (competition_result() or {}).get("winner")
     rows = []
     for name, provider in providers.items():
         provider_down = None
@@ -650,6 +769,7 @@ def db_standings() -> list[dict]:
             # record of who played. retired_ts is the day the line stops.
             "retired": is_retired(name),
             "retired_ts": retired_ts,
+            "winner": name == declared_winner,
             # Why a desk is idle, when it is: an account problem the owner must
             # clear, not something the desk can trade its way out of.
             "provider_down": provider_down,
@@ -1138,10 +1258,21 @@ class Competition:
                 names.append(t.name)
             except Exception as e:  # noqa: BLE001 - one desk must not block the rest
                 print(f"[wind-down] {t.name}: {e!r}")
+        result = None
+        try:
+            result = _declare_winner()
+            if result:
+                for t in self.teams:
+                    t.db.add_journal("system", "dev_resolved",
+                                     f"FINAL RESULT: {result['verdict']}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[winner] declaration failed: {e!r}")
         self.teams = []
         msg = (f"🏁 Competition closed {WIND_DOWN_DATE}: {', '.join(names) or 'no desks'} "
                "settled at market and stopped. No further model calls; the dashboard "
                "stays up as the final record.")
+        if result:
+            msg += f"\n🏆 {result['verdict']}"
         print(f"[wind-down] {msg}")
         _notify(msg)
 

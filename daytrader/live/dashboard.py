@@ -822,6 +822,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
   tr.retired td{color:#6b6b74;text-decoration:line-through;
                 text-decoration-color:var(--red);text-decoration-thickness:1.5px}
   tr.bench td{border-top:2px solid #33333c;font-style:italic;color:var(--gray)}
+  tr.winner td{color:#e3b341;font-weight:600}
   canvas{width:100%;height:340px;display:block}
   /* pan-y (not none): a horizontal drag pans the chart, but a vertical swipe
      still scrolls the PAGE — a phone must not get stuck on the chart. */
@@ -1036,7 +1037,9 @@ async function loadOverview(){
     const tr = el("tr");
     const DOWN = {out_of_credit:"OUT OF CREDIT", bad_api_key:"KEY REJECTED",
                   no_access:"NO ACCESS", bad_model:"BAD MODEL"};
-    const nameCell = s.retired
+    const nameCell = s.winner
+      ? "\ud83c\udfc6 " + (LABELS[s.team]||s.team) + "  WINNER"
+      : s.retired
       ? (LABELS[s.team]||s.team) + "  RETIRED" + (s.retired_ts ? " " + s.retired_ts : "")
       : (!s.has_key
         ? (LABELS[s.team]||s.team) + "  (no key — idle)"
@@ -1045,7 +1048,10 @@ async function loadOverview(){
             : (LABELS[s.team] || s.team)));
     // A retired desk is struck through, not removed: its final numbers stay on
     // the board as the record of what it did, frozen the day it was cut.
-    if(s.retired) tr.className = "retired";
+    // At the close every desk is retired, the winner included — it keeps its
+    // line intact and gold instead of being struck through with the rest.
+    if(s.winner) tr.className = "winner";
+    else if(s.retired) tr.className = "retired";
     const cells = [
       el("td", null, String(s.rank)),
       el("td", {class: !s.has_key ? "gray" : (s.provider_down ? "red" : "")}, nameCell),
