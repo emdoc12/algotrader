@@ -135,10 +135,13 @@ def team_db_path(name: str) -> str:
 #
 # Claude is retired as of the first quarter's results: $1,074.65 of model spend
 # against −$961.89 of P&L, the worst return and 57% of the competition's entire
-# API bill. Clear this env var to bring a desk back; its history resumes where
-# it stopped rather than starting over.
+# API bill. Grok followed on 27 September, three days before the shutdown:
+# $167 of model spend in its last 30 days — its run-rate had roughly tripled
+# against its first quarter — for a book still losing to SPY. Clear this env
+# var to bring a desk back; its history resumes where it stopped rather than
+# starting over.
 RETIRED_TEAMS = {s.strip().lower() for s in
-                 os.environ.get("RETIRED_TEAMS", "claude").split(",") if s.strip()}
+                 os.environ.get("RETIRED_TEAMS", "claude,grok").split(",") if s.strip()}
 
 
 # THE END OF THE EXPERIMENT. The owner is shutting the competition down: the

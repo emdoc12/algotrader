@@ -9,6 +9,21 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.54.1] — 2026-09-27
+
+### Changed — Grok retired three days ahead of the shutdown
+$167 of model spend in its last 30 days — roughly triple the run-rate of its
+first quarter ($148 over ~90 days) — for a book still losing to SPY. Retired
+the same way Claude was: on the next container start its open positions are
+settled at market (`exit_reason='retired'`), a final equity point is recorded,
+and the desk runs no further cycles; its record stays on the leaderboard struck
+through. `RETIRED_TEAMS` now defaults to `claude,grok`. The field for the last
+three days is DeepSeek, GLM, Kimi, OpenAI and Qwen.
+
+Because this lands on a weekend, anything Grok holds in equities or futures
+settles at its last traded price (Friday's close), which is the same mark the
+dashboard already shows for it; crypto settles live.
+
 ## [6.54.0] — 2026-09-27
 
 ### Added — the competition closes on 30 September, and the spend stops by itself
