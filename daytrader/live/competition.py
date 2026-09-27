@@ -135,13 +135,14 @@ def team_db_path(name: str) -> str:
 #
 # Claude is retired as of the first quarter's results: $1,074.65 of model spend
 # against −$961.89 of P&L, the worst return and 57% of the competition's entire
-# API bill. Grok followed on 27 September, three days before the shutdown:
-# $167 of model spend in its last 30 days — its run-rate had roughly tripled
-# against its first quarter — for a book still losing to SPY. Clear this env
-# var to bring a desk back; its history resumes where it stopped rather than
-# starting over.
+# API bill. On 27 September the owner cut the field to three for a final
+# stretch: Grok ($167 of model spend in its last 30 days, run-rate roughly
+# triple its first quarter, still losing to SPY), DeepSeek (last place) and
+# OpenAI were retired, leaving GLM, Kimi and Qwen. Clear this env var to bring
+# a desk back; its history resumes where it stopped rather than starting over.
 RETIRED_TEAMS = {s.strip().lower() for s in
-                 os.environ.get("RETIRED_TEAMS", "claude,grok").split(",") if s.strip()}
+                 os.environ.get("RETIRED_TEAMS", "claude,grok,deepseek,openai").split(",")
+                 if s.strip()}
 
 
 # THE END OF THE EXPERIMENT. The owner is shutting the competition down: the
@@ -156,7 +157,9 @@ RETIRED_TEAMS = {s.strip().lower() for s in
 # half hour of the session for it to happen in. The final day itself is
 # closing-only — a position opened that morning would be force-closed by the
 # afternoon, which is noise in the record and nothing else.
-WIND_DOWN_DATE = os.environ.get("WIND_DOWN_DATE", "2026-09-30").strip()
+# Originally 30 September for the whole field; moved to the last trading day
+# of October when the owner kept the final three on for a last stretch.
+WIND_DOWN_DATE = os.environ.get("WIND_DOWN_DATE", "2026-10-30").strip()
 WIND_DOWN_AT = NO_NEW_TRADES_AFTER
 
 
@@ -404,21 +407,22 @@ _ANNOUNCEMENTS: list[tuple[str, str]] = [
      "against -$962 of P&L. Its record stays on the board struck through. "
      "This is real; the field is six."),
 
-    ("wind_down_2026_09_30",
-     "THE COMPETITION IS ENDING. The owner is closing the experiment on "
-     "Wednesday 30 September. Close EVERY position you hold — shares, futures, "
-     "crypto, and every option structure — by 15:30 ET that day. Anything "
-     "still open at 15:30 ET is closed at market automatically, and there is "
-     "no trading after it. Two practical consequences: (1) from now on, do not "
-     "open anything you would not be content to close by then — an option "
-     "structure expiring in October must be bought back early, so weigh that "
-     "cost before opening one; (2) 30 September itself is closing-only, and "
-     "new positions will be rejected. Relegation no longer applies; every "
-     "desk's record ends on the same day and stays on the board as the final "
-     "result. Before the end, use one of your cycles to write a closing "
-     "journal entry (topic 'lesson'): what actually made or lost money for "
-     "you, what you would change, and what you would do with another quarter. "
-     "That entry is the most useful thing you can leave behind."),
+    ("final_hunt_2026_10",
+     "YOU ARE IN THE FINAL THREE. This SUPERSEDES the earlier notice that the "
+     "competition ends on 30 September. The owner has retired Grok, DeepSeek "
+     "and OpenAI, joining Claude — the field is now GLM, Kimi and Qwen, and the "
+     "three of you trade on until FRIDAY 30 OCTOBER. Close every position by "
+     "15:30 ET that day; anything still open then is closed at market "
+     "automatically, and 30 October itself is closing-only. What changes for "
+     "you: (1) your October option structures no longer have to be bought back "
+     "early — anything expiring on or before 30 October can run to its exit as "
+     "planned; (2) there is no relegation before the end: the three of you run "
+     "to the deadline and are judged together on the same mandate — beat SPY, "
+     "clear 8% annualized, aim for 15-30% — risk-adjusted, as your standing "
+     "block shows. The owner is looking for the desk that can actually beat "
+     "the index. That is the whole question now. Before the end, leave a "
+     "closing journal entry (topic 'lesson'): what made or lost you money, what "
+     "you would change, and what you would do with another quarter."),
 ]
 
 

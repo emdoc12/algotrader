@@ -897,7 +897,7 @@ def with_account(market_snap: dict, broker) -> dict:
                 f"{_wd['flatten_at_et']} ET that day; anything still open then is closed "
                 "at market automatically, and there is no further trading after it. "
                 "Until then, do not open anything you would not be content to close by "
-                "the deadline: an option structure expiring in October has to be bought "
+                "the deadline: an option structure expiring AFTER it has to be bought "
                 "back early, at whatever that costs. The final day is closing-only. "
                 "Relegation no longer applies — the record ends for everyone at once.")}
     except Exception:  # noqa: BLE001 - informational, never fatal
@@ -928,6 +928,16 @@ def with_account(market_snap: dict, broker) -> dict:
                 "targets": _all["targets"],
                 "rule": _all["rule"],
             }
+            # With a shutdown date set the field runs to the end together, so
+            # the relegation rule is suspended — say so here rather than leave
+            # the desk reading 'at risk' next to a notice saying it isn't.
+            if out.get("wind_down"):
+                out["standing"]["rule"] = (
+                    "Relegation is SUSPENDED: the remaining desks run to "
+                    f"{out['wind_down']['date']} and are judged together on the "
+                    "mandate. The ranking below is the risk-adjusted score that "
+                    "judgement uses.")
+                out["standing"]["you"] = {**out["standing"]["you"], "at_risk": False}
     except Exception:  # noqa: BLE001 - standing is informational, never fatal
         pass
 

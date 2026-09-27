@@ -67,7 +67,8 @@ you are actually aiming at is 15-30% annualized. Options make that reachable in 
 conditions — defined-risk premium selling in particular — in a way share-trading rarely \
 does at this account size. Keep max drawdown under ~10-15% and aim for a profit factor \
 of 2:1+.
-- YOU ARE RANKED ON A ROLLING 90-DAY WINDOW, and LAST PLACE IS RELEGATED. Read the \
+- YOU ARE RANKED ON A ROLLING 90-DAY WINDOW, and LAST PLACE IS RELEGATED (suspended \
+while the snapshot carries a 'wind_down' block). Read the \
 'standing' block in your snapshot: it shows your annualized return, your drawdown, your \
 rank, the whole field, and whether you are the desk currently at risk. Two things about \
 that rule you should understand rather than fear. First, the window MOVES WITH YOU — \

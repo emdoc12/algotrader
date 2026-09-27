@@ -9,6 +9,37 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.55.0] — 2026-09-27
+
+### Changed — the final three: GLM, Kimi and Qwen trade on to 30 October
+The owner cut the field and kept the best for a last stretch. DeepSeek (last
+place) and OpenAI are retired alongside Grok and Claude — each settled at
+market on the next container start, records kept on the board struck through.
+`RETIRED_TEAMS` now defaults to `claude,grok,deepseek,openai`.
+
+GLM, Kimi and Qwen continue, and the shutdown moves from 30 September to
+**Friday 30 October**, the last trading day of the month (`WIND_DOWN_DATE`).
+Everything built for the shutdown carries over unchanged: close by 15:30 ET,
+closing-only final day, automatic settlement of whatever is left, zero model
+calls afterwards.
+
+What changes for the three, and what they are told:
+- A platform announcement SUPERSEDING the 30 September notice — "you are in the
+  final three" — replaces it in the announcement list, so a desk that had not
+  yet received the old notice never sees a stale date.
+- Their October option structures no longer need buying back early; the
+  snapshot's instruction now says structures expiring AFTER the deadline, not
+  "in October", which would have been wrong under the new date.
+- Relegation is suspended: the three run to the end and are judged together on
+  the mandate. The standing block now says so and clears the `at_risk` flag,
+  and the mission's relegation line defers to the snapshot — otherwise a desk
+  would read "at risk" next to a notice saying it isn't.
+
+Verified: active field is exactly GLM, Kimi and Qwen after a restart; 30
+September is now an ordinary day and 30 October is closing-only with the
+flatten at 15:30; GLM receives the final-three notice and not the stale one;
+and with real window history the standing block reports relegation suspended.
+
 ## [6.54.1] — 2026-09-27
 
 ### Changed — Grok retired three days ahead of the shutdown
