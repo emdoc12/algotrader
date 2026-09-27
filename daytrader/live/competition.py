@@ -141,8 +141,96 @@ RETIRED_TEAMS = {s.strip().lower() for s in
                  os.environ.get("RETIRED_TEAMS", "claude").split(",") if s.strip()}
 
 
+# THE END OF THE EXPERIMENT. The owner is shutting the competition down: the
+# desks close their own books by the deadline, anything left is closed at
+# market by the loop itself, and from then on no desk runs another cycle — so
+# the model spend stops without anyone having to remember to stop it. The
+# dashboard and every desk's record stay up as the final result.
+#
+# The flatten fires at 15:30 ET, not the 15:50 end-of-day flatten: the loop
+# can sleep up to a full cycle interval, and a flatten that lands after the
+# 16:00 bell closes options against stale marks. 15:30 leaves the whole last
+# half hour of the session for it to happen in. The final day itself is
+# closing-only — a position opened that morning would be force-closed by the
+# afternoon, which is noise in the record and nothing else.
+WIND_DOWN_DATE = os.environ.get("WIND_DOWN_DATE", "2026-09-30").strip()
+WIND_DOWN_AT = NO_NEW_TRADES_AFTER
+
+
+def wind_down_status(now=None) -> dict | None:
+    """Where we are relative to the shutdown. None when no shutdown is set."""
+    if not WIND_DOWN_DATE:
+        return None
+    try:
+        from datetime import date as _date
+        d = _date.fromisoformat(WIND_DOWN_DATE)
+    except ValueError:
+        return None
+    now = now or datetime.now(ET)
+    return {
+        "date": WIND_DOWN_DATE,
+        "flatten_at_et": WIND_DOWN_AT.strftime("%H:%M"),
+        "days_left": (d - now.date()).days,
+        "closing_only": now.date() >= d,
+        "passed": now.date() > d or (now.date() == d and now.time() >= WIND_DOWN_AT),
+    }
+
+
+def wind_down_passed(now=None) -> bool:
+    s = wind_down_status(now)
+    return bool(s and s["passed"])
+
+
 def is_retired(name: str) -> bool:
-    return str(name or "").lower() in RETIRED_TEAMS
+    # Past the shutdown every desk counts as retired, which is what keeps a
+    # restart — or _sync_teams noticing a key — from quietly bringing a desk
+    # back to life and resuming the bill.
+    return str(name or "").lower() in RETIRED_TEAMS or wind_down_passed()
+
+
+def _settle_book(name: str, db, broker, reason: str = "retired") -> None:
+    """Close everything the desk holds at market, record the final point, and
+    stamp the record closed. Shared by retirement and the shutdown.
+
+    Every close is attempted individually: one symbol whose quote cannot be
+    fetched must not leave the rest of the book open.
+    """
+    if not db.kv_get("retired_ts"):
+        db.kv_set("retired_ts", _today_et())
+    closed, failed = [], []
+    try:
+        for sym in [p["symbol"] for p in broker.positions()]:
+            try:
+                res = broker.close(sym, reason=reason)
+                closed.append(f"{sym} ({res.get('pnl', 0):+.2f})"
+                              if res.get("ok") else f"{sym} (refused)")
+            except Exception as e:  # noqa: BLE001
+                failed.append(f"{sym}: {e!r}"[:120])
+        for opt in broker.options.positions():
+            try:
+                broker.options.close_structure(int(opt["id"]), reason=reason)
+                closed.append(f"option #{opt['id']}")
+            except Exception as e:  # noqa: BLE001
+                failed.append(f"option #{opt.get('id')}: {e!r}"[:120])
+        # Final snapshot, so the equity curve's last point is the settled book
+        # rather than the last mid-cycle mark.
+        db.record_equity(broker.cash(), broker.equity(),
+                         len(broker.positions()), broker.drawdown_pct())
+    except Exception as e:  # noqa: BLE001
+        failed.append(f"settle failed: {e!r}"[:160])
+    detail = f"{name} {reason} — trading stopped, record preserved"
+    if closed:
+        detail += f"; settled {len(closed)}: {', '.join(closed)[:300]}"
+    if failed:
+        detail += f"; COULD NOT SETTLE: {'; '.join(failed)[:300]}"
+    db.kv_set("retired_settled_ts", _today_et())
+    db.log_agent("system", reason, detail)
+    print(f"[{reason}] {detail}")
+    if failed:
+        # Left open despite closing down is worth an alert: it is the one case
+        # where the frozen record is not actually final.
+        _notify(f"⚠️ {name} closed down but could not settle everything: "
+                f"{'; '.join(failed)[:400]}")
 
 
 def _mark_retired(name: str) -> None:
@@ -169,45 +257,13 @@ def _mark_retired(name: str) -> None:
     try:
         db = LiveDB(team_db_path(name))
         try:
-            if not db.kv_get("retired_ts"):
-                db.kv_set("retired_ts", _today_et())
             if db.kv_get("retired_settled_ts"):
+                if not db.kv_get("retired_ts"):
+                    db.kv_set("retired_ts", _today_et())
                 return
-            closed, failed = [], []
-            try:
-                broker = PaperBroker(db, starting_equity=START_CASH)
-                for sym in [p["symbol"] for p in broker.positions()]:
-                    try:
-                        res = broker.close(sym, reason="retired")
-                        closed.append(f"{sym} ({res.get('pnl', 0):+.2f})"
-                                      if res.get("ok") else f"{sym} (refused)")
-                    except Exception as e:  # noqa: BLE001
-                        failed.append(f"{sym}: {e!r}"[:120])
-                for opt in broker.options.positions():
-                    try:
-                        broker.options.close_structure(int(opt["id"]), reason="retired")
-                        closed.append(f"option #{opt['id']}")
-                    except Exception as e:  # noqa: BLE001
-                        failed.append(f"option #{opt.get('id')}: {e!r}"[:120])
-                # Final snapshot, so the equity curve's last point is the
-                # settled book rather than the last mid-cycle mark.
-                db.record_equity(broker.cash(), broker.equity(),
-                                 len(broker.positions()), broker.drawdown_pct())
-            except Exception as e:  # noqa: BLE001
-                failed.append(f"settle failed: {e!r}"[:160])
-            detail = f"{name} retired — trading stopped, record preserved"
-            if closed:
-                detail += f"; settled {len(closed)}: {', '.join(closed)[:300]}"
-            if failed:
-                detail += f"; COULD NOT SETTLE: {'; '.join(failed)[:300]}"
-            db.kv_set("retired_settled_ts", _today_et())
-            db.log_agent("system", "retired", detail)
-            print(f"[retire] {detail}")
-            if failed:
-                # Left open despite retiring is worth an alert: it is the one
-                # case where the frozen record is not actually final.
-                _notify(f"⚠️ {name} retired but could not settle everything: "
-                        f"{'; '.join(failed)[:400]}")
+            broker = PaperBroker(db, starting_equity=START_CASH)
+            _settle_book(name, db, broker,
+                         reason="closed_down" if wind_down_passed() else "retired")
         finally:
             db.close()
     except Exception:  # noqa: BLE001 - never block startup on bookkeeping
@@ -344,6 +400,22 @@ _ANNOUNCEMENTS: list[tuple[str, str]] = [
      "middle. (3) The Claude desk has been retired — $1,075 of model spend "
      "against -$962 of P&L. Its record stays on the board struck through. "
      "This is real; the field is six."),
+
+    ("wind_down_2026_09_30",
+     "THE COMPETITION IS ENDING. The owner is closing the experiment on "
+     "Wednesday 30 September. Close EVERY position you hold — shares, futures, "
+     "crypto, and every option structure — by 15:30 ET that day. Anything "
+     "still open at 15:30 ET is closed at market automatically, and there is "
+     "no trading after it. Two practical consequences: (1) from now on, do not "
+     "open anything you would not be content to close by then — an option "
+     "structure expiring in October must be bought back early, so weigh that "
+     "cost before opening one; (2) 30 September itself is closing-only, and "
+     "new positions will be rejected. Relegation no longer applies; every "
+     "desk's record ends on the same day and stays on the board as the final "
+     "result. Before the end, use one of your cycles to write a closing "
+     "journal entry (topic 'lesson'): what actually made or lost money for "
+     "you, what you would change, and what you would do with another quarter. "
+     "That entry is the most useful thing you can leave behind."),
 ]
 
 
@@ -1041,10 +1113,30 @@ class Competition:
             chunk = min(STOP_POLL_SEC, total - slept)
             time.sleep(chunk)
             slept += chunk
+            if self.teams and wind_down_passed():
+                return
             try:
                 self._crypto_stop_poll()
             except Exception as e:  # noqa: BLE001
                 print(f"[competition] crypto stop-poll error: {e!r}")
+
+    def _wind_down(self):
+        """The experiment's last act: settle every desk and stop trading."""
+        names = []
+        for t in list(self.teams):
+            try:
+                if not t.db.kv_get("retired_settled_ts"):
+                    t.broker.set_cycle_quotes(None)
+                    _settle_book(t.name, t.db, t.broker, reason="closed_down")
+                names.append(t.name)
+            except Exception as e:  # noqa: BLE001 - one desk must not block the rest
+                print(f"[wind-down] {t.name}: {e!r}")
+        self.teams = []
+        msg = (f"🏁 Competition closed {WIND_DOWN_DATE}: {', '.join(names) or 'no desks'} "
+               "settled at market and stopped. No further model calls; the dashboard "
+               "stays up as the final record.")
+        print(f"[wind-down] {msg}")
+        _notify(msg)
 
     # -- the always-on loop ---------------------------------------------
     def run_forever(self):
@@ -1066,6 +1158,13 @@ class Competition:
                 except Exception:  # noqa: BLE001 - never let GitHub break trading
                     pass
                 now = datetime.now(ET)
+                # Past the shutdown: settle whatever is still open, drop every
+                # desk, and idle. No cycles means no model calls — the spend
+                # stops here without anyone having to remember to stop it.
+                if wind_down_passed(now):
+                    if self.teams:
+                        self._wind_down()
+                    time.sleep(300); continue
                 if self._day != now.date():
                     self._new_day(now)
                 # Weekends and market holidays: idle. (Per-team planned/reviewed
@@ -1253,6 +1352,8 @@ class Competition:
             chunk = min(STOP_POLL_SEC, total - slept)
             time.sleep(chunk)
             slept += chunk
+            if self.teams and wind_down_passed():
+                return
             if slept < total:
                 try:
                     self._stop_poll()

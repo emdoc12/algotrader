@@ -885,6 +885,24 @@ def with_account(market_snap: dict, broker) -> dict:
     except Exception as e:  # noqa: BLE001
         out["risk_state_error"] = str(e)
 
+    # The shutdown, stated every cycle — including the off-hours crypto
+    # cycles — so no desk plans a position that outlives the competition.
+    try:
+        from daytrader.live.competition import wind_down_status
+        _wd = wind_down_status()
+        if _wd and not _wd["passed"]:
+            out["wind_down"] = {**_wd, "instruction": (
+                f"THE COMPETITION ENDS {_wd['date']}. Close EVERY position — shares, "
+                "futures, crypto and every option structure — by "
+                f"{_wd['flatten_at_et']} ET that day; anything still open then is closed "
+                "at market automatically, and there is no further trading after it. "
+                "Until then, do not open anything you would not be content to close by "
+                "the deadline: an option structure expiring in October has to be bought "
+                "back early, at whatever that costs. The final day is closing-only. "
+                "Relegation no longer applies — the record ends for everyone at once.")}
+    except Exception:  # noqa: BLE001 - informational, never fatal
+        pass
+
     # Where this desk stands against the mandate, on the rolling window. The
     # desks are TOLD the survival rule, deliberately: it only creates pressure
     # to trade well, never pressure to gamble, because the window has no

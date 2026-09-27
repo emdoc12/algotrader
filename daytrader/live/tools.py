@@ -145,12 +145,35 @@ def _is_future(symbol) -> bool:
         return False
 
 
+def _wind_down_block() -> str | None:
+    """Reject NEW positions on the competition's final day.
+
+    Checked before the crypto early-return on purpose: crypto is open around
+    the clock, and a closing-only day that let crypto through would just move
+    the opening to the one market still taking orders.
+    """
+    try:
+        from daytrader.live.competition import wind_down_status
+        s = wind_down_status()
+    except Exception:  # noqa: BLE001
+        return None
+    if not s or not s["closing_only"]:
+        return None
+    return (f"The competition ENDS today ({s['date']}) — this is a closing-only day, "
+            "so no new positions of any kind. Close what you still hold: shares, "
+            "futures, crypto and every option structure. Anything still open at "
+            f"{s['flatten_at_et']} ET is closed at market automatically.")
+
+
 def _session_gate(symbol) -> str | None:
     """Reject an OPEN whose market is closed right now.
 
     Three schedules, not one: crypto trades 24/7, futures ~23 hours a day
     Sunday evening to Friday evening, and equities/options keep US cash hours.
     """
+    wd = _wind_down_block()
+    if wd:
+        return wd
     s = str(symbol or "").upper().strip()
     if s in _crypto_syms():
         return None
@@ -470,6 +493,9 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
     def place_option_trade(inp: dict) -> dict:
         """Open a multi-leg options position (defined risk only)."""
         inp = inp or {}
+        wd = _wind_down_block()
+        if wd:
+            return {"ok": False, "error_code": "wind_down", "reason": wd}
         closed = equity_session_closed()
         if closed:
             return {"ok": False, "error_code": "market_closed",

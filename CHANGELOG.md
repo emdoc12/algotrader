@@ -9,6 +9,41 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.54.0] — 2026-09-27
+
+### Added — the competition closes on 30 September, and the spend stops by itself
+The owner is ending the experiment. Rather than rely on anyone remembering to
+switch it off, the shutdown is built into the loop:
+
+- **The desks are told, three ways.** A platform announcement, a `wind_down`
+  block in every snapshot (off-hours crypto cycles included), and the deadline
+  itself: close every position — shares, futures, crypto and every option
+  structure — by **15:30 ET on Wednesday 30 September**. They are also asked to
+  leave a closing journal entry on what actually made or lost money, which is
+  the most useful thing the experiment can leave behind.
+- **Until then, trade normally** — but with the explicit instruction not to open
+  anything they would not be content to close by the deadline, since an
+  October option structure has to be bought back early.
+- **30 September is closing-only.** New positions of any kind are rejected that
+  day, checked before crypto's 24/7 early-return so the last open market cannot
+  become the loophole.
+- **At 15:30 ET the loop settles whatever is left at market** through each
+  desk's own broker, books it with `exit_reason='closed_down'`, records a final
+  equity point, and drops every desk. 15:30 rather than the usual 15:50 flatten
+  because the loop can sleep a full cycle interval, and a flatten landing after
+  the bell would close options against stale marks; both sleeps now also wake
+  early for the deadline.
+- **After that, zero model calls.** Every desk reads as retired past the
+  deadline, so neither a restart nor a key appearing in Settings can bring one
+  back and quietly resume the bill. The dashboard stays up as the final record.
+
+`WIND_DOWN_DATE` controls it (clear it to cancel). Retirement's settlement was
+factored out into `_settle_book` so the shutdown and Claude's retirement share
+one path; Claude's already-settled record is untouched. Verified: the timeline
+(normal Monday, closing-only Wednesday morning, flatten at exactly 15:30),
+opens rejected on the final day across equities, futures and crypto, two desks
+settled at market and dropped, and every desk reading retired afterwards.
+
 ## [6.53.1] — 2026-09-25
 
 ### Fixed — an options-only desk's 50%/DTE auto-close could sit for a full 15-min cycle without ever being checked (#49)
