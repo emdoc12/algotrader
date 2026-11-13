@@ -215,7 +215,7 @@ def _settle_book(name: str, db, broker, reason: str = "retired") -> None:
                 failed.append(f"{sym}: {e!r}"[:120])
         for opt in broker.options.positions():
             try:
-                broker.options.close_structure(int(opt["id"]), reason=reason)
+                broker.options.close_structure(int(opt["id"]), reason=reason, force=True)
                 closed.append(f"option #{opt['id']}")
             except Exception as e:  # noqa: BLE001
                 failed.append(f"option #{opt.get('id')}: {e!r}"[:120])

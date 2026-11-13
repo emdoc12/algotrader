@@ -572,6 +572,12 @@ class OptionsBook:
             pnl = open_cash + mark["mv"]
             max_profit = row.get("max_profit")
             pct = (100.0 * pnl / float(max_profit)) if max_profit else None
+            # The auto-close trigger reads the WORST-case close, not the mid
+            # above, so the two percentages differ by the bid/ask spread. A
+            # 53.5% mid print can sit under a 50% trigger on the worst-case
+            # basis and correctly not fire (dev request #50) — show both.
+            pct_close = (100.0 * (open_cash + mark["worst_mv"]) / float(max_profit)
+                         if max_profit else None)
             dte = min(l.contract.dte(today) for l in legs)
             out.append({
                 "id": row["id"], "underlying": row["underlying"],
@@ -583,6 +589,8 @@ class OptionsBook:
                 "cost_to_close": round(-mark["worst_mv"], 2),
                 "unrealized_pnl": round(pnl, 2),
                 "pct_of_max_profit": round(pct, 1) if pct is not None else None,
+                "pct_of_max_profit_at_worst_close": (
+                    round(pct_close, 1) if pct_close is not None else None),
                 "max_loss": row.get("max_loss"), "max_profit": max_profit,
                 "collateral": row.get("collateral"),
                 "legs": [f"{l.contract} x{l.qty:+g}" for l in legs],
@@ -596,12 +604,25 @@ class OptionsBook:
         return out
 
     # -- close -------------------------------------------------------------- #
-    def close_structure(self, pid: int, reason: str = "agent_close") -> dict:
+    def close_structure(self, pid: int, reason: str = "agent_close",
+                        force: bool = False) -> dict:
         row = self.db.get_option_position(pid)
         if row is None or row.get("status") != "open":
             return {"ok": False, "error_code": "no_such_position",
                     "reason": f"no OPEN option position #{pid}"}
         mark = self._mark_structure(row)
+        # A suspect mark is the last fully-live price, possibly hours old (or,
+        # never landed, a blend of live and entry prices). Closing FILLS at
+        # that number, so an agent close on it locks in a phantom P&L — LLY
+        # booked -$650 on a $465 credit this way (dev request #50). Refuse
+        # and let the agent retry on a live mark. ``force`` is for closes that
+        # must happen regardless (wind-down, retirement, DTE exit).
+        if mark["quality"] != "live" and not force:
+            return {"ok": False, "error_code": "suspect_mark",
+                    "reason": (f"#{pid} has no live two-sided quote on every leg right now "
+                               f"(last good mark: {mark.get('mark_ts') or 'never'}). Closing "
+                               "would fill at a stale price, so it was refused — retry next "
+                               "cycle, when the chain quotes both legs.")}
         legs = mark["legs"]
         commission = OPTION_COMMISSION * sum(abs(l.qty) for l in legs)
         open_cash = float(row.get("open_cash") or 0.0)
@@ -698,7 +719,8 @@ class OptionsBook:
                 # Gamma risk rises sharply into the last weeks; the standard
                 # management rule closes there rather than holding for the last
                 # few dollars of a credit.
-                actions.append(self.close_structure(row["id"], f"dte_exit_{int(dte_exit)}"))
+                actions.append(self.close_structure(
+                    row["id"], f"dte_exit_{int(dte_exit)}", force=True))
         return [a for a in actions if a]
 
     def settle_expiration(self, pid: int) -> dict:

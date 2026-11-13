@@ -527,7 +527,21 @@ def build_tools(broker, db) -> tuple[list[dict], dict]:
             pid = int(inp.get("id"))
         except (TypeError, ValueError):
             return {"ok": False, "error": "id required — see get_option_positions"}
-        return broker.options.close_structure(pid, reason=inp.get("reason", "agent_close"))
+        # Marks are frozen/garbage while US options are closed (an AMZN spread
+        # went +$22 -> -$80 overnight with no underlying move), and a close
+        # fills at the mark — so an agent close waits for the session.
+        closed = equity_session_closed()
+        if closed:
+            return {"ok": False, "error_code": "market_closed",
+                    "reason": (f"US options are CLOSED ({closed}) — marks are stale until "
+                               "the next regular session, and a close would fill at one. "
+                               "Close it next session.")}
+        # The agent's free text must not impersonate an engine reason: a loss
+        # filed as "profit_target" is indistinguishable from the real
+        # auto-close in the ledger (dev request #50).
+        why = str(inp.get("reason") or "").strip()[:80]
+        return broker.options.close_structure(
+            pid, reason=f"agent_close: {why}" if why else "agent_close")
 
     def get_option_positions(_inp: dict) -> dict:
         pos = broker.options.positions()

@@ -9,6 +9,40 @@ Format follows [Semantic Versioning](https://semver.org): MAJOR.MINOR.PATCH
 
 ---
 
+## [6.56.1] — 2026-11-13
+
+### Fixed — an agent close could fill an option spread at a stale mark, and its free-text reason was filed as the engine's (#50)
+AMZN 245/240P closed at -$80 and LLY 1380/1360P at -$650, both with
+`exit_reason="profit_target"`, in the same overnight cycle.
+
+Diagnosis: the engine's own auto-close writes `profit_target_<N>pct` and only
+on a LIVE mark, so neither close was the engine's. Both were the agent's
+`close_option_position`, whose `reason` text went straight into the ledger —
+an agent can file a loss as "profit_target". Worse, `close_structure` filled at
+whatever `_mark_structure` returned, including a SUSPECT mark (LLY: the last
+good mark, hours old, -$1,115 — the exact phantom v6.53.0 kept the auto-close
+away from, but the manual path had no such guard). AMZN moved +$22 to -$80
+with no underlying move because the close ran at 22:17 ET, when option marks
+are frozen/garbage; the open path already refused off-hours, the close didn't.
+
+The AMZN 53.5% print that did not auto-close is not a stop-poll miss:
+`pct_of_max_profit` is the MID, while the trigger uses the worst-case (ask on
+shorts, bid on longs) close, so it was under 50% on the basis that counts.
+
+Changed:
+- `close_structure` refuses (`suspect_mark`) unless every leg has a live
+  two-sided quote. Wind-down/retirement settlement and the DTE exit pass
+  `force=True` — those must happen regardless.
+- `close_option_position` refuses (`market_closed`) outside the US session.
+- Agent reasons are stored as `agent_close: <text>`, so they cannot pass for
+  an engine reason.
+- `get_option_positions` adds `pct_of_max_profit_at_worst_close`, the number
+  the 50% trigger actually compares.
+
+Not changed: the two realized losses stand; no trade is rewritten.
+
+---
+
 ## [6.56.0] — 2026-09-27
 
 ### Added — the final three trade to 31 December, and a winner is declared at the close
